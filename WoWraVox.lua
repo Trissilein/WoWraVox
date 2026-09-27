@@ -2513,24 +2513,34 @@ local function runTriggerSearch(expectedGeneration)
     local query = trim(triggerInputBox:GetText())
     if query == "" then searchPopup:Hide(); return end
     local ids, isIDList = parseSpellIDs(query)
+    local results
+    local emptyText = L("No matching local spells.")
     if isIDList and #ids > 0 then
-        searchPopup:Hide()
         triggerAddButton:SetEnabled(true)
+        if #ids > 1 then
+            searchPopup:Hide()
+            triggerStatus:SetText(L("Press Enter or Add to include these IDs."))
+            triggerStatus:SetTextColor(0.72, 0.78, 0.86)
+            return
+        end
+        results = searchLocalSpells(query)
+        local _, spellState = getSpellInfo(ids[1])
+        if #results == 0 and spellState == "pending" then
+            emptyText = L("Checking spell data…")
+        end
         triggerStatus:SetText(L("Press Enter or Add to include these IDs."))
         triggerStatus:SetTextColor(0.72, 0.78, 0.86)
-        return
-    end
-    if query:find(",", 1, true) or tonumber(query) then
+    elseif query:find(",", 1, true) or tonumber(query) then
         searchPopup:Hide()
         triggerAddButton:SetEnabled(false)
         triggerStatus:SetText(L("Invalid ID list"))
         triggerStatus:SetTextColor(1, 0.35, 0.25)
         return
+    else
+        triggerAddButton:SetEnabled(false)
+        if #query < 3 then searchPopup:Hide(); return end
+        results = searchLocalSpells(query)
     end
-    triggerAddButton:SetEnabled(false)
-    if #query < 3 then searchPopup:Hide(); return end
-
-    local results = searchLocalSpells(query)
     local visible = math.min(#results, #searchRows, 6)
     for index, row in ipairs(searchRows) do
         local result = results[index]
@@ -2544,10 +2554,14 @@ local function runTriggerSearch(expectedGeneration)
             row:Hide()
         end
     end
+    searchPopup.empty:SetText(emptyText)
     searchPopup.empty:SetShown(visible == 0)
     searchPopup:SetHeight(math.max(36, visible * 36 + 8))
     searchPopup:Show()
-    if visible > 0 then
+    if isIDList and #ids == 1 then
+        triggerStatus:SetText(L("Press Enter or Add to include these IDs."))
+        triggerStatus:SetTextColor(0.72, 0.78, 0.86)
+    elseif visible > 0 then
         triggerStatus:SetText(string.format(L("%d matches"), #results))
         triggerStatus:SetTextColor(0.72, 0.78, 0.86)
     else
@@ -2934,9 +2948,21 @@ triggerInputBox:SetScript("OnTextChanged", function(self)
         return
     end
     if valid and #ids > 0 then
-        searchPopup:Hide()
         triggerStatus:SetText(L("Press Enter or Add to include these IDs."))
         triggerStatus:SetTextColor(0.72, 0.78, 0.86)
+        if #ids == 1 then
+            searchPopup:Hide()
+            local ownerRule = selectedAura()
+            C_Timer.After(0.18, function()
+                if generation == searchGeneration and selectedAura() == ownerRule
+                    and triggerInputBox:HasFocus() and trim(triggerInputBox:GetText()) == query
+                    and optionsFrame:IsShown() then
+                    runTriggerSearch(generation)
+                end
+            end)
+        else
+            searchPopup:Hide()
+        end
         return
     end
     if tonumber(query) or query:find(",", 1, true) then
@@ -3945,6 +3971,10 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         if optionsFrame:IsShown() then
             refreshList()
             updateDetails()
+            if triggerInputBox and triggerInputBox:HasFocus()
+                and trim(triggerInputBox:GetText()):match("^%d+$") then
+                runTriggerSearch()
+            end
         end
     elseif event == "VOICE_CHAT_TTS_VOICES_UPDATE" then
         if optionsFrame:IsShown() then updateDetails() end
