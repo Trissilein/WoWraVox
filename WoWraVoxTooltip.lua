@@ -111,7 +111,13 @@ if hooksecurefunc and GameTooltip then
     end)
     hooksecurefunc(GameTooltip, "SetAction", function(tooltip, actionSlot)
         local ok, actionType, actionID = pcall(GetActionInfo, actionSlot)
-        if ok and actionType == "spell" then addSpellID(tooltip, actionID) end
+        if not ok then return end
+        if actionType == "spell" then
+            addSpellID(tooltip, actionID)
+        elseif actionType == "macro" and GetMacroSpell then
+            local macroOK, _, _, spellID = pcall(GetMacroSpell, actionID)
+            if macroOK then addSpellID(tooltip, spellID) end
+        end
     end)
     hooksecurefunc(GameTooltip, "SetItemByID", function(tooltip, itemID)
         if enabled() then decorateItem(tooltip, { id = itemID }) end
