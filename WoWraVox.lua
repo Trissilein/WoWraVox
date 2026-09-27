@@ -621,6 +621,7 @@ local function collectPlayerAuras(candidates)
 end
 
 local function collectSpellbook(candidates, needle, matchNumericID)
+    local numericID = tonumber(needle)
     if not (C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines
         and C_SpellBook.GetSpellBookSkillLineInfo and C_SpellBook.GetSpellBookItemType
         and C_SpellBook.GetSpellBookItemName
@@ -640,7 +641,8 @@ local function collectSpellbook(candidates, needle, matchNumericID)
                     local nameOK, name = pcall(C_SpellBook.GetSpellBookItemName, slot, Enum.SpellBookSpellBank.Player)
                     local nameMatches = nameOK and (not issecretvalue or not issecretvalue(name))
                         and type(name) == "string" and name:lower():find(needle, 1, true)
-                    local idMatches = matchNumericID and tonumber(needle) == spellID
+                    local idMatches = matchNumericID and numericID
+                        and (numericID == spellID or (#needle >= 3 and tostring(spellID):find(needle, 1, true) ~= nil))
                     if nameMatches or idMatches then
                         candidates[spellID] = candidates[spellID] or "Spellbook"
                     end
@@ -655,6 +657,7 @@ local function searchLocalSpells(query)
     if query == "" then return {} end
     local needle = query:lower()
     local numericID = tonumber(query)
+    local numericQuery = needle:match("^%d+$") ~= nil
     local candidates = {}
     for id, origin in pairs(observedSpellIDs) do candidates[id] = origin end
     for _, rule in ipairs(WoWraVoxDB.auras) do
@@ -671,11 +674,17 @@ local function searchLocalSpells(query)
     end
     local results = {}
     for id, origin in pairs(candidates) do
-        local info, status = getSpellInfo(id)
-        if status == "valid" and (id == numericID or info.name:lower():find(needle, 1, true)) then
-            local nameLower = info.name:lower()
-            local rank = nameLower == needle and 0 or (nameLower:sub(1, #needle) == needle and 1 or 2)
-            table.insert(results, { id = id, name = info.name, icon = info.iconID, origin = origin, rank = rank })
+        local idText = tostring(id)
+        local idMatches = numericQuery and (id == numericID
+            or (#needle >= 3 and idText:find(needle, 1, true) ~= nil))
+        if not numericQuery or idMatches then
+            local info, status = getSpellInfo(id)
+            if status == "valid" and (idMatches or (not numericQuery and info.name:lower():find(needle, 1, true))) then
+                local nameLower = info.name:lower()
+                local rank = numericQuery and (id == numericID and 0 or 1)
+                    or (nameLower == needle and 0 or (nameLower:sub(1, #needle) == needle and 1 or 2))
+                table.insert(results, { id = id, name = info.name, icon = info.iconID, origin = origin, rank = rank })
+            end
         end
     end
     table.sort(results, function(a, b)
@@ -690,16 +699,22 @@ local function searchSpellbookSkills(query)
     query = trim(query)
     if query == "" then return {} end
     local needle = query:lower()
+    local numericID = tonumber(query)
+    local numericQuery = needle:match("^%d+$") ~= nil
     local candidates = {}
     collectSpellbook(candidates, needle, true)
-    local numericID = tonumber(query)
     local results = {}
     for id in pairs(candidates) do
-        local info, status = getSpellInfo(id)
-        if status == "valid" and (id == numericID or info.name:lower():find(needle, 1, true)) then
-            local nameLower = info.name:lower()
-            local rank = nameLower == needle and 0 or (nameLower:sub(1, #needle) == needle and 1 or 2)
-            table.insert(results, { id = id, name = info.name, icon = info.iconID, origin = "Spellbook", rank = rank })
+        local idMatches = numericQuery and (id == numericID
+            or (#needle >= 3 and tostring(id):find(needle, 1, true) ~= nil))
+        if not numericQuery or idMatches then
+            local info, status = getSpellInfo(id)
+            if status == "valid" and (idMatches or (not numericQuery and info.name:lower():find(needle, 1, true))) then
+                local nameLower = info.name:lower()
+                local rank = numericQuery and (id == numericID and 0 or 1)
+                    or (nameLower == needle and 0 or (nameLower:sub(1, #needle) == needle and 1 or 2))
+                table.insert(results, { id = id, name = info.name, icon = info.iconID, origin = "Spellbook", rank = rank })
+            end
         end
     end
     table.sort(results, function(a, b)

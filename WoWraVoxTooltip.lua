@@ -110,13 +110,17 @@ if hooksecurefunc and GameTooltip then
         if ok and info then addSpellID(tooltip, field(info, "spellID")) end
     end)
     hooksecurefunc(GameTooltip, "SetAction", function(tooltip, actionSlot)
-        local ok, actionType, actionID = pcall(GetActionInfo, actionSlot)
+        local ok, actionType, actionID, subType = pcall(GetActionInfo, actionSlot)
         if not ok then return end
         if actionType == "spell" then
             addSpellID(tooltip, actionID)
-        elseif actionType == "macro" and GetMacroSpell then
-            local macroOK, _, _, spellID = pcall(GetMacroSpell, actionID)
-            if macroOK then addSpellID(tooltip, spellID) end
+        elseif actionType == "macro" then
+            if subType == "spell" then
+                addSpellID(tooltip, actionID)
+            elseif not subType and GetMacroSpell then
+                local macroOK, spellID, _, legacySpellID = pcall(GetMacroSpell, actionID)
+                if macroOK then addSpellID(tooltip, publicID(spellID) or legacySpellID) end
+            end
         end
     end)
     hooksecurefunc(GameTooltip, "SetItemByID", function(tooltip, itemID)
