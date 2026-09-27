@@ -2,6 +2,7 @@
 ## Title: WoWraVox
 ## Notes: Spoken and on-screen notifications for player auras, equipped items, and spell cooldowns.
 ## Version: 0.9.7
+## X-Wago-ID: BNBwma6x
 ## IconTexture: Interface\AddOns\WoWraVox\Assets\WoWraVoxIcon.tga
 ## SavedVariables: WoWraVoxDB, AuraVoxDB, AuraExpiryTTSDB
 Locales/enUS.lua

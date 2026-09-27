@@ -1,0 +1,59 @@
+name: Release WoWraVox
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without v prefix
+        required: true
+        default: 0.9.7
+      stability:
+        description: Wago release channel
+        type: choice
+        required: true
+        default: stable
+        options:
+          - stable
+          - beta
+          - alpha
+
+jobs:
+  wago:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: release
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "stability=${{ inputs.stability }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "stability=stable" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Package addon
+        shell: pwsh
+        run: ./tools/New-ReleaseArchive.ps1 -Version '${{ steps.release.outputs.version }}'
+      - name: Upload Wago release
+        env:
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+          STABILITY: ${{ steps.release.outputs.stability }}
+        shell: bash
+        run: |
+          metadata=$(jq -cn \
+            --arg label "$VERSION" \
+            --arg stability "$STABILITY" \
+            --arg changelog "$(cat CHANGELOG.md)" \
+            --arg patch "12.1.0" \
+            '{label: $label, stability: $stability, changelog: $changelog, supported_retail_patch: $patch}')
+          curl --fail --show-error --silent -X POST \
+            -F "metadata=$metadata" \
+            -F "file=@release/WoWraVox-$VERSION.zip" \
+            -H "authorization: Bearer $WAGO_API_TOKEN" \
+            -H "accept: application/json" \
+            "https://addons.wago.io/api/projects/BNBwma6x/version"
