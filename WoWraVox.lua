@@ -480,9 +480,9 @@ local function initializeDatabase()
 
     WoWraVoxDB.settings = type(WoWraVoxDB.settings) == "table" and WoWraVoxDB.settings or {}
     local settings = WoWraVoxDB.settings
-    settings.tooltipIDs = settings.tooltipIDs == true
+    settings.tooltipIDs = settings.tooltipIDs ~= false
     settings.showMinimap = settings.showMinimap ~= false
-    settings.showTitan = settings.showTitan ~= false
+    settings.showTitan = true
     local validFont = false
     for _, choice in ipairs(SCREEN_FONT_CHOICES) do
         if settings.screenFont == choice.key then validFont = true; break end
@@ -3605,17 +3605,16 @@ end
 local function createSettingsPanel()
     settingsPanel = CreateFrame("Frame", nil, optionsFrame, "BackdropTemplate")
     settingsPanel:SetPoint("TOPRIGHT", optionsFrame.settingsButton, "BOTTOMRIGHT", 0, -5)
-    settingsPanel:SetSize(300, 170)
+    settingsPanel:SetSize(300, 98)
     settingsPanel:SetFrameStrata("DIALOG")
     settingsPanel:SetFrameLevel(optionsFrame:GetFrameLevel() + 20)
     settingsPanel:SetClampedToScreen(true)
     stylePanel(settingsPanel, 0.19, 0.19, 0.18)
-    local title = createLabel(settingsPanel, "DISPLAY", "GameFontNormal")
+    local title = createLabel(settingsPanel, "DISPLAY OPTIONS", "GameFontNormal")
     title:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 14, -12)
     local definitions = {
         { key = "tooltipIDs", text = "IDs in game tooltips", help = "Shows spell IDs for auras and spells, plus item and available effect IDs for items." },
         { key = "showMinimap", text = "Minimap button", help = "Shows or hides the WoWraVox button on the minimap." },
-        { key = "showTitan", text = "Titan Panel launcher", help = "Shows or hides WoWraVox in Titan Panel when Titan is installed." },
     }
     for index, definition in ipairs(definitions) do
         local check = CreateFrame("CheckButton", nil, settingsPanel, "UICheckButtonTemplate")
@@ -3636,12 +3635,6 @@ local function createSettingsPanel()
         addHelpTooltip(check, definition.text, definition.help)
         settingsPanel[definition.key] = check
     end
-    local screenHeading = makeSectionLabel(settingsPanel, "On-screen display", 14, -119)
-    local screenNote = createLabel(settingsPanel, "Configure each on-screen text row in its rule editor.", "GameFontHighlightSmall")
-    screenNote:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 14, -143)
-    screenNote:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -14, -143)
-    screenNote:SetJustifyH("LEFT")
-    screenNote:SetWordWrap(true)
     settingsPanel:Hide()
 end
 
@@ -3732,18 +3725,33 @@ local function createOptions()
     end)
     addHelpTooltip(closeButton, "Close", "Close the WoWraVox window.")
 
-    optionsFrame.settingsButton = CreateFrame("Button", nil, optionsFrame)
+    optionsFrame.settingsButton = CreateFrame("Button", nil, header, "BackdropTemplate")
     optionsFrame.settingsButton:SetSize(28, 28)
+    optionsFrame.settingsButton:SetPoint("RIGHT", closeButton, "LEFT", -6, 0)
+    optionsFrame.settingsButton:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+    })
+    optionsFrame.settingsButton:SetBackdropColor(0.17, 0.19, 0.23, 1)
+    optionsFrame.settingsButton:SetBackdropBorderColor(0.34, 0.37, 0.42, 1)
     optionsFrame.settingsButton.icon = optionsFrame.settingsButton:CreateTexture(nil, "ARTWORK")
-    optionsFrame.settingsButton.icon:SetTexture("Interface\\Icons\\INV_Misc_Eye_01")
+    optionsFrame.settingsButton.icon:SetTexture("Interface\\Buttons\\UI-OptionsButton")
     optionsFrame.settingsButton.icon:SetPoint("CENTER")
-    optionsFrame.settingsButton.icon:SetSize(21, 21)
-    optionsFrame.settingsButton:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    optionsFrame.settingsButton.icon:SetSize(20, 20)
+    optionsFrame.settingsButton:SetScript("OnEnter", function(self)
+        self:SetBackdropColor(0.28, 0.25, 0.16, 1)
+        self:SetBackdropBorderColor(0.72, 0.55, 0.22, 1)
+    end)
+    optionsFrame.settingsButton:SetScript("OnLeave", function(self)
+        self:SetBackdropColor(0.17, 0.19, 0.23, 1)
+        self:SetBackdropBorderColor(0.34, 0.37, 0.42, 1)
+    end)
     createSettingsPanel()
     optionsFrame.settingsButton:SetScript("OnClick", function()
         if settingsPanel:IsShown() then settingsPanel:Hide() else settingsPanel:Show() end
     end)
-    addHelpTooltip(optionsFrame.settingsButton, "Display options", "Configure tooltip IDs and choose whether WoWraVox appears on the minimap or Titan Panel.")
+    addHelpTooltip(optionsFrame.settingsButton, "Display options", "Configure tooltip IDs and the minimap button.")
 
     local listPanel = CreateFrame("Frame", nil, optionsFrame)
     listPanel:SetPoint("TOPLEFT", optionsFrame, "TOPLEFT", 16, -64)
@@ -3773,11 +3781,6 @@ local function createOptions()
     end)
 
     createEditorWidgets()
-
-    optionsFrame.settingsButton:ClearAllPoints()
-    optionsFrame.settingsButton:SetPoint("BOTTOMRIGHT", listPanel, "BOTTOMRIGHT", -6, 5)
-    settingsPanel:ClearAllPoints()
-    settingsPanel:SetPoint("BOTTOMLEFT", optionsFrame.settingsButton, "TOPLEFT", 0, 5)
 
     optionsFrame.addButton = CreateFrame("Button", nil, listPanel, "UIPanelButtonTemplate")
     optionsFrame.addButton:SetHeight(28)
