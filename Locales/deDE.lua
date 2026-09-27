@@ -8,6 +8,7 @@ ns.Locales.deDE = {
     ["Find"] = "Suchen", ["Spell IDs"] = "Spell-IDs", ["Active"] = "Aktiv", ["Triggers"] = "Auslöser",
     ["TRIGGERS"] = "AUSLÖSER", ["Aura or spell ID"] = "Aura oder Spell-ID", ["Type at least 3 letters or an ID to search."] = "Mindestens 3 Buchstaben oder eine Spell-ID eingeben.",
     ["NOTIFICATIONS"] = "ANSAGEN", ["Apply"] = "Erscheinen", ["Expire"] = "Ablauf",
+    ["TTS on Application"] = "TTS bei Anwendung", ["TTS on Expiration"] = "TTS beim Ablauf",
     ["On-screen text"] = "Bildschirmtext", ["Preview"] = "Vorschau", ["RULE PREVIEW"] = "REGELVORSCHAU",
     ["On-screen display"] = "Bildschirmanzeige", ["Unlock anchor"] = "Anker entsperren", ["Lock"] = "Sperren",
     ["Anchor"] = "Anker", ["Style"] = "Stil", ["Size"] = "Größe", ["Font"] = "Schrift", ["Font size"] = "Schriftgröße", ["Friz Quadrata"] = "Friz Quadrata",

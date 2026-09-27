@@ -1726,24 +1726,33 @@ end
 
 local function showScreenRow(row, shown)
     if not row then return end
+    local checked = row.enabled:GetChecked()
+    local detailsShown = shown and (checked == true or checked == 1)
     row.enabled:SetShown(shown)
     row.label:SetShown(shown)
-    row.text:SetShown(shown)
-    row.preview:SetShown(shown)
-    row.font:SetShown(shown)
-    row.size:SetShown(shown)
-    row.style:SetShown(shown)
-    row.color:SetShown(shown)
-    row.anchor:SetShown(shown)
+    row.text:SetShown(detailsShown)
+    row.preview:SetShown(detailsShown)
+    row.font:SetShown(detailsShown)
+    row.size:SetShown(detailsShown)
+    row.style:SetShown(detailsShown)
+    row.color:SetShown(detailsShown)
+    row.anchor:SetShown(detailsShown)
 end
 
 local function layoutSharedEditor(isAura)
     local notificationY = isAura and -255 or -151
     local firstMessageY = notificationY - 21
     local screenApplyY = firstMessageY - 34
-    local expireMessageY = firstMessageY - (isAura and 112 or 74)
+    local applyScreenCheck = ns.screenControls.apply and ns.screenControls.apply.enabled:GetChecked()
+    local applyScreenEnabled = applyScreenCheck == true or applyScreenCheck == 1
+    local expireMessageY = firstMessageY - (isAura and (applyScreenEnabled and 112 or 85) or 74)
     local screenExpireY = expireMessageY - 34
-    local voiceY = (isAura and screenExpireY or screenApplyY) - 73
+    local expireScreenCheck = ns.screenControls.expire and ns.screenControls.expire.enabled:GetChecked()
+    local readyScreenCheck = ns.screenControls.ready and ns.screenControls.ready.enabled:GetChecked()
+    local expireScreenEnabled = expireScreenCheck == true or expireScreenCheck == 1
+    local readyScreenEnabled = readyScreenCheck == true or readyScreenCheck == 1
+    local voiceY = isAura and (expireMessageY - (expireScreenEnabled and 107 or 80))
+        or (firstMessageY - (readyScreenEnabled and 107 or 80))
     auraEditor.notificationsHeading:ClearAllPoints()
     auraEditor.notificationsHeading:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 16, notificationY)
     applyEnabledCheck:ClearAllPoints()
@@ -2652,7 +2661,6 @@ function updateDetails()
     ruleNameBox:SetText(rule.name or "")
     ruleEnabledCheck:SetChecked(rule.enabled)
     if auraRule then
-        layoutSharedEditor(true)
         local firstID = auraRule.spellIDs[1]
         local info = firstID and getSpellInfo(firstID)
         auraEditor.ruleIcon:SetTexture(info and info.iconID or "Interface\\Icons\\Spell_Nature_Rejuvenation")
@@ -2685,10 +2693,12 @@ function updateDetails()
         expireEnabledCheck:SetChecked(auraRule.expireEnabled)
         expireMessageBox:SetText(auraRule.expireMessage)
         loadScreenRowProfile(ns.screenControls.expire, auraRule)
+        showScreenRow(ns.screenControls.apply, true)
+        showScreenRow(ns.screenControls.expire, true)
+        layoutSharedEditor(true)
         if not keepTriggerQuery then triggerInputBox:SetText("") end
         updateSelectedTriggers()
     elseif itemRule or skillRule then
-        layoutSharedEditor(false)
         local readyRule = itemRule or skillRule
         local skillInfo = skillRule and getSpellInfo(skillRule.spellID)
         auraEditor.ruleIcon:SetTexture(readyRule.icon or (skillInfo and skillInfo.iconID) or "Interface\\Icons\\INV_Misc_QuestionMark")
@@ -2717,6 +2727,8 @@ function updateDetails()
         testItemButton:Show()
         readyMessageBox:SetText(readyRule.message or "")
         loadScreenRowProfile(ns.screenControls.ready, readyRule)
+        showScreenRow(ns.screenControls.ready, true)
+        layoutSharedEditor(false)
         itemSourceText:Show()
         if itemRule then
             if itemRule.starter == "trinket" and itemRule.itemID <= 0 then
@@ -3106,7 +3118,7 @@ local function buildMessageControls()
 auraEditor.notificationsHeading = makeSectionLabel(auraEditor, "NOTIFICATIONS", 16, -255)
 applyEnabledCheck = CreateFrame("CheckButton", nil, auraEditor, "UICheckButtonTemplate")
 applyEnabledCheck:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 6, -277)
-    applyLabel = createLabel(auraEditor, "Apply", "GameFontNormalSmall")
+    applyLabel = createLabel(auraEditor, "TTS on Application", "GameFontNormalSmall")
     applyLabel:SetPoint("LEFT", applyEnabledCheck, "RIGHT", 0, 0)
     applyLabel:SetMaxLines(1)
     applyMessageBox = createEditBox(auraEditor, 300, 24)
@@ -3121,7 +3133,7 @@ testApplyButton:SetText(L("Test"))
 
 expireEnabledCheck = CreateFrame("CheckButton", nil, auraEditor, "UICheckButtonTemplate")
 expireEnabledCheck:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 6, -319)
-    expireLabel = createLabel(auraEditor, "Expire", "GameFontNormalSmall")
+    expireLabel = createLabel(auraEditor, "TTS on Expiration", "GameFontNormalSmall")
     expireLabel:SetPoint("LEFT", expireEnabledCheck, "RIGHT", 0, 0)
     expireLabel:SetMaxLines(1)
     expireMessageBox = createEditBox(auraEditor, 300, 24)
@@ -3292,6 +3304,8 @@ local function wireScreenRow(row, helpText)
     row.text:HookScript("OnTextChanged", updatePreviewButtons)
     row.enabled:SetScript("OnClick", function()
         saveDetails()
+        showScreenRow(row, true)
+        layoutSharedEditor(selectedCategory == "auras")
         if selectedAura() then
             rebuildAuraWatches()
             syncAllAuras(true)
@@ -3407,10 +3421,10 @@ addHelpTooltip(ruleNameBox, "Rule name", "Display name for this rule.")
 addHelpTooltip(ruleEnabledCheck, "Active", "Enable or disable this rule.")
 addHelpTooltip(triggerInputBox, "Triggers", "Search by spell name or enter one or more comma-separated spell IDs.")
 addHelpTooltip(triggerAddButton, "Add triggers", "Add the spell IDs entered in the trigger field.")
-addHelpTooltip(applyEnabledCheck, "Apply", "Announce when the aura appears.")
+addHelpTooltip(applyEnabledCheck, "TTS on Application", "Announce when the aura appears.")
 addHelpTooltip(applyMessageBox, "Notification message", "Message spoken when the aura appears.")
 addHelpTooltip(testApplyButton, "Test notification", "Preview this message with the selected voice and volume.")
-addHelpTooltip(expireEnabledCheck, "Expire", "Announce when the aura expires naturally.")
+addHelpTooltip(expireEnabledCheck, "TTS on Expiration", "Announce when the aura expires naturally.")
 addHelpTooltip(expireMessageBox, "Notification message", "Message spoken when the aura expires naturally.")
 addHelpTooltip(testExpireButton, "Test notification", "Preview this message with the selected voice and volume.")
 addHelpTooltip(readyMessageBox, "Ready notification", "Message spoken when the observed item cooldown is ready.")
