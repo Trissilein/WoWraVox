@@ -1322,7 +1322,8 @@ updatePreviewButtons = function()
     local canSpeak = C_VoiceChat and C_VoiceChat.SpeakText ~= nil
     testApplyButton:SetEnabled(canSpeak and trim(applyMessageBox:GetText()) ~= "")
     testExpireButton:SetEnabled(canSpeak and trim(expireMessageBox:GetText()) ~= "")
-    local choosingStarterItem = selectedItem() and selectedItem().starter == "trinket" and selectedItem().itemID <= 0
+    local choosingStarterItem = selectedCategory == "items" and selectedItemRule
+        and selectedItemRule.starter == "trinket" and (tonumber(selectedItemRule.itemID) or 0) <= 0
     testItemButton:SetEnabled(choosingStarterItem or (canSpeak and trim(readyMessageBox:GetText()) ~= ""))
     for _, row in pairs(ns.screenControls) do
         if row.preview and row.text then
