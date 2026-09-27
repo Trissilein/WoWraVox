@@ -1322,7 +1322,8 @@ updatePreviewButtons = function()
     local canSpeak = C_VoiceChat and C_VoiceChat.SpeakText ~= nil
     testApplyButton:SetEnabled(canSpeak and trim(applyMessageBox:GetText()) ~= "")
     testExpireButton:SetEnabled(canSpeak and trim(expireMessageBox:GetText()) ~= "")
-    testItemButton:SetEnabled(canSpeak and trim(readyMessageBox:GetText()) ~= "")
+    local choosingStarterItem = selectedItem() and selectedItem().starter == "trinket" and selectedItem().itemID <= 0
+    testItemButton:SetEnabled(choosingStarterItem or (canSpeak and trim(readyMessageBox:GetText()) ~= ""))
     for _, row in pairs(ns.screenControls) do
         if row.preview and row.text then
             ns.setScreenPreviewButtonState(row, trim(row.text:GetText()) ~= "")
@@ -1626,6 +1627,10 @@ function refreshList()
         row.toggle:SetChecked(rule.enabled)
         row:SetScript("OnClick", function(self)
             selectRule(self.rule, self.category)
+            if self.category == "items" and self.rule.starter == "trinket" and self.rule.itemID <= 0
+                and ns.BeginItemPicker then
+                ns.BeginItemPicker()
+            end
         end)
         row.toggle:SetScript("OnClick", function(self)
             local target = self:GetParent().rule
