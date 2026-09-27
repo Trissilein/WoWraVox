@@ -75,10 +75,18 @@ local function decorateItem(tooltip, data)
     if ok then pcall(tooltip.Show, tooltip) end
 end
 
+local function enabled()
+    return type(WoWraVoxDB) == "table" and type(WoWraVoxDB.settings) == "table" and WoWraVoxDB.settings.tooltipIDs
+end
+
+local function addSpellID(tooltip, spellID)
+    spellID = publicID(spellID)
+    if not spellID then return end
+    if ns.ObserveSpell then ns.ObserveSpell(spellID, "Seen aura/spell") end
+    if enabled() then addID(tooltip, "WoWraVox Spell-ID", spellID) end
+end
+
 if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
-    local function enabled()
-        return type(WoWraVoxDB) == "table" and type(WoWraVoxDB.settings) == "table" and WoWraVoxDB.settings.tooltipIDs
-    end
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.UnitAura, function(tooltip, data)
         if data then observeSpell(data) end
         if enabled() and tooltip and data then decorateSpell(tooltip, data) end
@@ -89,5 +97,30 @@ if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and
     end)
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
         if enabled() and tooltip and data then decorateItem(tooltip, data) end
+    end)
+end
+
+if GameTooltip and GameTooltip.HookScript then
+    GameTooltip:HookScript("OnTooltipSetSpell", function(tooltip)
+        local ok, first, second, third = pcall(tooltip.GetSpell, tooltip)
+        if ok then addSpellID(tooltip, publicID(third) or publicID(second) or publicID(first)) end
+    end)
+end
+
+if hooksecurefunc and GameTooltip then
+    hooksecurefunc(GameTooltip, "SetSpellByID", function(tooltip, spellID)
+        addSpellID(tooltip, spellID)
+    end)
+    hooksecurefunc(GameTooltip, "SetSpellBookItem", function(tooltip, slotIndex, bookType)
+        if not (C_SpellBook and C_SpellBook.GetSpellBookItemInfo) then return end
+        local ok, info = pcall(C_SpellBook.GetSpellBookItemInfo, slotIndex, bookType)
+        if ok and info then addSpellID(tooltip, field(info, "spellID")) end
+    end)
+    hooksecurefunc(GameTooltip, "SetAction", function(tooltip, actionSlot)
+        local ok, actionType, actionID = pcall(GetActionInfo, actionSlot)
+        if ok and actionType == "spell" then addSpellID(tooltip, actionID) end
+    end)
+    hooksecurefunc(GameTooltip, "SetItemByID", function(tooltip, itemID)
+        if enabled() then decorateItem(tooltip, { id = itemID }) end
     end)
 end
