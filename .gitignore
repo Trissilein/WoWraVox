@@ -1,0 +1,15 @@
+# WoW runtime data
+WTF/
+SavedVariables/
+
+# Local deployment and backups
+Interface/
+*.bak
+*.tmp
+*.orig
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
