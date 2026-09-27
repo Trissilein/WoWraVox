@@ -100,13 +100,6 @@ if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and
     end)
 end
 
-if GameTooltip and GameTooltip.HookScript then
-    GameTooltip:HookScript("OnTooltipSetSpell", function(tooltip)
-        local ok, first, second, third = pcall(tooltip.GetSpell, tooltip)
-        if ok then addSpellID(tooltip, publicID(third) or publicID(second) or publicID(first)) end
-    end)
-end
-
 if hooksecurefunc and GameTooltip then
     hooksecurefunc(GameTooltip, "SetSpellByID", function(tooltip, spellID)
         addSpellID(tooltip, spellID)
