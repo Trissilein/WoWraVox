@@ -1,6 +1,6 @@
 # WoWraVox
 
-WoWraVox is a World of Warcraft Retail addon for spoken and on-screen notifications.
+WoWraVox is a World of Warcraft Retail addon for Heroism, Bloodlust, Time Warp, buffs, debuffs, trinkets, spell cooldowns, and spoken or on-screen notifications.
 
 ## Version
 
