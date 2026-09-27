@@ -5,7 +5,7 @@ param(
 
 $root = Split-Path -Parent $PSScriptRoot
 $releaseDirectory = Join-Path $root 'release'
-$stagingRoot = Join-Path $env:TEMP ('wowravox-release-' + [guid]::NewGuid().ToString('N'))
+$stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('wowravox-release-' + [guid]::NewGuid().ToString('N'))
 $addonDirectory = Join-Path $stagingRoot 'WoWraVox'
 $archive = Join-Path $releaseDirectory "WoWraVox-$Version.zip"
 $runtimeFiles = @(
