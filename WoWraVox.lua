@@ -1742,8 +1742,7 @@ local function layoutSharedEditor(isAura)
     local screenApplyY = firstMessageY - 34
     local expireMessageY = firstMessageY - (isAura and 112 or 74)
     local screenExpireY = expireMessageY - 34
-    local previewY = isAura and (screenExpireY - 66) or (screenApplyY - 66)
-    local voiceY = previewY - 56
+    local voiceY = (isAura and screenExpireY or screenApplyY) - 73
     auraEditor.notificationsHeading:ClearAllPoints()
     auraEditor.notificationsHeading:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 16, notificationY)
     applyEnabledCheck:ClearAllPoints()
@@ -1768,12 +1767,6 @@ local function layoutSharedEditor(isAura)
     testItemButton:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", -16, firstMessageY + 1)
     readyMessageBox:SetPoint("RIGHT", testItemButton, "LEFT", -8, 0)
     layoutScreenRow(ns.screenControls.ready, screenApplyY)
-    auraEditor.rulePreviewHeading:ClearAllPoints()
-    auraEditor.rulePreviewHeading:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 16, previewY)
-    auraEditor.rulePreviewText:ClearAllPoints()
-    auraEditor.rulePreviewText:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 16, previewY - 21)
-    auraEditor.rulePreviewText:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", -16, previewY - 21)
-    auraEditor.rulePreviewText:SetHeight(isAura and 32 or 32)
     auraEditor.voiceHeading:ClearAllPoints()
     auraEditor.voiceHeading:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 16, voiceY)
     auraEditor.voiceLabel:ClearAllPoints()
@@ -2354,9 +2347,9 @@ local function buildRulePreview(rule, category, values)
 end
 
 local function updateRulePreviewFromEditor()
-    if editorLoading or not (auraEditor and auraEditor.rulePreviewText) then return end
+    if editorLoading or not (detailPanel and detailPanel.rulePreviewText) then return end
     local rule = selectedAura() or selectedItem() or selectedSkill()
-    if not rule then auraEditor.rulePreviewText:SetText(""); return end
+    if not rule then detailPanel.rulePreviewText:SetText(""); return end
     local values
     if selectedCategory == "auras" then
         values = {
@@ -2377,7 +2370,7 @@ local function updateRulePreviewFromEditor()
             screenText = ns.screenControls.ready and ns.screenControls.ready.text:GetText() or "",
         }
     end
-    auraEditor.rulePreviewText:SetText(buildRulePreview(rule, selectedCategory, values))
+    detailPanel.rulePreviewText:SetText(buildRulePreview(rule, selectedCategory, values))
 end
 
 local function updateSelectedTriggers()
@@ -2642,6 +2635,7 @@ function updateDetails()
     creationView:SetShown(addRuleMode)
     auraEditor:SetShown(not addRuleMode and rule ~= nil)
     if editorScroll then editorScroll:SetShown(not addRuleMode and rule ~= nil) end
+    detailPanel.rulePreviewPanel:SetShown(not addRuleMode and rule ~= nil)
     deleteRuleButton:SetShown(false)
     if addRuleMode then return end
     if not rule then
@@ -2854,9 +2848,29 @@ detailPanel.emptyText:SetPoint("CENTER")
 detailPanel.emptyText:SetWidth(360)
 detailPanel.emptyText:SetJustifyH("CENTER")
 
+detailPanel.rulePreviewPanel = CreateFrame("Frame", nil, detailPanel, "BackdropTemplate")
+detailPanel.rulePreviewPanel:SetPoint("BOTTOMLEFT", detailPanel, "BOTTOMLEFT", 12, 12)
+detailPanel.rulePreviewPanel:SetPoint("BOTTOMRIGHT", detailPanel, "BOTTOMRIGHT", -12, 12)
+detailPanel.rulePreviewPanel:SetHeight(84)
+detailPanel.rulePreviewPanel:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8X8",
+    edgeFile = "Interface\\Buttons\\WHITE8X8",
+    edgeSize = 2,
+})
+detailPanel.rulePreviewPanel:SetBackdropColor(0.045, 0.05, 0.06, 1)
+detailPanel.rulePreviewPanel:SetBackdropBorderColor(0.88, 0.43, 0.12, 1)
+detailPanel.rulePreviewHeading = makeSectionLabel(detailPanel.rulePreviewPanel, "RULE PREVIEW", 12, -9)
+detailPanel.rulePreviewText = createLabel(detailPanel.rulePreviewPanel, "", "GameFontHighlightSmall")
+detailPanel.rulePreviewText:SetPoint("TOPLEFT", detailPanel.rulePreviewPanel, "TOPLEFT", 12, -31)
+detailPanel.rulePreviewText:SetPoint("TOPRIGHT", detailPanel.rulePreviewPanel, "TOPRIGHT", -12, -31)
+detailPanel.rulePreviewText:SetHeight(44)
+detailPanel.rulePreviewText:SetJustifyH("LEFT")
+detailPanel.rulePreviewText:SetJustifyV("TOP")
+detailPanel.rulePreviewText:SetWordWrap(true)
+
 editorScroll = CreateFrame("ScrollFrame", nil, detailPanel, "UIPanelScrollFrameTemplate")
 editorScroll:SetPoint("TOPLEFT", detailPanel, "TOPLEFT", 8, -8)
-editorScroll:SetPoint("BOTTOMRIGHT", detailPanel, "BOTTOMRIGHT", -32, 8)
+editorScroll:SetPoint("BOTTOMRIGHT", detailPanel, "BOTTOMRIGHT", -32, 108)
 auraEditor = CreateFrame("Frame", nil, editorScroll)
 auraEditor:SetSize(1, 620)
 editorScroll:SetScrollChild(auraEditor)
@@ -3131,15 +3145,6 @@ testItemButton:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", -16, -276)
     readyLabel:SetPoint("RIGHT", readyMessageBox, "LEFT", -8, 0)
 testItemButton:SetText(L("Test"))
     ns.screenControls.ready = buildScreenRow(auraEditor, "On-screen text", -309, "ready")
-
-auraEditor.rulePreviewHeading = makeSectionLabel(auraEditor, "RULE PREVIEW", 16, -414)
-auraEditor.rulePreviewText = createLabel(auraEditor, "", "GameFontHighlightSmall")
-auraEditor.rulePreviewText:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 16, -435)
-auraEditor.rulePreviewText:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", -16, -435)
-auraEditor.rulePreviewText:SetHeight(32)
-auraEditor.rulePreviewText:SetJustifyH("LEFT")
-auraEditor.rulePreviewText:SetJustifyV("TOP")
-auraEditor.rulePreviewText:SetWordWrap(true)
 
     auraEditor.voiceHeading = makeSectionLabel(auraEditor, "VOICE", 16, -470)
     auraEditor.voiceLabel = createLabel(auraEditor, "Voice", "GameFontNormalSmall")
