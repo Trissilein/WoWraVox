@@ -40,6 +40,10 @@ English is the base language. German is included. Locale files live in `Locales/
 
 Copy this folder as `Interface/AddOns/WoWraVox`, then run `/reload` in WoW Retail.
 
+### WowUp
+
+In WowUp, open **Get Addons → Install from URL** and paste the repository URL: <https://github.com/Trissilein/WoWraVox>. Use the repository URL rather than a direct ZIP URL so WowUp can follow tagged releases for updates. Alternatively, search for **WoWraVox** with the Wago provider enabled.
+
 ## Development
 
 Personal game settings live in WoW `SavedVariables` and are intentionally excluded from Git. Validate Lua syntax, deploy only addon files, compare hashes, then test `/reload` and BugSack in the Retail client.

@@ -20,6 +20,9 @@ on:
           - beta
           - alpha
 
+permissions:
+  contents: write
+
 jobs:
   wago:
     runs-on: ubuntu-latest
@@ -35,7 +38,8 @@ jobs:
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
             echo "stability=stable" >> "$GITHUB_OUTPUT"
           fi
-      - name: Package addon
+      - id: package
+        name: Package addon
         shell: pwsh
         run: ./tools/New-ReleaseArchive.ps1 -Version '${{ steps.release.outputs.version }}'
       - name: Upload Wago release
@@ -57,3 +61,24 @@ jobs:
             -H "authorization: Bearer $WAGO_API_TOKEN" \
             -H "accept: application/json" \
             "https://addons.wago.io/api/projects/BNBwma6x/version"
+      - name: Publish GitHub release for WowUp
+        if: ${{ always() && steps.package.outcome == 'success' && github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          tag="v$VERSION"
+          archive="release/WoWraVox-$VERSION.zip"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$archive" --clobber
+          else
+            prerelease=()
+            if [[ "$VERSION" == 0.* ]]; then
+              prerelease+=(--prerelease)
+            fi
+            gh release create "$tag" "$archive" \
+              --title "WoWraVox $VERSION" \
+              --generate-notes \
+              "${prerelease[@]}"
+          fi
