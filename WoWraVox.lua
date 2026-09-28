@@ -2333,7 +2333,11 @@ local function previewTriggerName(rule, category)
     local info = firstID and getSpellInfo(firstID)
     local name = info and info.name or ("Spell ID " .. tostring(firstID or 0))
     local count = #(rule.spellIDs or {})
-    if count > 1 then name = name .. " and " .. (count - 1) .. " more" end
+    if count == 2 then
+        name = name .. " or one other trigger"
+    elseif count > 2 then
+        name = name .. " or one of " .. (count - 1) .. " other triggers"
+    end
     return name
 end
 
