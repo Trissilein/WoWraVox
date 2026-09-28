@@ -4,7 +4,7 @@ WoWraVox is a World of Warcraft Retail addon for Heroism, Bloodlust, Time Warp, 
 
 ## Version
 
-Current pre-release version: **0.9.8**. WoWraVox is approaching its first stable release and the UI, starter setup, and translations are still being refined.
+Current stable version: **0.9.8**.
 
 ## What it does
 

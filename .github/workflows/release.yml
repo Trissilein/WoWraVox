@@ -11,7 +11,7 @@ on:
         required: true
         default: 0.9.8
       stability:
-        description: Wago release channel
+        description: Release channel for Wago and CurseForge
         type: choice
         required: true
         default: stable
@@ -61,6 +61,29 @@ jobs:
             -H "authorization: Bearer $WAGO_API_TOKEN" \
             -H "accept: application/json" \
             "https://addons.wago.io/api/projects/BNBwma6x/version"
+      - name: Upload CurseForge release
+        env:
+          CURSEFORGE_API_TOKEN: ${{ secrets.CURSEFORGE_API_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+          STABILITY: ${{ steps.release.outputs.stability }}
+        shell: bash
+        run: |
+          case "$STABILITY" in
+            stable) release_type=release ;;
+            beta|alpha) release_type="$STABILITY" ;;
+            *) echo "Unsupported release channel: $STABILITY" >&2; exit 1 ;;
+          esac
+          metadata=$(jq -cn \
+            --arg display_name "WoWraVox $VERSION" \
+            --arg release_type "$release_type" \
+            --arg changelog "$(cat CHANGELOG.md)" \
+            --arg patch "12.1.0" \
+            '{changelog: $changelog, changelogType: "markdown", displayName: $display_name, gameVersionNames: [$patch], releaseType: $release_type}')
+          curl --fail --show-error --silent -X POST \
+            -F "metadata=$metadata" \
+            -F "file=@release/WoWraVox-$VERSION.zip;type=application/zip" \
+            -H "X-Api-Token: $CURSEFORGE_API_TOKEN" \
+            "https://www.curseforge.com/api/projects/1715995/upload-file"
       - name: Publish GitHub release for WowUp
         if: ${{ always() && steps.package.outcome == 'success' && github.event_name == 'push' }}
         env:
@@ -73,12 +96,7 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$archive" --clobber
           else
-            prerelease=()
-            if [[ "$VERSION" == 0.* ]]; then
-              prerelease+=(--prerelease)
-            fi
             gh release create "$tag" "$archive" \
               --title "WoWraVox $VERSION" \
-              --generate-notes \
-              "${prerelease[@]}"
+              --generate-notes
           fi
