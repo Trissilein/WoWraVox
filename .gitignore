@@ -16,3 +16,7 @@ Thumbs.db
 
 # Local release artifacts
 release/
+
+# Agent working files and review handoffs
+.agents/
+SECOND_OPINION_HANDOFF_*.md

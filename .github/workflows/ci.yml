@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - id: toc
+        name: Read version from TOC
+        shell: bash
+        run: |
+          version=$(sed -n 's/^## Version: *\([0-9][0-9.]*\).*/\1/p' WoWraVox.toc | head -n1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Lua 5.1 syntax check
+        shell: bash
+        run: |
+          python3 -m pip install --user lupa
+          python3 tools/Test-LuaSyntax.py
+      - name: Harness tests
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/fg" fengari
+          export WOWRAVOX_FENGARI="$RUNNER_TEMP/fg/node_modules/fengari"
+          for test in tools/Test-*.js; do
+            echo "== $test"
+            node "$test"
+          done
+      - name: Release metadata gate
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.toc.outputs.version }}
+        # Tag and same-day gates guard the release itself; CI re-runs on later pushes.
+        run: ./tools/Test-DailyRelease.ps1 -Version $env:VERSION -AllowExistingTag -SkipSameDayGate
+      - name: Changelog section for TOC version
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.toc.outputs.version }}
+        run: |
+          $section = ./tools/Get-ChangelogSection.ps1 -Version $env:VERSION
+          if ([string]::IsNullOrWhiteSpace($section)) { throw "Changelog section for $env:VERSION is empty." }
+          Write-Output "Changelog section for ${env:VERSION}: $((($section -split "`n").Count)) lines"
+      - name: Build release ZIP (no upload)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.toc.outputs.version }}
+        run: ./tools/New-ReleaseArchive.ps1 -Version $env:VERSION

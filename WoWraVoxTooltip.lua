@@ -86,6 +86,26 @@ local function addSpellID(tooltip, spellID)
     if enabled() then addID(tooltip, "WoWraVox Spell-ID", spellID) end
 end
 
+local function addAuraID(tooltip, aura)
+    if aura then addSpellID(tooltip, field(aura, "spellId")) end
+end
+
+local function hookAuraByIndex(method)
+    if not (GameTooltip[method] and C_UnitAuras and C_UnitAuras.GetAuraDataByIndex) then return end
+    hooksecurefunc(GameTooltip, method, function(tooltip, unit, index, filter)
+        local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, filter)
+        if ok then addAuraID(tooltip, aura) end
+    end)
+end
+
+local function hookAuraByInstance(method)
+    if not (GameTooltip[method] and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID) then return end
+    hooksecurefunc(GameTooltip, method, function(tooltip, unit, auraInstanceID)
+        local ok, aura = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, auraInstanceID)
+        if ok then addAuraID(tooltip, aura) end
+    end)
+end
+
 if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.UnitAura, function(tooltip, data)
         if data then observeSpell(data) end
@@ -126,4 +146,10 @@ if hooksecurefunc and GameTooltip then
     hooksecurefunc(GameTooltip, "SetItemByID", function(tooltip, itemID)
         if enabled() then decorateItem(tooltip, { id = itemID }) end
     end)
+    hookAuraByIndex("SetUnitAura")
+    hookAuraByIndex("SetUnitBuff")
+    hookAuraByIndex("SetUnitDebuff")
+    hookAuraByInstance("SetUnitAuraByAuraInstanceID")
+    hookAuraByInstance("SetUnitBuffByAuraInstanceID")
+    hookAuraByInstance("SetUnitDebuffByAuraInstanceID")
 end
