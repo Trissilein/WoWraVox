@@ -102,12 +102,16 @@ jobs:
             --arg changelog "$CHANGELOG" \
             --arg patch "$PATCH" \
             '{label: $label, stability: $stability, changelog: $changelog, supported_retail_patch: $patch}')
-          curl --fail --show-error --silent -X POST \
+          # Keep the response body: a bare "curl: (22) ... 422" hides why the API refused the upload.
+          http_code=$(curl --silent --show-error -o "$RUNNER_TEMP/wago-response.txt" -w '%{http_code}' -X POST \
             -F "metadata=$metadata" \
             -F "file=@release/WoWraVox-$VERSION.zip" \
             -H "authorization: Bearer $WAGO_API_TOKEN" \
             -H "accept: application/json" \
-            "https://addons.wago.io/api/projects/BNBwma6x/version"
+            "https://addons.wago.io/api/projects/BNBwma6x/version")
+          echo "Wago response (HTTP $http_code):"
+          cat "$RUNNER_TEMP/wago-response.txt"; echo
+          case "$http_code" in 2??) ;; *) echo "Wago upload failed" >&2; exit 1 ;; esac
       - name: Upload CurseForge release
         if: ${{ steps.release.outputs.publish_target == 'all' || steps.release.outputs.publish_target == 'curseforge' }}
         env:
@@ -128,11 +132,14 @@ jobs:
             --arg changelog "$CHANGELOG" \
             --arg patch "$PATCH" \
             '{changelog: $changelog, changelogType: "markdown", displayName: $display_name, gameVersionNames: [$patch], releaseType: $release_type}')
-          curl --fail --show-error --silent -X POST \
+          http_code=$(curl --silent --show-error -o "$RUNNER_TEMP/curseforge-response.txt" -w '%{http_code}' -X POST \
             -F "metadata=$metadata" \
             -F "file=@release/WoWraVox-$VERSION.zip;type=application/zip" \
             -H "X-Api-Token: $CURSEFORGE_API_TOKEN" \
-            "https://www.curseforge.com/api/projects/1715995/upload-file"
+            "https://www.curseforge.com/api/projects/1715995/upload-file")
+          echo "CurseForge response (HTTP $http_code):"
+          cat "$RUNNER_TEMP/curseforge-response.txt"; echo
+          case "$http_code" in 2??) ;; *) echo "CurseForge upload failed" >&2; exit 1 ;; esac
       - name: Publish GitHub release for WowUp
         if: ${{ always() && steps.package.outcome == 'success' && (steps.release.outputs.publish_target == 'all' || steps.release.outputs.publish_target == 'github') }}
         env:
