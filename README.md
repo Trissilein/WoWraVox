@@ -31,7 +31,7 @@ Examples are copied only on first launch. Existing WoWraVox settings are preserv
 
 - `/wowravox` or `/wvr` opens WoWraVox; so does the addon compartment entry or a Titan Panel / LibDataBroker button.
 - Select **Add rule** to create an Aura, Equipped item, or Spell cooldown rule.
-- An equipped-item rule follows its item. Enable **Track the slot, not the item** to follow whatever is equipped in that slot; click the rule icon to point the rule at another equipped item.
+- An equipped-item rule can hold several items or slots (**Add item**); each announces on its own when its cooldown ends, `{item}` and `{slot}` in the message stand for the one that became ready, and an entry's tag switches between tracking the item and the slot it sits in.
 - Settings are stored in profiles that can be assigned per character and per specialization.
 - On-screen text profiles can be previewed, recolored, and independently anchored.
 

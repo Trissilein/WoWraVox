@@ -534,9 +534,9 @@ local function newAuraRule()
     }
 end
 
-local function newItemRule(itemID, name, icon)
+local function newItemRule(itemID, name, icon, slotID)
     return {
-        itemID = itemID,
+        members = { { itemID = itemID, slotID = slotID } },
         name = name or ("Item " .. tostring(itemID or "")),
         icon = icon,
         enabled = true,
@@ -686,6 +686,60 @@ function ns.normalizeSlotID(value)
     return nil
 end
 
+-- An item rule watches a list of members: { itemID = n } (one fixed item) or { slotID = n, itemID = last
+-- seen item } (whatever sits in that slot). Older saves kept one itemID/slotID pair on the rule itself;
+-- it becomes the first member and the rule fields are dropped, so loading twice changes nothing more.
+-- The unfilled starter trinket rule keeps an empty list until the picker fills it.
+function ns.memberKey(member)
+    if member.slotID then return "s" .. member.slotID end
+    return "i" .. tostring(member.itemID)
+end
+
+function ns.itemMembers(rule)
+    if type(rule.members) == "table" then return rule.members end
+    return {}
+end
+
+function ns.firstItemID(rule)
+    local first = ns.itemMembers(rule)[1]
+    return first and first.itemID or nil
+end
+
+-- The unfilled starter trinket rule: no member yet, the picker fills it.
+function ns.isEmptyStarter(rule)
+    return rule.starter == "trinket" and #ns.itemMembers(rule) == 0
+end
+
+function ns.normalizeItemRule(rule)
+    if type(rule.members) ~= "table" then
+        rule.members = {}
+        if ns.normalizeSlotID(rule.slotID) or (tonumber(rule.itemID) or 0) > 0 then
+            rule.members[1] = { itemID = rule.itemID, slotID = rule.slotID }
+        end
+    end
+    rule.itemID, rule.slotID = nil, nil
+    local members, seen = rule.members, {}
+    for index = #members, 1, -1 do
+        local member = members[index]
+        local slotID = type(member) == "table" and ns.normalizeSlotID(member.slotID) or nil
+        local itemID = type(member) == "table" and tonumber(member.itemID) or nil
+        if itemID and itemID <= 0 then itemID = nil end
+        if slotID or itemID then
+            member.slotID, member.itemID = slotID, itemID
+        else
+            table.remove(members, index)
+        end
+    end
+    for index = 1, #members do
+        local key = ns.memberKey(members[index])
+        if seen[key] then members[index] = false end
+        seen[key] = true
+    end
+    for index = #members, 1, -1 do
+        if members[index] == false then table.remove(members, index) end
+    end
+end
+
 function ns.normalizeTargetRule(rule)
     if type(rule) ~= "table" then return end
     rule.autoAnnounceTarget = nil
@@ -818,9 +872,8 @@ local function initializeDatabase()
     for _, rule in ipairs(WoWraVoxDB.items) do
         nextRuleID = ns.ensureRuleID(rule, usedRuleIDs, nextRuleID)
         ns.Profiles.NormalizeRuleSpecializations(rule)
-        rule.itemID = tonumber(rule.itemID) or 0
-        rule.slotID = ns.normalizeSlotID(rule.slotID)
-        rule.name = type(rule.name) == "string" and rule.name or ("Item " .. tostring(rule.itemID))
+        ns.normalizeItemRule(rule)
+        rule.name = type(rule.name) == "string" and rule.name or ("Item " .. tostring(ns.firstItemID(rule) or 0))
         rule.message = type(rule.message) == "string" and rule.message or ""
         rule.enabled = rule.enabled ~= false
         rule.screenEnabled = rule.screenEnabled == true
@@ -873,6 +926,7 @@ function ns.NormalizeAllProfiles()
                             rule.spellIDs = copyIDs(rule.spellIDs or (rule.spellID and { tonumber(rule.spellID) } or {}))
                             ns.normalizeTargetRule(rule)
                         end
+                        if category == "items" then ns.normalizeItemRule(rule) end
                         ns.normalizeNotificationSettings(rule, category)
                         ns.normalizeRuleScreenProfiles(rule, category, data.settings)
                         if category == "skills" then ns.SkillTracking.NormalizeRule(rule) end
@@ -1528,12 +1582,20 @@ function ns.playNotificationSound(rule, eventKey)
     return ok and played ~= false
 end
 
-function ns.formatRuleNotificationMessage(rule, message)
+-- ctx (optional) maps lower-case wildcard names to text: { item = "Name", slot = "Trinket 1" }. {item} and
+-- {slot} (any letter case) are replaced; an unknown wildcard, or one without a value, stays as typed.
+function ns.formatRuleNotificationMessage(rule, message, ctx)
     if type(message) ~= "string" then message = "" end
+    if ctx and message:find("{", 1, true) then
+        message = message:gsub("{(%a+)}", function(word)
+            local value = ctx[word:lower()]
+            if type(value) == "string" then return value end
+        end)
+    end
     return message
 end
 
-local function notifyRule(rule, eventKey, message, spellID, sourceEvent, detectedEvent)
+local function notifyRule(rule, eventKey, message, spellID, sourceEvent, detectedEvent, ctx)
     local ttsCallReturned = false
     local ttsStatus = "disabled"
     local screenShown = false
@@ -1546,18 +1608,18 @@ local function notifyRule(rule, eventKey, message, spellID, sourceEvent, detecte
     local ttsEnabled = eventKey == "apply" and rule.applyEnabled
         or eventKey == "expire" and rule.expireEnabled
         or eventKey == "ready" and rule.readyEnabled ~= false
-    local ttsMessage = ttsEnabled and ns.formatRuleNotificationMessage(rule, message) or ""
+    local ttsMessage = ttsEnabled and ns.formatRuleNotificationMessage(rule, message, ctx) or ""
     if ttsEnabled then
         ttsCallReturned, ttsStatus = ns._Aura.queueTTS(rule.voiceID, ttsMessage, rule.volume, rule.speechSpeed)
         if not ttsCallReturned and native then
             native.Log("TTS-FAILURE", string.format("rule=%s spell=%s event=%s status=%s category=%s",
-                tostring(rule.id or "?"), tostring(spellID or rule.itemID or "?"), tostring(eventKey),
+                tostring(rule.id or "?"), tostring(spellID or ns.firstItemID(rule) or "?"), tostring(eventKey),
                 tostring(ttsStatus), tostring(categorySelected)))
         end
     end
     local soundPlayed = not nativeSound and not categorySelected and ns.playNotificationSound(rule, eventKey)
     if profile and profile.enabled then
-        local screenText = ns.formatRuleNotificationMessage(rule, profile.text)
+        local screenText = ns.formatRuleNotificationMessage(rule, profile.text, ctx)
         if trim(screenText) ~= "" then screenShown = ns.showScreenText(rule, eventKey, screenText) end
     end
     if native then
@@ -1568,7 +1630,7 @@ local function notifyRule(rule, eventKey, message, spellID, sourceEvent, detecte
             or (ttsEnabled or soundRequested or (profile and profile.enabled) or categorySelected)
             and "channels-attempted" or "all-output-channels-disabled"
         native.Log("NOTIFY-OUTPUT", string.format("rule=%s spell=%s event=%s trigger=%s source=%s reason=%s native=%s sound=%s tts=%s screen=%s",
-            tostring(rule.id or "?"), tostring(spellID or rule.itemID or "?"), tostring(eventKey), tostring(detectedEvent or eventKey), tostring(sourceEvent or "?"), tostring(reason), tostring(nativeSound == true),
+            tostring(rule.id or "?"), tostring(spellID or ns.firstItemID(rule) or "?"), tostring(eventKey), tostring(detectedEvent or eventKey), tostring(sourceEvent or "?"), tostring(reason), tostring(nativeSound == true),
             tostring(soundPlayed == true), tostring(ttsStatus), tostring(screenShown == true)))
     end
     return ttsCallReturned or screenShown or soundPlayed
@@ -1975,7 +2037,7 @@ function ns.slotDefaultMessage(slotID)
     return ns.slotName(slotID) .. " " .. L("ready")
 end
 
--- itemSwapAt[rule] = time a slot rule last saw a different item: the cooldown running then is the
+-- itemSwapAt[member] = time a slot member last saw a different item: the cooldown running then is the
 -- equip lockout of the new item, not a use, so it never ends in a Ready.
 ns.itemSwapAt = setmetatable({}, { __mode = "k" })
 
@@ -2023,15 +2085,15 @@ function ns.readEquippedItemCooldown(slotID, itemID)
     return nil, reason or "api-unavailable"
 end
 
-function ns.logItemDecision(rule, event, reason, slotID, source)
+function ns.logItemDecision(rule, event, reason, slotID, source, member)
     if not (ns.AuraSoundFallback and ns.AuraSoundFallback.debugEnabled == true) then return end
-    local key = table.concat({ tostring(rule and rule.id or "?"), tostring(event), tostring(reason),
-        tostring(slotID or "?"), tostring(source or "?") }, ":")
+    local key = table.concat({ tostring(rule and rule.id or "?"), member and ns.memberKey(member) or "?",
+        tostring(event), tostring(reason), tostring(slotID or "?"), tostring(source or "?") }, ":")
     local now = GetTime()
     if itemDebugDedupe[key] and now - itemDebugDedupe[key] < 1 then return end
     itemDebugDedupe[key] = now
     ns.AuraSoundFallback.Log("ITEM", string.format("rule=%s item=%s slot=%s event=%s source=%s reason=%s",
-        tostring(rule and rule.id or "?"), tostring(rule and rule.itemID or "?"), tostring(slotID or "?"),
+        tostring(rule and rule.id or "?"), tostring(member and member.itemID or "?"), tostring(slotID or "?"),
         tostring(event), tostring(source or "?"), tostring(reason)))
 end
 
@@ -2043,64 +2105,79 @@ function ns.itemCooldownStateMatches(state, itemID, slotID, reading, cooldownEnd
         and math.abs(state.cooldownEnd - cooldownEnd) <= 0.25
 end
 
-function ns.scheduleItemReady(rule, state)
+-- itemCooldownStates[rule][memberKey] = the cooldown cycle of one member; members never share a cycle.
+function ns.itemState(rule, key)
+    local states = itemCooldownStates[rule]
+    return states and states[key] or nil
+end
+
+-- state == nil drops that member's cycle (and the rule's table once it is empty).
+function ns.setItemState(rule, key, state)
+    local states = itemCooldownStates[rule]
+    if not states then
+        if state == nil then return end
+        states = {}
+        itemCooldownStates[rule] = states
+    end
+    states[key] = state
+    if next(states) == nil then itemCooldownStates[rule] = nil end
+end
+
+function ns.scheduleItemReady(rule, member, state)
     if state.timerEnd == state.cooldownEnd then return end
     state.timerEnd = state.cooldownEnd
     local expectedEnd = state.cooldownEnd
+    local key = ns.memberKey(member)
     C_Timer.After(math.max(0.1, expectedEnd - GetTime() + 0.1), function()
-        if itemCooldownStates[rule] == state and state.cooldownEnd == expectedEnd then
+        if ns.itemState(rule, key) == state and state.cooldownEnd == expectedEnd then
             state.timerEnd = nil
             ns.checkItemRule(rule)
         end
     end)
 end
 
-ns.checkItemRule = function(rule)
-    if not rule.enabled or not ns.Profiles.RuleMatchesCurrentSpecialization(rule)
-        or (not rule.slotID and rule.itemID <= 0) then
-        if itemCooldownStates[rule] then ns.logItemDecision(rule, "check", "inactive") end
-        itemCooldownStates[rule] = nil
-        return
-    end
-    local slotID, itemID = rule.slotID, rule.itemID
+function ns.checkItemMember(rule, member)
+    local key = ns.memberKey(member)
+    local slotID, itemID = member.slotID, member.itemID
     if slotID then
-        -- Slot rule: whatever is equipped there now is the item to watch.
+        -- Slot member: whatever is equipped there now is the item to watch.
         itemID = ns.getEquippedItemID(slotID)
         if not itemID then
-            if itemCooldownStates[rule] then ns.logItemDecision(rule, "check", "slot-empty", slotID) end
-            itemCooldownStates[rule] = nil
+            if ns.itemState(rule, key) then ns.logItemDecision(rule, "check", "slot-empty", slotID, nil, member) end
+            ns.setItemState(rule, key, nil)
             return
         end
-        if itemID ~= rule.itemID then
-            ns.followSlotItem(rule, itemID, slotID)
-            ns.logItemDecision(rule, "check", "slot-item-changed", slotID)
+        if itemID ~= member.itemID then
+            ns.followSlotItem(rule, member, itemID)
+            ns.logItemDecision(rule, "check", "slot-item-changed", slotID, nil, member)
         end
     else
+        if not itemID then return end
         slotID = ns.findEquippedItemSlot(itemID)
         if not slotID then
-            if itemCooldownStates[rule] then ns.logItemDecision(rule, "check", "not-equipped") end
-            itemCooldownStates[rule] = nil
+            if ns.itemState(rule, key) then ns.logItemDecision(rule, "check", "not-equipped", nil, nil, member) end
+            ns.setItemState(rule, key, nil)
             return
         end
     end
 
     local reading, readReason = ns.readEquippedItemCooldown(slotID, itemID)
-    local state = itemCooldownStates[rule]
+    local state = ns.itemState(rule, key)
     if not reading then
-        ns.logItemDecision(rule, "check", "unreadable-" .. tostring(readReason), slotID)
+        ns.logItemDecision(rule, "check", "unreadable-" .. tostring(readReason), slotID, nil, member)
         return
     end
 
     local now = GetTime()
     if reading.enabled ~= true and reading.enabled ~= 1 then
-        ns.logItemDecision(rule, "check", "cooldown-disabled", slotID, reading.source)
+        ns.logItemDecision(rule, "check", "cooldown-disabled", slotID, reading.source, member)
         return
     end
     local cooldownEnd = reading.startTime + reading.duration
     local active = reading.duration > 0 and reading.startTime > 0 and cooldownEnd > now
     if active then
         if not ns.itemCooldownStateMatches(state, itemID, slotID, reading, cooldownEnd) then
-            local swapAt = rule.slotID and ns.itemSwapAt[rule]
+            local swapAt = member.slotID and ns.itemSwapAt[member]
             state = {
                 itemID = itemID,
                 slotID = slotID,
@@ -2110,33 +2187,42 @@ ns.checkItemRule = function(rule)
                 -- Equip lockout of a just-swapped item: watched, but never announced.
                 notified = swapAt ~= nil and reading.startTime <= swapAt + 2,
             }
-            itemCooldownStates[rule] = state
-            ns.logItemDecision(rule, "active", "cycle-start", slotID, reading.source)
+            ns.setItemState(rule, key, state)
+            ns.logItemDecision(rule, "active", "cycle-start", slotID, reading.source, member)
         else
             state.source = reading.source
         end
-        ns.scheduleItemReady(rule, state)
+        ns.scheduleItemReady(rule, member, state)
         return
     end
 
     if not state then
-        ns.logItemDecision(rule, "ready", "baseline", slotID, reading.source)
+        ns.logItemDecision(rule, "ready", "baseline", slotID, reading.source, member)
         return
     end
     if state.itemID ~= itemID or state.slotID ~= slotID then
-        itemCooldownStates[rule] = nil
-        ns.logItemDecision(rule, "ready", "identity-changed", slotID, reading.source)
+        ns.setItemState(rule, key, nil)
+        ns.logItemDecision(rule, "ready", "identity-changed", slotID, reading.source, member)
         return
     end
     if state.notified then
-        ns.logItemDecision(rule, "ready", "duplicate", slotID, reading.source)
-        itemCooldownStates[rule] = nil
+        ns.logItemDecision(rule, "ready", "duplicate", slotID, reading.source, member)
+        ns.setItemState(rule, key, nil)
         return
     end
     state.notified = true
-    ns.logItemDecision(rule, "ready", "confirmed", slotID, reading.source)
-    notifyRule(rule, "ready", rule.message, nil, "ITEM_COOLDOWN_DONE", "offCooldown")
-    itemCooldownStates[rule] = nil
+    ns.logItemDecision(rule, "ready", "confirmed", slotID, reading.source, member)
+    notifyRule(rule, "ready", rule.message, nil, "ITEM_COOLDOWN_DONE", "offCooldown", ns.itemContext(itemID, slotID))
+    ns.setItemState(rule, key, nil)
+end
+
+ns.checkItemRule = function(rule)
+    if not rule.enabled or not ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
+        if itemCooldownStates[rule] then ns.logItemDecision(rule, "check", "inactive") end
+        itemCooldownStates[rule] = nil
+        return
+    end
+    for _, member in ipairs(ns.itemMembers(rule)) do ns.checkItemMember(rule, member) end
 end
 
 function ns.scanItemRules()
@@ -2151,26 +2237,6 @@ function ns.queueItemScan(delay)
     if itemScanPending then return end
     itemScanPending = true
     C_Timer.After(delay or 0.1, ns.scanItemRules)
-end
-
--- Points an existing item rule at another equipped item.  The message follows the item only while
--- it is still the generated "<name> ready" default (or the rule is an unfilled starter); the
--- cooldown cycle is dropped so the next scan restarts silently for the new item.
--- slotID (optional) switches the rule to slot mode (it then tracks whatever sits in that slot);
--- nil switches it back to following this exact item.
-function ns.retargetItemRule(rule, itemID, name, icon, slotID)
-    local generated = (rule.name or L("Item")) .. " " .. L("ready")
-    local followsItem = rule.starter ~= nil or rule.message == generated
-        or (rule.slotID ~= nil and rule.message == ns.slotDefaultMessage(rule.slotID))
-    rule.itemID = itemID
-    rule.name = name
-    rule.icon = icon
-    rule.slotID = slotID
-    rule.starter = nil
-    if followsItem then
-        rule.message = slotID and ns.slotDefaultMessage(slotID) or ((name or L("Item")) .. " " .. L("ready"))
-    end
-    itemCooldownStates[rule] = nil
 end
 
 local function scanSkillRules(event)
@@ -2214,7 +2280,7 @@ local function getItemInfo(itemID, slotID)
         if ok then icon = texture end
     end
     if GetItemInfo then
-        local ok, itemName, _, _, _, _, _, _, _, itemIcon = pcall(GetItemInfo, itemID)
+        local ok, itemName, _, _, _, _, _, _, _, _, itemIcon = pcall(GetItemInfo, itemID)
         if ok then
             name = itemName
             icon = icon or itemIcon
@@ -2234,17 +2300,154 @@ local function getItemInfo(itemID, slotID)
     return name or ("Item " .. tostring(itemID)), icon
 end
 
--- A slot rule saw another item in its slot: follow it (icon always, name while it was the old item's
--- name), drop the cooldown cycle so the next scan restarts silently, and remember the swap time.
--- Custom messages are kept; the generated "<slot> ready" default is slot-based and needs no change.
-function ns.followSlotItem(rule, itemID, slotID)
-    local oldName = getItemInfo(rule.itemID)
+-- A slot member saw another item in its slot: follow it (rule icon always, rule name while it was the old
+-- item's name - both only for the first member, which stands for the rule), drop the cooldown cycle so the
+-- next scan restarts silently, and remember the swap time. Custom messages are kept; the generated
+-- "<slot> ready" default is slot-based and needs no change.
+function ns.followSlotItem(rule, member, itemID)
+    if ns.itemMembers(rule)[1] == member then
+        local oldName = member.itemID and getItemInfo(member.itemID)
+        local name, icon = getItemInfo(itemID, member.slotID)
+        if rule.name == oldName or rule.name == nil then rule.name = name end
+        rule.icon = icon or rule.icon
+    end
+    member.itemID = itemID
+    ns.setItemState(rule, ns.memberKey(member), nil)
+    ns.itemSwapAt[member] = GetTime()
+end
+
+-- Name and icon of the item a member carries right now (a slot member: whatever is equipped there).
+-- Third result: the slot the item is worn in right now (nil = not equipped).
+function ns.itemMemberInfo(member)
+    local worn = member.slotID and ns.getEquippedItemID(member.slotID) or nil
+    local itemID = worn or member.itemID
+    if not itemID then return nil end
+    local slotID = worn and member.slotID or ns.findEquippedItemSlot(itemID)
     local name, icon = getItemInfo(itemID, slotID)
-    if rule.name == oldName or rule.name == nil then rule.name = name end
-    rule.icon = icon or rule.icon
-    rule.itemID = itemID
-    itemCooldownStates[rule] = nil
-    ns.itemSwapAt[rule] = GetTime()
+    if not slotID and C_Item and C_Item.GetItemIconByID then
+        local ok, texture = pcall(C_Item.GetItemIconByID, itemID)
+        icon = ok and texture or nil
+    end
+    return name, icon, slotID
+end
+
+-- Wildcard values for a Ready of one item: its name and the slot it sits in (nil = unknown, wildcard stays).
+function ns.itemContext(itemID, slotID)
+    return {
+        item = itemID and (getItemInfo(itemID, slotID)) or nil,
+        slot = slotID and ns.slotName(slotID) or nil,
+    }
+end
+
+-- Context of a member as it is equipped now; the first member when none is given (preview and Test button).
+function ns.itemRuleContext(rule, member)
+    member = member or ns.itemMembers(rule)[1]
+    if not member then return nil end
+    local itemID, slotID = member.itemID, member.slotID
+    if slotID then
+        itemID = ns.getEquippedItemID(slotID) or itemID
+    elseif itemID then
+        slotID = ns.findEquippedItemSlot(itemID)
+    end
+    return ns.itemContext(itemID, slotID)
+end
+
+-- Wildcard context for editor previews and tests: items resolve against their first member, other rules have none.
+function ns.previewContext(rule)
+    return type(rule.members) == "table" and ns.itemRuleContext(rule) or nil
+end
+
+-- A duplicate is the same slot (slot member) or the same fixed item (item member); a slot member's last
+-- seen item does not count. skipIndex leaves the member being replaced out of the comparison.
+function ns.itemRuleIsDuplicate(rule, itemID, slotID, trackSlot, skipIndex)
+    local key = trackSlot and ("s" .. tostring(slotID)) or ("i" .. tostring(itemID))
+    for index, member in ipairs(ns.itemMembers(rule)) do
+        if index ~= skipIndex and ns.memberKey(member) == key then return true end
+    end
+    return false
+end
+
+-- True while the message is still one the addon generated itself ("<name> ready" or "<slot> ready").
+function ns.itemMessageIsGenerated(rule)
+    local first = ns.itemMembers(rule)[1]
+    return rule.message == (rule.name or L("Item")) .. " " .. L("ready")
+        or (first ~= nil and first.slotID ~= nil and rule.message == ns.slotDefaultMessage(first.slotID))
+end
+
+-- Points member `index` (default: the first; one past the end appends) at another equipped item.  Rule name
+-- and icon follow the first member.  The message follows the item only for a one-member rule while it is
+-- still the generated "<name> ready" default (or the rule is an unfilled starter); the member's cooldown cycle
+-- is dropped so the next scan restarts silently for the new item.
+-- slotID (optional) makes it a slot member (it then tracks whatever sits in that slot); nil = this exact item.
+function ns.retargetItemRule(rule, index, itemID, name, icon, slotID)
+    if type(rule.members) ~= "table" then rule.members = {} end
+    local members = rule.members
+    index = math.max(1, math.min(index or 1, #members + 1))
+    local followsItem = #members <= 1 and (rule.starter ~= nil or ns.itemMessageIsGenerated(rule))
+    if members[index] then ns.setItemState(rule, ns.memberKey(members[index]), nil) end
+    members[index] = { itemID = itemID, slotID = slotID }
+    if index == 1 then
+        rule.name = name
+        rule.icon = icon
+    end
+    rule.starter = nil
+    if followsItem then
+        rule.message = slotID and ns.slotDefaultMessage(slotID) or ((name or L("Item")) .. " " .. L("ready"))
+    end
+end
+
+-- Adds a member ({ itemID } or { slotID, itemID }). Returns true, or false, "duplicate".  The generated default
+-- message becomes "{item} ready" when the second member arrives, so every member announces its own name.
+function ns.addItemMember(rule, member)
+    if ns.itemRuleIsDuplicate(rule, member.itemID, member.slotID, member.slotID ~= nil) then return false, "duplicate" end
+    if type(rule.members) ~= "table" then rule.members = {} end
+    if #rule.members == 1 and ns.itemMessageIsGenerated(rule) then
+        rule.message = "{item} " .. L("ready")
+    end
+    table.insert(rule.members, member)
+    return true
+end
+
+-- Removes member `index`; the last one cannot go.  Returns true, or false, "last" | "missing".
+function ns.removeItemMember(rule, index)
+    local members = ns.itemMembers(rule)
+    local member = members[index]
+    if not member then return false, "missing" end
+    if #members <= 1 then return false, "last" end
+    ns.setItemState(rule, ns.memberKey(member), nil)
+    table.remove(members, index)
+    if index == 1 then
+        -- The rule shows its first member: name (while it still was the old item's name) and icon move on.
+        local oldName = ns.itemMemberInfo(member)
+        local newName, newIcon = ns.itemMemberInfo(members[1])
+        if newName and (rule.name == oldName or rule.name == nil) then rule.name = newName end
+        rule.icon = newIcon or rule.icon
+    end
+    return true
+end
+
+-- Switches member `index` between "this item" (wantSlot false) and "whatever sits in its slot" (true).
+-- Returns true, or false, "not-equipped" | "duplicate" | "missing".
+function ns.setItemMemberMode(rule, index, wantSlot)
+    local member = ns.itemMembers(rule)[index]
+    if not member then return false, "missing" end
+    if (member.slotID ~= nil) == wantSlot then return true end
+    local itemID, slotID = member.itemID, nil
+    if wantSlot then
+        slotID = itemID and ns.findEquippedItemSlot(itemID)
+        if not slotID then return false, "not-equipped" end
+    else
+        itemID = ns.getEquippedItemID(member.slotID) or itemID
+        if not itemID then return false, "not-equipped" end
+    end
+    if ns.itemRuleIsDuplicate(rule, itemID, slotID, wantSlot, index) then return false, "duplicate" end
+    local generated = #rule.members == 1 and ns.itemMessageIsGenerated(rule)
+    ns.setItemState(rule, ns.memberKey(member), nil)
+    rule.members[index] = { itemID = itemID, slotID = slotID }
+    if generated then
+        rule.message = slotID and ns.slotDefaultMessage(slotID) or ((rule.name or L("Item")) .. " " .. L("ready"))
+    end
+    return true
 end
 
 local function voiceName(voiceID)
@@ -2270,7 +2473,7 @@ updatePreviewButtons = function()
     testApplyButton:SetEnabled(canSpeak == true and trim(ns.formatRuleNotificationMessage(selectedAuraRule, applyMessageBox:GetText())) ~= "")
     testExpireButton:SetEnabled(canSpeak == true and trim(ns.formatRuleNotificationMessage(selectedAuraRule, expireMessageBox:GetText())) ~= "")
     local choosingStarterItem = selectedCategory == "items" and selectedItemRule
-        and selectedItemRule.starter == "trinket" and (tonumber(selectedItemRule.itemID) or 0) <= 0
+        and ns.isEmptyStarter(selectedItemRule)
     local readyRule = selectedItemRule or selectedSkillRule
     testItemButton:SetEnabled(choosingStarterItem == true or (canSpeak == true and readyRule ~= nil
         and trim(ns.formatRuleNotificationMessage(readyRule, readyMessageBox:GetText())) ~= ""))
@@ -2415,7 +2618,7 @@ local function makeVolumeSlider(parent, point, relativeTo, x, y, onChange, minVa
 end
 
 local function ruleDisplay(rule, category)
-    if category == "items" then return rule.name or (L("Item") .. " " .. tostring(rule.itemID)) end
+    if category == "items" then return rule.name or (L("Item") .. " " .. tostring(ns.firstItemID(rule))) end
     if category == "skills" then return rule.name or ("Spell " .. tostring(rule.spellID)) end
     if rule.name and rule.name ~= "" then return rule.name end
     local info = rule.spellIDs[1] and getSpellInfo(rule.spellIDs[1])
@@ -2686,8 +2889,7 @@ function refreshList()
             -- Scripts read self.rule/self.category, so they are set once per row frame.
             row:SetScript("OnClick", function(self)
                 selectRule(self.rule, self.category)
-                if self.category == "items" and self.rule.starter == "trinket" and self.rule.itemID <= 0
-                    and ns.BeginItemPicker then
+                if self.category == "items" and ns.isEmptyStarter(self.rule) and ns.BeginItemPicker then
                     ns.BeginItemPicker()
                 end
             end)
@@ -2761,11 +2963,14 @@ function refreshList()
                 .. (inactiveReason and (" · " .. L(inactiveReason)) or ""))
         elseif category == "items" then
             row.icon:SetTexture(rule.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-            if rule.starter == "trinket" and rule.itemID <= 0 then
+            if ns.isEmptyStarter(rule) then
                 row.sub:SetText(L("Choose an equipped item") .. (inactiveReason and (" · " .. L(inactiveReason)) or ""))
             else
-                row.sub:SetText((rule.slotID and ns.slotName(rule.slotID) or ("Item " .. tostring(rule.itemID))) .. " · " .. L("Ready")
-                    .. (inactiveReason and (" · " .. L(inactiveReason)) or ""))
+                local members = ns.itemMembers(rule)
+                local sourceText = #members > 1 and string.format(L("%d items"), #members)
+                    or (members[1] and members[1].slotID and ns.slotName(members[1].slotID))
+                    or ("Item " .. tostring(ns.firstItemID(rule) or 0))
+                row.sub:SetText(sourceText .. " · " .. L("Ready") .. (inactiveReason and (" · " .. L(inactiveReason)) or ""))
             end
         else
             local info = rule.spellID and getSpellInfo(rule.spellID)
@@ -2946,8 +3151,7 @@ function ns.setNotificationPanelShown(panel, shown)
     panel.ttsLabel:SetShown(shown and expanded)
     panel.ttsMessage:SetShown(ttsDetails)
     local choosingStarterItem = panel.eventKey == "ready" and selectedCategory == "items"
-        and selectedItemRule and selectedItemRule.starter == "trinket"
-        and (tonumber(selectedItemRule.itemID) or 0) <= 0
+        and selectedItemRule and ns.isEmptyStarter(selectedItemRule)
     panel.ttsTest:SetShown(ttsDetails or (shown and expanded and choosingStarterItem))
     local soundChecked = panel.soundEnabled:GetChecked()
     local soundDetails = shown and expanded and (soundChecked == true or soundChecked == 1)
@@ -2988,7 +3192,10 @@ local function layoutSharedEditor(isAura)
     triggerPanel:ClearAllPoints()
     triggerPanel:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 0, triggerHeadingY)
     triggerPanel:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", 0, triggerHeadingY)
-    triggerPanel:SetHeight(226)
+    -- Item rules reuse this panel as their member list: header plus four 27 px rows instead of the aura height.
+    local isItem = not isAura and selectedCategory == "items"
+    local triggerPanelHeight = isItem and 186 or 226
+    triggerPanel:SetHeight(triggerPanelHeight)
     triggerLabel:ClearAllPoints()
     triggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -10)
     triggerInputBox:ClearAllPoints()
@@ -3009,10 +3216,11 @@ local function layoutSharedEditor(isAura)
     triggerScroll:SetPoint("BOTTOMRIGHT", triggerPanel, "BOTTOMRIGHT", -27, 8)
     triggerInputBox:SetShown(isAura)
     triggerPlaceholder:SetShown(isAura and query == "")
-    triggerAddButton:SetShown(isAura)
-    triggerStatus:SetShown(isAura)
+    triggerAddButton:SetShown(isAura or isItem)
+    triggerStatus:SetShown(isAura or isItem)
 
-    local firstMessageY = isAura and triggerHeadingY - triggerPanel:GetHeight() - 6 or -(headerHeight + 60)
+    local firstMessageY = isAura and triggerHeadingY - triggerPanelHeight - 6
+        or -(headerHeight + 60) - (isItem and triggerPanelHeight + 6 or 0)
     local isSkill = not isAura and selectedCategory == "skills"
     local messageY = firstMessageY - (isSkill and 24 or 0)
     local voiceY
@@ -3034,8 +3242,6 @@ local function layoutSharedEditor(isAura)
         itemSourceText:ClearAllPoints()
         itemSourceText:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", ns.Layout.EXTRA_X, firstMessageY + 26)
         itemSourceText:SetWidth(190)
-        auraEditor.slotTrackCheck:ClearAllPoints()
-        auraEditor.slotTrackCheck:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 220, firstMessageY + 33)
         auraEditor.skillTriggerLabel:ClearAllPoints()
         auraEditor.skillTriggerLabel:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 220, firstMessageY + 25)
         auraEditor.skillTriggerDropdown:ClearAllPoints()
@@ -3131,7 +3337,8 @@ function ns.openScreenColorPicker(row)
     local profile = ns.getRuleScreenProfile(rule, row.eventKey)
     if not profile then return end
     local original = ns.copyScreenColor(profile.color)
-    local message = trim(row.text:GetText()) ~= "" and row.text:GetText() or "WoWraVox"
+    local message = trim(row.text:GetText()) ~= ""
+        and ns.formatRuleNotificationMessage(rule, row.text:GetText(), ns.previewContext(rule)) or "WoWraVox"
 
     local function applyColor(r, g, b)
         profile.color = ns.copyScreenColor({ r = r, g = g, b = b, a = original.a })
@@ -3205,7 +3412,7 @@ local function loadScreenRowProfile(row, rule)
 end
 
 local function previewTriggerName(rule, category)
-    if category == "items" then return rule.name or ("Item " .. tostring(rule.itemID or 0)) end
+    if category == "items" then return rule.name or ("Item " .. tostring(ns.firstItemID(rule) or 0)) end
     if category == "skills" then
         local info = rule.spellID and getSpellInfo(rule.spellID)
         return info and info.name or ("Spell ID " .. tostring(rule.spellID or 0))
@@ -3261,9 +3468,10 @@ local function buildRulePreview(rule, category, values)
             }
             eventText = eventByType[rule.triggerType] or "comes off cooldown"
         end
+        local ctx = category == "items" and ns.itemRuleContext(rule) or nil
         local ready = buildPreviewLine(trigger, L(eventText), values.readyEnabled ~= false,
-            ns.formatRuleNotificationMessage(rule, values.message), values.readySoundEnabled,
-            values.screenEnabled, ns.formatRuleNotificationMessage(rule, values.screenText))
+            ns.formatRuleNotificationMessage(rule, values.message, ctx), values.readySoundEnabled,
+            values.screenEnabled, ns.formatRuleNotificationMessage(rule, values.screenText, ctx))
         if ready then table.insert(lines, ready) end
     end
     if #lines == 0 then table.insert(lines, L("No notification configured")) end
@@ -3309,6 +3517,7 @@ ns.updateRulePreviewFromEditor = updateRulePreviewFromEditor
 local function updateSelectedTriggers()
     local rule = selectedAura()
     if not (triggerScroll and triggerChild and rule) then return end
+    for _, itemRow in ipairs(ns.itemMemberRows) do itemRow:Hide() end
 
     local validCount, pendingCount, invalidCount = 0, 0, 0
     for index, spellID in ipairs(rule.spellIDs or {}) do
@@ -3393,6 +3602,116 @@ local function updateSelectedTriggers()
     if invalidCount > 0 then summary = summary .. " · " .. string.format(L("%d invalid"), invalidCount) end
     triggerStatus:SetText(summary)
     triggerStatus:SetTextColor(invalidCount > 0 and 1 or 0.72, invalidCount > 0 and 0.4 or 0.78, invalidCount > 0 and 0.3 or 0.86)
+end
+
+-- Item rules list their members in the trigger panel: icon (click = pick another item), name, a tag that
+-- switches item <-> slot tracking, and x to remove. Rows are built once and refilled.
+ns.itemMemberRows = {}
+
+function ns.createItemMemberRow(index)
+    local row = CreateFrame("Frame", nil, triggerChild)
+    row:SetHeight(27)
+    row.iconButton = CreateFrame("Button", nil, row)
+    row.iconButton:SetSize(20, 20)
+    row.iconButton:SetPoint("LEFT", row, "LEFT", 3, 0)
+    row.icon = row.iconButton:CreateTexture(nil, "ARTWORK")
+    row.icon:SetAllPoints(row.iconButton)
+    row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    row.iconButton:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    row.title = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.title:SetPoint("LEFT", row.iconButton, "RIGHT", 7, 3)
+    row.title:SetPoint("RIGHT", row, "RIGHT", -58, 0)
+    row.title:SetJustifyH("LEFT")
+    row.title:SetMaxLines(1)
+    row.tag = CreateFrame("Button", nil, row)
+    row.tag:SetHeight(12)
+    row.tag:SetPoint("LEFT", row.iconButton, "RIGHT", 7, -8)
+    row.tag.text = row.tag:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row.tag.text:SetPoint("LEFT", row.tag, "LEFT", 0, 0)
+    row.remove = CreateFrame("Button", nil, row)
+    row.remove:SetSize(22, 22)
+    row.remove:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    row.remove.mark = row.remove:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    row.remove.mark:SetPoint("CENTER", row.remove, "CENTER", 0, 0)
+    row.remove.mark:SetText("×")
+    row.remove.mark:SetTextColor(0.92, 0.38, 0.32)
+    row.remove:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+
+    row.iconButton:SetScript("OnClick", function()
+        local rule = selectedItem()
+        if not (rule and ns.BeginItemPicker) then return end
+        saveDetails()
+        ns.BeginItemPicker(rule, index)
+    end)
+    row.tag:SetScript("OnClick", function()
+        local rule = selectedItem()
+        local member = rule and ns.itemMembers(rule)[index]
+        if not member then return end
+        saveDetails()
+        local ok, reason = ns.setItemMemberMode(rule, index, member.slotID == nil)
+        if not ok then
+            setStatus(reason == "duplicate" and "Item already tracked."
+                or (member.slotID and "No item in this equipment slot." or "Equip the item to track its slot."), true)
+            return
+        end
+        ns.queueItemScan(0.1)
+        refreshList()
+        updateDetails()
+    end)
+    row.remove:SetScript("OnClick", function()
+        local rule = selectedItem()
+        if not rule then return end
+        saveDetails()
+        local ok, reason = ns.removeItemMember(rule, index)
+        if not ok then
+            if reason == "last" then setStatus("A rule needs at least one item.", true) end
+            return
+        end
+        refreshList()
+        updateDetails()
+    end)
+    row:SetScript("OnEnter", function(self)
+        if not self.itemID then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if not pcall(GameTooltip.SetItemByID, GameTooltip, self.itemID) then GameTooltip:SetText(self.title:GetText() or "") end
+        GameTooltip:Show()
+    end)
+    row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    addHelpTooltip(row.iconButton, "Change item", "Click to pick another equipped item for this rule.")
+    addHelpTooltip(row.tag, "Item or slot",
+        "Click to switch between this exact item and whatever is equipped in its slot. A swapped-in item never announces its equip lockout.")
+    addHelpTooltip(row.remove, "Remove item", "Remove this entry from the rule.")
+    ns.itemMemberRows[index] = row
+    return row
+end
+
+function ns.updateItemMembers()
+    local rule = selectedItem()
+    if not (triggerScroll and triggerChild and rule) then return end
+    for _, auraRow in ipairs(triggerRows) do auraRow:Hide() end
+    local members = ns.itemMembers(rule)
+    for index, member in ipairs(members) do
+        local row = ns.itemMemberRows[index] or ns.createItemMemberRow(index)
+        local name, icon, equippedSlot = ns.itemMemberInfo(member)
+        row.itemID = member.slotID and ns.getEquippedItemID(member.slotID) or member.itemID
+        row.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+        row.title:SetText(name or L("Not equipped"))
+        -- A member whose item is not worn right now cannot announce anything: shown in amber.
+        row.title:SetTextColor(equippedSlot and 0.93 or 1, equippedSlot and 0.93 or 0.65, equippedSlot and 0.96 or 0.25)
+        row.tag.text:SetText(member.slotID and (ns.slotName(member.slotID) .. " · " .. L("Slot"))
+            or (L("Item") .. " " .. tostring(member.itemID)))
+        row.tag:SetWidth(math.max(1, row.tag.text:GetStringWidth() + 4))
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", triggerChild, "TOPLEFT", 2, -((index - 1) * 27))
+        row:SetPoint("RIGHT", triggerChild, "RIGHT", -2, 0)
+        row:Show()
+    end
+    for index = #members + 1, #ns.itemMemberRows do ns.itemMemberRows[index]:Hide() end
+    triggerChild:SetHeight(math.max(1, #members * 27))
+    triggerScroll:SetVerticalScroll(math.min(triggerScroll:GetVerticalScroll(), math.max(0, triggerChild:GetHeight() - triggerScroll:GetHeight())))
+    triggerStatus:SetText(#members == 0 and L("Choose an equipped item")
+        or #members == 1 and L("1 item") or string.format(L("%d items"), #members))
+    triggerStatus:SetTextColor(0.72, 0.78, 0.86)
 end
 
 local function addTriggerIDs(ids)
@@ -3822,8 +4141,7 @@ function updateDetails()
         auraEditor.heading:SetText(L("AURA RULE"))
         auraEditor.iconButton:Hide()
         itemSourceText:Hide()
-        auraEditor.slotTrackCheck:Hide()
-        auraEditor.slotTrackLabel:Hide()
+        triggerLabel:SetText(L("TRIGGERS"))
         triggerLabel:Show()
         triggerInputBox:Show()
         triggerPlaceholder:SetShown(not keepTriggerQuery or trim(query) == "")
@@ -3850,13 +4168,20 @@ function updateDetails()
         auraEditor.ruleIcon:SetTexture(readyRule.icon or (skillInfo and skillInfo.iconID) or "Interface\\Icons\\INV_Misc_QuestionMark")
         auraEditor.heading:SetText(L(itemRule and "ITEM RULE" or "SPELL COOLDOWN"))
         auraEditor.iconButton:SetShown(itemRule ~= nil)
-        triggerLabel:Hide()
+        -- Item rules list their members in the trigger panel; spell cooldown rules have no panel.
+        triggerLabel:SetShown(itemRule ~= nil)
+        if itemRule then triggerLabel:SetText(L("ITEMS")) end
         triggerInputBox:Hide()
         triggerPlaceholder:Hide()
-        triggerAddButton:Hide()
-        triggerStatus:Hide()
-        triggerScroll.backdrop:Hide()
-        triggerScroll:Hide()
+        triggerAddButton:SetShown(itemRule ~= nil)
+        if itemRule then
+            triggerAddButton:SetText(L("Add item"))
+            triggerAddButton:SetEnabled(true)
+        end
+        triggerStatus:SetShown(itemRule ~= nil)
+        triggerScroll.backdrop:SetShown(itemRule ~= nil)
+        triggerScroll:SetShown(itemRule ~= nil)
+        for _, auraRow in ipairs(triggerRows) do auraRow:Hide() end
         itemSourceText:Show()
         ns.setNotificationPanelShown(ns.notificationPanels.apply, false)
         ns.setNotificationPanelShown(ns.notificationPanels.expire, false)
@@ -3875,11 +4200,10 @@ function updateDetails()
         loadNotificationPanel(ns.notificationPanels.ready, readyRule, "ready")
         layoutSharedEditor(false)
         itemSourceText:Show()
+        ns.itemHelpButton:SetShown(itemRule ~= nil)
         if itemRule then
-            local choosingStarter = itemRule.starter == "trinket" and itemRule.itemID <= 0
-            auraEditor.slotTrackCheck:SetShown(not choosingStarter)
-            auraEditor.slotTrackLabel:SetShown(not choosingStarter)
-            auraEditor.slotTrackCheck:SetChecked(itemRule.slotID ~= nil)
+            local choosingStarter = ns.isEmptyStarter(itemRule)
+            ns.updateItemMembers()
             if choosingStarter then
                 itemSourceText:SetText(L("Choose an equipped item"))
                 itemSourceText:SetTextColor(1, 0.82, 0.2)
@@ -3887,20 +4211,11 @@ function updateDetails()
                 testItemButton:SetEnabled(true)
                 testItemButton:SetScript("OnClick", function() if ns.BeginItemPicker then ns.BeginItemPicker() end end)
             else
-                local slotID
-                if itemRule.slotID then
-                    slotID = ns.getEquippedItemID(itemRule.slotID) and itemRule.slotID or nil
-                else
-                    slotID = ns.findEquippedItemSlot(itemRule.itemID)
-                end
-                itemSourceText:SetText(slotID and string.format(L("Equipped · Slot %d"), slotID) or L("Not equipped"))
-                itemSourceText:SetTextColor(slotID and 0.55 or 1, slotID and 0.86 or 0.65, slotID and 0.62 or 0.25)
+                itemSourceText:SetText("")
                 testItemButton:SetText(L("Test"))
                 if ns.TestCurrentReady then testItemButton:SetScript("OnClick", ns.TestCurrentReady) end
             end
         else
-            auraEditor.slotTrackCheck:Hide()
-            auraEditor.slotTrackLabel:Hide()
             itemSourceText:SetText(string.format(L("Spellbook · ID %d"), skillRule.spellID))
             itemSourceText:SetTextColor(0.55, 0.86, 0.62)
             testItemButton:SetText(L("Test"))
@@ -4264,6 +4579,14 @@ triggerAddButton:SetSize(80, 24)
 triggerAddButton:SetText(L("Add"))
 triggerAddButton:SetEnabled(false)
 triggerAddButton:SetScript("OnClick", function()
+    if selectedItem() then
+        -- Item rules: "Add item" opens the picker for one more member (or fills the starter rule).
+        saveDetails()
+        if ns.BeginItemPicker then
+            ns.BeginItemPicker(nil, nil, not ns.isEmptyStarter(selectedItemRule) and selectedItemRule or nil)
+        end
+        return
+    end
     local query = trim(triggerInputBox:GetText())
     local ids, valid = parseSpellIDs(query)
     if valid and #ids > 0 then
@@ -4321,14 +4644,9 @@ triggerScroll:SetScrollChild(triggerChild)
 triggerScroll:HookScript("OnSizeChanged", function(self, width)
     triggerChild:SetWidth(math.max(1, width - 4))
     updateSelectedTriggers()
+    ns.updateItemMembers()
 end)
 itemSourceText = createLabel(auraEditor, "", "GameFontNormalSmall")
-auraEditor.slotTrackCheck = CreateFrame("CheckButton", nil, auraEditor, "UICheckButtonTemplate")
-auraEditor.slotTrackCheck:SetSize(24, 24)
-auraEditor.slotTrackLabel = createLabel(auraEditor, "Track the slot, not the item", "GameFontNormalSmall")
-auraEditor.slotTrackLabel:SetPoint("LEFT", auraEditor.slotTrackCheck, "RIGHT", 2, 0)
-auraEditor.slotTrackCheck:Hide()
-auraEditor.slotTrackLabel:Hide()
 
 end
 
@@ -4515,6 +4833,25 @@ local function buildMessageControls()
     applyEnabledCheck, applyMessageBox, testApplyButton = applyPanel.ttsEnabled, applyPanel.ttsMessage, applyPanel.ttsTest
     expireEnabledCheck, expireMessageBox, testExpireButton = expirePanel.ttsEnabled, expirePanel.ttsMessage, expirePanel.ttsTest
     readyLabel, readyMessageBox, testItemButton = readyPanel.ttsLabel, readyPanel.ttsMessage, readyPanel.ttsTest
+    -- Round "?" next to the Ready heading (item rules only): explains the {item}/{slot} wildcards.
+    local help = CreateFrame("Button", nil, readyPanel.frame)
+    help:SetSize(18, 18)
+    help:SetPoint("LEFT", readyPanel.heading, "RIGHT", 8, 0)
+    help:SetFrameLevel(readyPanel.headerButton:GetFrameLevel() + 2)
+    help.bg = help:CreateTexture(nil, "BACKGROUND")
+    help.bg:SetAllPoints(help)
+    help.bg:SetColorTexture(0.2, 0.21, 0.25, 1)
+    help.mask = help:CreateMaskTexture()
+    help.mask:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask","CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    help.mask:SetAllPoints(help)
+    help.bg:AddMaskTexture(help.mask)
+    help.mark = help:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    help.mark:SetPoint("CENTER", help, "CENTER", 0, 0)
+    help.mark:SetText("?")
+    help:Hide()
+    addHelpTooltip(help, "Wildcards",
+        "Wildcards: {item} - name of the item that became ready; {slot} - its slot (for example Trinket 1). Leave them out to speak a fixed text, for example 'Trinket ready'. Works in the spoken text and the on-screen text.")
+    ns.itemHelpButton = help
     auraEditor.skillTriggerLabel = createLabel(auraEditor, "Trigger", "GameFontNormalSmall")
     auraEditor.skillTriggerDropdown = CreateFrame("Frame", nil, auraEditor, "UIDropDownMenuTemplate")
     UIDropDownMenu_SetWidth(auraEditor.skillTriggerDropdown, 180)
@@ -4744,7 +5081,8 @@ local function wireScreenRow(row, helpText)
     row.preview:SetScript("OnClick", function()
         saveDetails()
         local rule = selectedRule()
-        if rule and ns.showScreenText(rule, row.eventKey, row.text:GetText(), true) then
+        if rule and ns.showScreenText(rule, row.eventKey,
+            ns.formatRuleNotificationMessage(rule, row.text:GetText(), ns.previewContext(rule)), true) then
             setStatus("On-screen preview shown.")
         end
     end)
@@ -4808,31 +5146,6 @@ ruleEnabledCheck:SetScript("OnClick", function()
         updateRulePreviewFromEditor()
     end
 end)
-auraEditor.slotTrackCheck:SetScript("OnClick", function(self)
-    local rule = selectedItem()
-    if editorLoading or not rule then return end
-    saveDetails()
-    local wanted = self:GetChecked()
-    wanted = wanted == true or wanted == 1
-    local slotID = wanted and ns.findEquippedItemSlot(rule.itemID) or nil
-    if wanted and not slotID then
-        self:SetChecked(false)
-        setStatus("Equip the item to track its slot.", true)
-        return
-    end
-    -- The message follows the mode only while it is the generated default of the old mode.
-    local oldDefault = rule.slotID and ns.slotDefaultMessage(rule.slotID) or ((rule.name or L("Item")) .. " " .. L("ready"))
-    if rule.message == oldDefault then
-        rule.message = slotID and ns.slotDefaultMessage(slotID) or ((rule.name or L("Item")) .. " " .. L("ready"))
-    end
-    rule.slotID = slotID
-    itemCooldownStates[rule] = nil
-    ns.queueItemScan(0.1)
-    refreshList()
-    updateDetails()
-end)
-addHelpTooltip(auraEditor.slotTrackCheck, "Track the slot, not the item",
-    "Follow whatever is equipped in this slot, so swapping trinkets keeps one rule. A swapped-in item never announces its equip lockout.")
 for _, panel in pairs(ns.notificationPanels) do
     local notificationPanel = panel
     panel.ttsEnabled:SetScript("OnClick", function()
@@ -4873,7 +5186,7 @@ end)
 function ns.TestCurrentReady()
     saveDetails()
     local readyRule = selectedItem() or selectedSkill()
-    local message = readyRule and ns.formatRuleNotificationMessage(readyRule, readyRule.message) or ""
+    local message = readyRule and ns.formatRuleNotificationMessage(readyRule, readyRule.message, ns.previewContext(readyRule)) or ""
     if readyRule and not playTTS(readyRule.voiceID, message, readyRule.volume, readyRule.speechSpeed) then
         setStatus("TTS test could not be sent to WoW.", true)
     else
@@ -4925,7 +5238,7 @@ local SLOT_BUTTONS = {
 }
 
 local function stopItemPicker()
-    ns.itemPickerReplaceRule = nil
+    ns.itemPickerReplaceRule, ns.itemPickerReplaceIndex, ns.itemPickerAddRule = nil, nil, nil
     if not pickerActive then return end
     pickerActive = false
     for _, overlay in pairs(pickerOverlays) do overlay:Hide() end
@@ -4935,12 +5248,6 @@ local function stopItemPicker()
         optionsFrame:Show()
         updateDetails()
     end
-end
-
--- A slot rule is a duplicate by slot; an item rule by item (a slot rule's last-seen item does not count).
-function ns.itemRuleIsDuplicate(rule, itemID, slotID, trackSlot)
-    if trackSlot then return rule.slotID == slotID end
-    return not rule.slotID and rule.itemID == itemID
 end
 
 -- Slot mode for a pick: the user's checkbox choice once touched, otherwise on for the trinket slots.
@@ -4957,16 +5264,23 @@ local function addPickedItem(slotID)
         setStatus("No item in this equipment slot.", true)
         return
     end
-    local replaceRule = ns.itemPickerReplaceRule
+    -- Picker modes: replace member `replaceIndex` of replaceRule, add a member to addRule, fill the starter
+    -- rule, or (none of them) create a new rule.
+    local replaceRule, replaceIndex, addRule = ns.itemPickerReplaceRule, ns.itemPickerReplaceIndex or 1, ns.itemPickerAddRule
     local starterRule = selectedItemRule and selectedItemRule.starter == "trinket" and selectedItemRule or nil
     local trackSlot = ns.pickerTracksSlot(slotID)
-    local replaceValid = false
+    local replaceValid, addValid = false, false
     for _, rule in ipairs(WoWraVoxDB.items) do
         if rule == replaceRule then replaceValid = true end
+        if rule == addRule then addValid = true end
     end
     if not replaceValid then replaceRule = nil end
+    if not addValid then addRule = nil end
     for _, rule in ipairs(WoWraVoxDB.items) do
         if ns.itemRuleIsDuplicate(rule, itemID, slotID, trackSlot) then
+            -- Picking the member that is being replaced again is not worth a message.
+            local sameMember = rule == replaceRule
+                and not ns.itemRuleIsDuplicate(rule, itemID, slotID, trackSlot, replaceIndex)
             addRuleMode = false
             stopItemPicker()
             selectedCategory = "items"
@@ -4974,21 +5288,20 @@ local function addPickedItem(slotID)
             refreshList()
             updateDetails()
             optionsFrame:Show()
-            if replaceRule and rule ~= replaceRule then setStatus("Item already tracked.") end
+            if (replaceRule or addRule) and not sameMember then setStatus("Item already tracked.") end
             return
         end
     end
 
     local name, icon = getItemInfo(itemID, slotID)
-    local rule = replaceRule or starterRule
-    if rule then
-        ns.retargetItemRule(rule, itemID, name, icon, trackSlot and slotID or nil)
+    local rule = replaceRule or addRule or starterRule
+    if rule and rule == addRule and not rule.starter then
+        ns.addItemMember(rule, { itemID = itemID, slotID = trackSlot and slotID or nil })
+    elseif rule then
+        ns.retargetItemRule(rule, replaceRule and replaceIndex or 1, itemID, name, icon, trackSlot and slotID or nil)
     else
-        rule = newItemRule(itemID, name, icon)
-        if trackSlot then
-            rule.slotID = slotID
-            rule.message = ns.slotDefaultMessage(slotID)
-        end
+        rule = newItemRule(itemID, name, icon, trackSlot and slotID or nil)
+        if trackSlot then rule.message = ns.slotDefaultMessage(slotID) end
         ns.registerNewRule(rule, "items")
         table.insert(WoWraVoxDB.items, rule)
     end
@@ -5052,18 +5365,21 @@ local function refreshPickerOverlays()
     end
 end
 
-local function beginItemPicker(replaceRule)
+-- replaceRule + replaceIndex: pick a new item for that member (default the first); addRule: pick one more
+-- member for that rule; neither: fill the starter rule or create a new rule.
+local function beginItemPicker(replaceRule, replaceIndex, addRule)
     if InCombatLockdown and InCombatLockdown() then
         setStatus("Item selection is blocked in combat.", true)
         return
     end
-    ns.itemPickerReplaceRule = replaceRule
+    ns.itemPickerReplaceRule, ns.itemPickerReplaceIndex, ns.itemPickerAddRule = replaceRule, replaceIndex, addRule
     pickerActive = true
     pickerRetries = 0
     if pickerPrompt then
         local check = pickerPrompt.slotCheck
-        -- Editing a slot rule keeps slot mode unless the user unticks it.
-        check.userSet = replaceRule ~= nil and replaceRule.slotID ~= nil
+        -- Replacing a slot member keeps slot mode unless the user unticks it.
+        local replaced = replaceRule and ns.itemMembers(replaceRule)[replaceIndex or 1]
+        check.userSet = replaced ~= nil and replaced.slotID ~= nil
         check:SetChecked(check.userSet)
         pickerPrompt:Show()
     end

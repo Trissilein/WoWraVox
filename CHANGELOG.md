@@ -1,5 +1,15 @@
 # WoWraVox
 
+## 0.11.0
+
+### Item groups and wildcards
+
+- One item rule can now hold several items or equipment slots, for example both trinket slots. Use **Add item** above the list of items; every entry announces on its own when its cooldown ends.
+- The message accepts the wildcards `{item}` (name of the item that became ready) and `{slot}` (its slot, for example Trinket 1), in the spoken text and the on-screen text. Text without wildcards is spoken as typed; unknown wildcards stay as typed. A "?" next to the Ready heading lists them.
+- When a second entry joins a rule that still uses the generated message, the message becomes "{item} ready". Messages you wrote yourself are never changed.
+- Each entry shows a tag with its slot or item ID. Click the tag to switch between tracking that exact item and whatever is equipped in its slot; click the icon to pick another item. This replaces the "Track the slot, not the item" checkbox in the editor (the checkbox in the item picker stays).
+- Existing item rules convert automatically when the addon loads. Downgrading to 0.10.0 afterwards leaves item rules without an item, so back up your SavedVariables first (see README).
+
 ## 0.10.0
 
 ### Profiles and settings

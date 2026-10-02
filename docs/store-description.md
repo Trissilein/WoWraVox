@@ -9,7 +9,7 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 ## What it does
 
 - **Auras:** announces buffs and debuffs on you, such as Bloodlust, Heroism, Time Warp, defensives and procs, when they start and when they end.
-- **Cooldowns and items:** tells you when a trinket or other equipped item, a spell or a returning charge is ready again. Trinket rules can follow the slot, so swapping trinkets needs no new rule.
+- **Cooldowns and items:** tells you when a trinket or other equipped item, a spell or a returning charge is ready again. Trinket rules can follow the slot, so swapping trinkets needs no new rule, and one rule can group several items or slots.
 - **Voice:** speaks with the built-in WoW Text-to-Speech. Voice, speed and volume are set per rule.
 - **On-screen text:** show your own message with your own font, size, colour and position.
 - **Sounds:** play a short sound or a spoken category word, also for effects the game hides from addons in combat.

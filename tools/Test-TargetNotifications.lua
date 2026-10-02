@@ -289,7 +289,7 @@ GetInventoryItemID = function(_, slot) return equipped[slot] end
 GetInventoryItemCooldown = function(_, slot) return itemCooldown[slot][1], itemCooldown[slot][2], 1 end
 local function makeItemRule()
     return {
-        id = "item", enabled = true, itemID = 111, name = "Alpha", message = "Alpha ready",
+        id = "item", enabled = true, members = { { itemID = 111 } }, name = "Alpha", message = "Alpha ready",
         readyEnabled = true, alertCategory = "none", voiceID = 8, volume = 100, speechSpeed = 100,
         readySoundEnabled = false, screenProfiles = {},
     }
@@ -301,7 +301,7 @@ local function itemCycle(retarget)
     itemCooldown[13] = { 90, 30 }
     local rule = makeItemRule()
     ns.checkItemRule(rule)
-    if retarget then ns.retargetItemRule(rule, 222, "Beta", "icon") end
+    if retarget then ns.retargetItemRule(rule, 1, 222, "Beta", "icon") end
     now = 125
     itemCooldown[13] = { 0, 0 }
     ns.checkItemRule(rule)
@@ -312,21 +312,21 @@ itemCycle(false)
 check("control: cooldown end announces Ready once", #ttsCalls == 1 and ttsCalls[1].text == "Alpha ready")
 local retargeted = itemCycle(true)
 check("re-targeted rule gets no Ready for the new item", #ttsCalls == 0, ttsCalls[1] and ttsCalls[1].text)
-check("rule now points at the new item", retargeted.itemID == 222 and retargeted.name == "Beta" and retargeted.icon == "icon")
+check("rule now points at the new item", retargeted.members[1].itemID == 222 and retargeted.name == "Beta" and retargeted.icon == "icon")
 check("generated message follows the item", retargeted.message == "Beta ready")
 local custom = makeItemRule()
 custom.message = "Trinket up!"
-ns.retargetItemRule(custom, 222, "Beta")
+ns.retargetItemRule(custom, 1, 222, "Beta")
 check("custom message is kept", custom.message == "Trinket up!")
-local starter = { starter = "trinket", itemID = 0, name = "Add a trinket", message = "" }
-ns.retargetItemRule(starter, 222, "Beta")
+local starter = { starter = "trinket", members = {}, name = "Add a trinket", message = "" }
+ns.retargetItemRule(starter, 1, 222, "Beta")
 check("starter fill sets itemID, message and clears starter",
-    starter.itemID == 222 and starter.message == "Beta ready" and starter.starter == nil)
+    starter.members[1].itemID == 222 and starter.message == "Beta ready" and starter.starter == nil)
 
--- Slot mode: the rule watches whatever sits in rule.slotID.
+-- Slot mode: a slot member watches whatever sits in its slotID.
 local function makeSlotRule(message)
     local rule = makeItemRule()
-    rule.slotID = 13
+    rule.members = { { itemID = 111, slotID = 13 } }
     rule.message = message or "Trinket 1 ready"
     return rule
 end
@@ -358,7 +358,7 @@ step(slotRule, 100, { 90, 30 })
 step(slotRule, 110, { 0, 0 }, 333)
 step(slotRule, 125, { 0, 0 })
 check("swap mid-cooldown: no Ready for the new item", #ttsCalls == 0, ttsCalls[1] and ttsCalls[1].text)
-check("swap updates the last seen item", slotRule.itemID == 333 and slotRule.slotID == 13)
+check("swap updates the last seen item", slotRule.members[1].itemID == 333 and slotRule.members[1].slotID == 13)
 check("slot swap keeps a custom or slot-default message", slotRule.message == "Trinket 1 ready")
 
 slotSetup()
@@ -392,7 +392,7 @@ local idRule = makeItemRule()
 step(idRule, 100, { 90, 30 })
 equipped[13] = 333
 step(idRule, 125, { 0, 0 })
-check("ID rule stays tied to its item (not equipped = silent)", #ttsCalls == 0 and idRule.itemID == 111 and idRule.slotID == nil)
+check("ID rule stays tied to its item (not equipped = silent)", #ttsCalls == 0 and idRule.members[1].itemID == 111 and idRule.members[1].slotID == nil)
 
 slotSetup()
 local disabledSlot = makeSlotRule()
@@ -406,22 +406,200 @@ check("normalizeSlotID accepts 1..19 integers only",
     ns.normalizeSlotID(13) == 13 and ns.normalizeSlotID("14") == 14 and ns.normalizeSlotID(0) == nil
     and ns.normalizeSlotID(20) == nil and ns.normalizeSlotID(13.5) == nil and ns.normalizeSlotID(nil) == nil
     and ns.normalizeSlotID("x") == nil)
-check("slot rule duplicates by slot only", ns.itemRuleIsDuplicate({ slotID = 13, itemID = 5 }, 999, 13, true)
-    and not ns.itemRuleIsDuplicate({ slotID = 14, itemID = 5 }, 5, 13, true)
-    and not ns.itemRuleIsDuplicate({ itemID = 5 }, 5, 13, true))
-check("item rule duplicates by item, ignoring slot rules",
-    ns.itemRuleIsDuplicate({ itemID = 5 }, 5, 13, false)
-    and not ns.itemRuleIsDuplicate({ slotID = 13, itemID = 5 }, 5, 13, false))
+check("slot member duplicates by slot only", ns.itemRuleIsDuplicate({ members = { { slotID = 13, itemID = 5 } } }, 999, 13, true)
+    and not ns.itemRuleIsDuplicate({ members = { { slotID = 14, itemID = 5 } } }, 5, 13, true)
+    and not ns.itemRuleIsDuplicate({ members = { { itemID = 5 } } }, 5, 13, true))
+check("item member duplicates by item, ignoring slot members",
+    ns.itemRuleIsDuplicate({ members = { { itemID = 5 } } }, 5, 13, false)
+    and not ns.itemRuleIsDuplicate({ members = { { slotID = 13, itemID = 5 } } }, 5, 13, false))
 check("slot names for the trinket slots", ns.slotName(13) == "Trinket 1" and ns.slotName(14) == "Trinket 2"
     and ns.slotName(1) == "Slot 1")
 local toSlot = makeItemRule()
-ns.retargetItemRule(toSlot, 222, "Beta", "icon", 14)
+ns.retargetItemRule(toSlot, 1, 222, "Beta", "icon", 14)
 check("retarget into slot mode switches the generated message to the slot default",
-    toSlot.slotID == 14 and toSlot.message == "Trinket 2 ready" and toSlot.itemID == 222)
-ns.retargetItemRule(toSlot, 111, "Alpha", "icon", nil)
+    toSlot.members[1].slotID == 14 and toSlot.message == "Trinket 2 ready" and toSlot.members[1].itemID == 222)
+ns.retargetItemRule(toSlot, 1, 111, "Alpha", "icon", nil)
 check("retarget out of slot mode restores the item default",
-    toSlot.slotID == nil and toSlot.message == "Alpha ready")
+    toSlot.members[1].slotID == nil and toSlot.message == "Alpha ready")
 check("pickerTracksSlot is off without a picker prompt", ns.pickerTracksSlot(13) == false)
+
+-- Item groups: one rule, several members (fixed items or slots), one cooldown cycle per member.
+do
+    local itemNames = { [111] = "Alpha", [222] = "Beta", [333] = "Gamma" }
+    GetItemInfo = function(id) return itemNames[id] end
+    GetInventoryItemTexture = function(_, slot) return equipped[slot] and ("icon" .. equipped[slot]) or nil end
+    local screenShown = {}
+    ns.showScreenText = function(_, eventKey, text) table.insert(screenShown, eventKey .. ":" .. text); return true end
+
+    -- Migration of the old one-item/one-slot rule fields.
+    local legacyItem = { itemID = 111, name = "Alpha" }
+    ns.normalizeItemRule(legacyItem)
+    check("migration: item rule becomes one fixed-item member",
+        #legacyItem.members == 1 and legacyItem.members[1].itemID == 111 and legacyItem.members[1].slotID == nil
+        and legacyItem.itemID == nil and legacyItem.slotID == nil)
+    local legacySlot = { itemID = 111, slotID = 13 }
+    ns.normalizeItemRule(legacySlot)
+    check("migration: slot rule becomes one slot member keeping the last seen item",
+        #legacySlot.members == 1 and legacySlot.members[1].slotID == 13 and legacySlot.members[1].itemID == 111
+        and legacySlot.slotID == nil)
+    local legacyStarter = { starter = "trinket", itemID = 0, name = "Add a trinket" }
+    ns.normalizeItemRule(legacyStarter)
+    check("migration: unfilled starter keeps an empty member list", #legacyStarter.members == 0
+        and ns.isEmptyStarter(legacyStarter) and #ns.itemMembers({}) == 0)
+    local again = { members = { { itemID = 111 }, { slotID = 13, itemID = 5 } }, name = "G" }
+    ns.normalizeItemRule(again)
+    local firstPass = again.members[1]
+    ns.normalizeItemRule(again)
+    check("migration is idempotent", #again.members == 2 and again.members[1] == firstPass
+        and again.members[2].slotID == 13 and again.itemID == nil)
+    local messy = { members = { { itemID = 1 }, { itemID = 1 }, { slotID = 13 }, { slotID = 13, itemID = 2 },
+        { slotID = 99, itemID = 7 }, { itemID = 0 }, "x" } }
+    ns.normalizeItemRule(messy)
+    check("normalizing drops duplicates and invalid members, an out-of-range slot becomes a fixed item",
+        #messy.members == 3 and messy.members[1].itemID == 1 and messy.members[2].slotID == 13
+        and messy.members[3].itemID == 7 and messy.members[3].slotID == nil)
+
+    -- Group of two trinket slots.
+    local function makeGroup(message)
+        local rule = makeItemRule()
+        rule.members = { { itemID = 111, slotID = 13 }, { itemID = 222, slotID = 14 } }
+        rule.message = message or "{item} ready"
+        return rule
+    end
+    local function groupSetup()
+        clearOutput()
+        useRecordingTTS()
+        screenShown = {}
+        equipped[13], equipped[14] = 111, 222
+        itemCooldown[13], itemCooldown[14] = { 0, 0 }, { 0, 0 }
+    end
+    local function gstep(rule, at, c13, c14, swap13)
+        now = at
+        if swap13 then equipped[13] = swap13 end
+        itemCooldown[13], itemCooldown[14] = c13, c14
+        ns.checkItemRule(rule)
+        runTimers()
+    end
+
+    groupSetup()
+    local group = makeGroup()
+    gstep(group, 100, { 90, 30 }, { 95, 60 })
+    gstep(group, 126, { 0, 0 }, { 95, 60 })
+    check("group: first member announces with its own name", #ttsCalls == 1 and ttsCalls[1].text == "Alpha ready",
+        ttsCalls[1] and ttsCalls[1].text)
+    gstep(group, 127, { 0, 0 }, { 95, 60 })
+    gstep(group, 156, { 0, 0 }, { 0, 0 })
+    check("group: second member announces separately, once", #ttsCalls == 2 and ttsCalls[2].text == "Beta ready",
+        ttsCalls[2] and ttsCalls[2].text)
+    gstep(group, 157, { 0, 0 }, { 0, 0 })
+    check("group: no repeat after both announced", #ttsCalls == 2)
+
+    groupSetup()
+    group = makeGroup()
+    gstep(group, 100, { 90, 30 }, { 90, 30 })
+    gstep(group, 125, { 0, 0 }, { 0, 0 })
+    check("group: members ready in the same frame become one coalesced call",
+        #ttsCalls == 1 and ttsCalls[1].text == "Alpha ready. Beta ready", ttsCalls[1] and ttsCalls[1].text)
+
+    -- Wildcards in spoken and on-screen text.
+    groupSetup()
+    group = makeGroup("{slot} / {SLOT} / {Item} / {foo} / 100%d")
+    group.screenProfiles = { ready = { enabled = true, text = "{item} up ({slot})" } }
+    gstep(group, 100, { 90, 30 }, { 95, 60 })
+    gstep(group, 126, { 0, 0 }, { 95, 60 })
+    check("wildcards: case-insensitive, unknown and percent text stay literal",
+        #ttsCalls == 1 and ttsCalls[1].text == "Trinket 1 / Trinket 1 / Alpha / {foo} / 100%d", ttsCalls[1] and ttsCalls[1].text)
+    check("wildcards: on-screen text resolves with the member that became ready",
+        #screenShown == 1 and screenShown[1] == "ready:Alpha up (Trinket 1)", screenShown[1])
+    check("wildcards: nil context leaves the text alone",
+        ns.formatRuleNotificationMessage(group, "{item} x") == "{item} x"
+        and ns.formatRuleNotificationMessage(group, "{item} {slot}", { item = "A" }) == "A {slot}")
+
+    groupSetup()
+    group = makeGroup("Trinket ready")
+    gstep(group, 100, { 90, 30 }, { 95, 60 })
+    gstep(group, 126, { 0, 0 }, { 95, 60 })
+    gstep(group, 156, { 0, 0 }, { 0, 0 })
+    check("fixed text is spoken once per member without names",
+        #ttsCalls == 2 and ttsCalls[1].text == "Trinket ready" and ttsCalls[2].text == "Trinket ready")
+
+    -- A swap in one slot never touches the other member.
+    groupSetup()
+    group = makeGroup()
+    gstep(group, 100, { 90, 30 }, { 95, 60 })
+    gstep(group, 110, { 109, 30 }, { 95, 60 }, 333)
+    gstep(group, 140, { 0, 0 }, { 95, 60 })
+    check("swap in slot A: the new item's equip lockout stays silent", #ttsCalls == 0, ttsCalls[1] and ttsCalls[1].text)
+    gstep(group, 156, { 0, 0 }, { 0, 0 })
+    check("swap in slot A does not disturb slot B's announcement",
+        #ttsCalls == 1 and ttsCalls[1].text == "Beta ready", ttsCalls[1] and ttsCalls[1].text)
+    check("swap updates only member A's last seen item",
+        group.members[1].itemID == 333 and group.members[2].itemID == 222 and group.name == "Gamma")
+
+    -- Removing a member drops only its cycle.
+    groupSetup()
+    group = makeGroup()
+    gstep(group, 100, { 90, 30 }, { 95, 60 })
+    check("removing a member succeeds and keeps the other", ns.removeItemMember(group, 1) == true
+        and #group.members == 1 and group.members[1].slotID == 14)
+    check("the rule shows the remaining member after removing the first one",
+        group.name == "Beta" and group.icon == "icon222", tostring(group.name) .. "/" .. tostring(group.icon))
+    gstep(group, 126, { 0, 0 }, { 95, 60 })
+    check("removed member is silent", #ttsCalls == 0)
+    gstep(group, 156, { 0, 0 }, { 0, 0 })
+    check("remaining member keeps its cycle and announces", #ttsCalls == 1 and ttsCalls[1].text == "Beta ready",
+        ttsCalls[1] and ttsCalls[1].text)
+    local removedLast, why = ns.removeItemMember(group, 1)
+    check("the last member cannot be removed", removedLast == false and why == "last" and #group.members == 1)
+
+    -- Add / duplicate / default text.
+    local solo = makeItemRule()
+    solo.members = { { itemID = 111, slotID = 13 } }
+    solo.message = "Trinket 1 ready"
+    check("adding a duplicate slot is refused", ns.addItemMember(solo, { slotID = 13, itemID = 999 }) == false
+        and #solo.members == 1 and solo.message == "Trinket 1 ready")
+    check("adding a second member switches the generated default to {item} ready",
+        ns.addItemMember(solo, { slotID = 14, itemID = 222 }) == true and #solo.members == 2 and solo.message == "{item} ready")
+    check("a fixed item twice is refused, a slot member's last seen item does not count",
+        ns.addItemMember(solo, { itemID = 555 }) == true and ns.addItemMember(solo, { itemID = 555 }) == false
+        and ns.addItemMember(solo, { itemID = 111 }) == true and #solo.members == 4)
+    local named = makeItemRule()
+    check("generated item default switches too", ns.addItemMember(named, { itemID = 222 }) == true and named.message == "{item} ready")
+    local custom2 = makeItemRule()
+    custom2.message = "Trinket up!"
+    ns.addItemMember(custom2, { itemID = 222 })
+    check("a custom text stays when a member is added", custom2.message == "Trinket up!")
+
+    -- Item <-> slot per member.
+    local modes = makeItemRule()
+    modes.members = { { itemID = 111 } }
+    equipped[13], equipped[14] = 111, 222
+    check("item member to slot mode takes the slot it sits in",
+        ns.setItemMemberMode(modes, 1, true) == true and modes.members[1].slotID == 13 and modes.message == "Trinket 1 ready")
+    check("slot member back to item mode keeps the carried item",
+        ns.setItemMemberMode(modes, 1, false) == true and modes.members[1].slotID == nil
+        and modes.members[1].itemID == 111 and modes.message == "Alpha ready")
+    equipped[13] = 333
+    local okMode, whyMode = ns.setItemMemberMode(modes, 1, true)
+    check("item to slot mode needs the item equipped", okMode == false and whyMode == "not-equipped"
+        and modes.members[1].slotID == nil)
+    equipped[13] = 111
+
+    -- Retarget: only the first member speaks for the rule.
+    local multi = makeGroup()
+    ns.retargetItemRule(multi, 2, 333, "Gamma", "iconG", 14)
+    check("retargeting member 2 leaves rule name, icon and message alone",
+        multi.members[2].itemID == 333 and multi.name == "Alpha" and multi.icon == nil and multi.message == "{item} ready")
+    ns.retargetItemRule(multi, 1, 333, "Gamma", "iconG", 13)
+    check("retargeting member 1 renames the rule", multi.name == "Gamma" and multi.icon == "iconG"
+        and multi.members[1].itemID == 333 and multi.message == "{item} ready")
+
+    -- Context helper for previews.
+    equipped[13], equipped[14] = 111, 222
+    local ctx = ns.itemRuleContext(makeGroup())
+    check("preview context resolves the first member", ctx.item == "Alpha" and ctx.slot == "Trinket 1")
+    check("rules without members have no preview context", ns.previewContext({ spellIDs = {} }) == nil)
+end
 
 -- Holy Armaments migration: linked pair -> one active chargeGained rule, partner disabled, link fields dropped.
 local function holyPair(name, message)
