@@ -57,7 +57,7 @@ try {
     # a local pre-check also covers what `git add` would pick up (untracked files not ignored by .gitignore).
     $denylist = '^\.agents/', 'SECOND_OPINION', '\.(bak|tmp|orig)$', '^release/', '^WTF/', 'SavedVariables',
         '^docs/UI-ALIGNMENT', '/unused/', '^\.wago$', '\.zip$', '^Libs/'
-    $allowlist = '^(WoWraVox\.toc$|[A-Za-z]+\.lua$|Locales/|Assets/|docs/branding/|tools/|\.github/|README\.md$|CHANGELOG\.md$|LICENSE$|\.editorconfig$|\.gitattributes$|\.gitignore$)'
+    $allowlist = '^(WoWraVox\.toc$|[A-Za-z]+\.lua$|Locales/|Assets/|docs/branding/|docs/store-description\.md$|tools/|\.github/|README\.md$|CHANGELOG\.md$|LICENSE$|\.editorconfig$|\.gitattributes$|\.gitignore$)'
     $hygienePaths = if ($RequireExistingTag -or $env:GITHUB_ACTIONS) { @(& git -c core.quotepath=off ls-files) }
         else { @(& git -c core.quotepath=off ls-files --cached --others --exclude-standard) }
     $violations = @()

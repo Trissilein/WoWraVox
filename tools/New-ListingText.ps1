@@ -3,13 +3,15 @@ param(
     [string]$Version
 )
 
-# Generates listing texts for the Wago / CurseForge pages from README.md + CHANGELOG.md.
-# Writes ONLY into .agents/listing/ (git-ignored). No network access.
+# Prepares the Wago / CurseForge listing texts. Writes ONLY into .agents/listing/ (git-ignored). No network access.
+# The project description is evergreen (docs/store-description.md, no version number); what changed per
+# release goes into the changelog, which the release workflow uploads with every file.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $tocPath = Join-Path $root 'WoWraVox.toc'
-$readmePath = Join-Path $root 'README.md'
+$descriptionPath = Join-Path $root 'docs/store-description.md'
 $outDir = Join-Path $root '.agents/listing'
+$publishedHashPath = Join-Path $outDir '.published-hash'
 
 $toc = Get-Content -LiteralPath $tocPath
 function Get-TocField([string]$Name) {
@@ -21,109 +23,59 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "No valid version (parameter o
 $wagoId = Get-TocField 'X-Wago-ID'
 $curseId = Get-TocField 'X-Curse-Project-ID'
 
-$readme = [System.IO.File]::ReadAllText($readmePath) -split "\r?\n"
-
-# Lines under "## <Heading>" up to the next level-2 heading (### subsections stay), blank edges trimmed.
-function Get-ReadmeSection([string]$Heading) {
-    $start = -1
-    for ($i = 0; $i -lt $readme.Count; $i++) {
-        if ($readme[$i] -match ('^##\s+' + [regex]::Escape($Heading) + '\s*$')) { $start = $i + 1; break }
-    }
-    if ($start -lt 0) { throw "README.md has no '## $Heading' section." }
-    $end = $readme.Count
-    for ($i = $start; $i -lt $readme.Count; $i++) { if ($readme[$i] -match '^##\s') { $end = $i; break } }
-    $lines = @($readme[$start..($end - 1)])
-    while ($lines.Count -and [string]::IsNullOrWhiteSpace($lines[0])) { $lines = @($lines | Select-Object -Skip 1) }
-    while ($lines.Count -and [string]::IsNullOrWhiteSpace($lines[-1])) { $lines = @($lines | Select-Object -SkipLast 1) }
-    $lines -join "`n"
-}
-
-$title = ($readme | Where-Object { $_ -match '^#\s+(.+?)\s*$' } | Select-Object -First 1) -replace '^#\s+', ''
-$intro = ($readme | Select-Object -Skip 1 | Where-Object { $_ -notmatch '^#' -and -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
-if (-not $title -or -not $intro) { throw 'README.md title or intro paragraph not found.' }
-$repoUrl = [regex]::Match(($readme -join "`n"), 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+').Value
-if (-not $repoUrl) { throw 'GitHub repository URL not found in README.md.' }
-
-$whatItDoes = Get-ReadmeSection 'What it does'
-$firstLaunch = Get-ReadmeSection 'First launch'
-$usage = Get-ReadmeSection 'Usage'
-$installReadme = Get-ReadmeSection 'Installation'
-# Short installation: manual line + README's downgrade note and WowUp hint (skip the repo-folder copy line).
-$downgrade = ($installReadme -split "`n" | Where-Object { $_ -like 'Downgrading:*' } | Select-Object -First 1)
-$wowup = ($installReadme -split "`n" | Where-Object { $_ -like 'In WowUp,*' } | Select-Object -First 1)
-$installLines = @(
-    "Install through the Wago or CurseForge app, through WowUp, or manually: download the ZIP from the [latest release]($repoUrl/releases/latest) and extract the ``WoWraVox`` folder into ``Interface/AddOns``, then run ``/reload`` in WoW Retail."
-)
-if ($wowup) { $installLines += $wowup }
-if ($downgrade) { $installLines += $downgrade }
-$installation = $installLines -join "`n`n"
-
-function New-Description {
-    @(
-        "# $title",
-        $intro,
-        "Version $Version.",
-        "## What it does`n`n$whatItDoes",
-        "## First launch`n`n$firstLaunch",
-        "## Usage`n`n$usage",
-        "## Installation`n`n$installation",
-        "## Links`n`n- Source code and issues: $repoUrl`n- Releases: $repoUrl/releases`n- Report a bug: $repoUrl/issues"
-    ) -join "`n`n"
-}
+if (-not (Test-Path -LiteralPath $descriptionPath)) { throw 'docs/store-description.md is missing.' }
+$description = ([System.IO.File]::ReadAllText($descriptionPath) -replace "`r`n", "`n").TrimEnd() + "`n"
+if ($description -match '\b\d+\.\d+\.\d+\b') { throw 'docs/store-description.md must not contain a version number.' }
 
 $notes = & (Join-Path $PSScriptRoot 'Get-ChangelogSection.ps1') -Version $Version
 $notes = ($notes | Out-String).Trim()
 
-$checklist = @"
-# Listing checklist for $title $Version
+# Hash of the description as normalised above; compared with the hash stored after the last manual sync.
+$sha = [System.Security.Cryptography.SHA256]::Create()
+$hash = ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($description)))).Replace('-', '').ToLowerInvariant()
+$published = if (Test-Path -LiteralPath $publishedHashPath) { (Get-Content -LiteralPath $publishedHashPath -Raw).Trim() } else { '' }
+$descriptionChanged = $hash -ne $published
+$syncLine = if ($descriptionChanged) {
+    'The description CHANGED since the last sync (or was never synced): update it on Wago and CurseForge, then store the hash (see the last line).'
+} else {
+    'The description is unchanged since the last sync: nothing to do on the store pages except checking the new file entry and its changelog.'
+}
 
-Generated by ``tools/New-ListingText.ps1``. The release workflow uploads the ZIP and the changelog section only; everything below is manual.
+$checklist = @"
+# Listing checklist (release $Version)
+
+Generated by ``tools/New-ListingText.ps1``. The release workflow uploads the ZIP and the changelog text with every file; only the project page itself is manual.
 
 Project IDs from the TOC: Wago ``$wagoId``, CurseForge ``$curseId``.
 
-## Texts in this folder
+## Every release
 
-- ``wago-description.md`` -> Wago Addons: project description.
-- ``curseforge-description.md`` -> CurseForge: project description.
-- ``release-notes.md`` -> identical to the changelog text the workflow sends to GitHub, Wago and CurseForge (check it appears on each file entry).
+- [ ] Wago: the new file shows version $Version with the changelog from ``release-notes.md``.
+- [ ] CurseForge: the new file shows "WoWraVox $Version" with the changelog. A new file can show "in review" for a while; re-check later instead of re-uploading.
+- [ ] GitHub: release ``v$Version`` has the ZIP and the same notes.
 
-## Wago Addons (manual)
+## Only when the description changed
 
-- [ ] Description: paste ``wago-description.md``.
-- [ ] Screenshots: upload the list below.
-- [ ] Logo: upload ``docs/branding/WoWraVoxIcon.png``.
-- [ ] Check that the new file shows version $Version with the changelog.
+$syncLine
 
-## CurseForge (manual)
+- [ ] Wago Addons: replace the project description with ``wago-description.md``.
+- [ ] CurseForge: replace the project description with ``curseforge-description.md`` and check the formatting after pasting.
+- [ ] Store the hash: write ``$hash`` into ``.agents/listing/.published-hash``.
 
-- [ ] Description: paste ``curseforge-description.md`` and check the formatting after pasting.
-- [ ] Screenshots: upload the list below.
-- [ ] Logo: upload ``docs/branding/WoWraVoxIcon.png``.
-- [ ] Moderation status: a new file can show "in review" for a while; the project page does not list it as downloadable until approved. Re-check later instead of re-uploading.
+## Only when the look or features changed
 
-## GitHub (manual)
+- [ ] Screenshots (taken by hand, in-game, English UI): options overview, aura rule with Apply/Expire, TTS panel, item rule in slot mode, charge rule, collapsed Expiration panel.
+- [ ] Logo: ``docs/branding/WoWraVoxIcon.png`` (small variant ``WoWraVoxIcon_small.png``).
+- [ ] GitHub "Homepage" field (About box) points to the CurseForge or Wago project page.
 
-- [ ] Repository "Homepage" field (About box): set to the CurseForge or Wago project page (empty today). Description/topics: check once.
-
-## Screenshot suggestions (in-game, English UI)
-
-| File name | Shows |
-| --- | --- |
-| ``01-options-overview.png`` | Options window with a few rules in the list |
-| ``02-aura-rule-apply-expire.png`` | Aura rule editor with Apply and Expire text/sound settings |
-| ``03-tts-panel.png`` | Text-to-Speech panel (voice, speed, volume) |
-| ``04-item-slot-rule.png`` | Item rule with "Track the slot, not the item" (Trinket 1) |
-| ``05-holy-armaments.png`` | Holy Armaments charge rule |
-| ``06-expiration-panel-collapsed.png`` | Expiration panel collapsed (plus icon and hint) |
-
-Logo source: ``docs/branding/WoWraVoxIcon.png`` (small variant: ``docs/branding/WoWraVoxIcon_small.png``).
+Description hash now: ``$hash``
 "@
 
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $files = [ordered]@{
-    'wago-description.md'        = (New-Description)
-    'curseforge-description.md'  = (New-Description)
+    'wago-description.md'        = $description
+    'curseforge-description.md'  = $description
     'release-notes.md'           = $notes
     'CHECKLIST.md'               = $checklist
 }
@@ -132,3 +84,4 @@ foreach ($name in $files.Keys) {
     [System.IO.File]::WriteAllText((Join-Path $outDir $name), $text, $utf8)
     Write-Output (Join-Path $outDir $name)
 }
+Write-Output ("Description {0} (hash {1})." -f $(if ($descriptionChanged) { 'changed' } else { 'unchanged' }), $hash.Substring(0, 12))
