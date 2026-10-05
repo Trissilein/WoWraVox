@@ -591,7 +591,7 @@ do
     check("retargeting member 2 leaves rule name, icon and message alone",
         multi.members[2].itemID == 333 and multi.name == "Alpha" and multi.icon == nil and multi.message == "{item} ready")
     ns.retargetItemRule(multi, 1, 333, "Gamma", "iconG", 13)
-    check("retargeting member 1 renames the rule", multi.name == "Gamma" and multi.icon == "iconG"
+    check("retargeting member 1 renames the rule after the slot", multi.name == "Trinket 1" and multi.icon == "iconG"
         and multi.members[1].itemID == 333 and multi.message == "{item} ready")
 
     -- Context helper for previews.
@@ -665,3 +665,420 @@ check("wvprof on installs the timing script, off restores the raw handler",
 check("wvprof counts events and scans only while on", countedOn and countedOffUnchanged and resetEmpty)
 check("wvprof output stays within 15 lines", shownLines > 0 and shownLines <= 15, tostring(shownLines))
 check("wvprof load timings are empty before ADDON_LOADED", ns.Prof.load.total == nil)
+
+-- One-line member rows: the name is plain (FontString colour), "· id" and a note are dimmed by a colour code.
+check("member row text: name only", ns.memberRowText("Hoof") == "Hoof" and ns.memberRowText("Hoof", nil, "") == "Hoof")
+check("member row text: name and id", ns.memberRowText("Hoof", 193762) == "Hoof |cff8c929a\194\183 193762|r")
+check("member row text: name, id and note", ns.memberRowText("Unknown ID", 2825, "invalid") == "Unknown ID |cff8c929a\194\183 2825 \194\183 invalid|r")
+check("member row text: nil name stays a string", ns.memberRowText(nil, 5) == " |cff8c929a\194\183 5|r")
+
+-- On-screen text anchor: pure helpers.
+do
+    local function snapped(x, y, grid, free)
+        local sx, sy = ns.snapScreenOffset(x, y, grid, free)
+        return sx .. "," .. sy
+    end
+    check("snap: grid of 20, a line catches within 6 px", snapped(23, -47, 20) == "20,-47" and snapped(24, 26, 20) == "20,20")
+    check("snap: farther than 6 px from every line stays where it is", snapped(7, -7, 20) == "7,-7" and snapped(27, 13, 20) == "27,13")
+    check("snap: centre lines catch within 6 px", snapped(6, -6, 20) == "0,0" and snapped(-5, 5, 20) == "0,0")
+    check("snap: each axis snaps on its own", snapped(5, 125, 20) == "0,120" and snapped(98, 3, 20) == "100,0")
+    check("snap: exactly on the grid stays", snapped(120, -300, 20) == "120,-300")
+    check("snap: free mode only rounds to whole pixels", snapped(23.4, -47.6, 20, true) == "23,-48" and snapped(2, 3, 20, true) == "2,3")
+    check("snap: bad input is harmless (default grid 10)", snapped(nil, "x", 0) == "0,0" and snapped(13, 13, 0) == "10,10" and snapped(13, 13) == "10,10")
+    check("snap: negative values mirror positive ones", snapped(-23, 47, 20) == "-20,47" and snapped(-5, -4, 20) == "0,0")
+    check("snap: a wider grid (40) catches within 6 px of its lines", snapped(37, 50, 40) == "40,50" and snapped(46, 80, 40) == "40,80")
+    check("snap: grid of 10 (the default), lines catch within 6 px, the centre wins",
+        snapped(23, -47, 10) == "20,-50" and snapped(52, 3, 10) == "50,0" and snapped(6, -6, 10) == "0,0" and snapped(7, -7, 10) == "10,-10"
+        and snapped(-14, 26, 10) == "-10,30" and snapped(120, -300, 10) == "120,-300")
+    check("snap: grid of 10, Shift places freely", snapped(23.4, -47.6, 10, true) == "23,-48")
+    check("grid step: 10 px (about 300 lines on 1920x1080), doubled above 400 lines",
+        ns.screenGridStep(1920, 1080) == 10 and ns.screenGridStep(1280, 720) == 10 and ns.screenGridStep(nil, nil) == 10
+        and ns.screenGridStep(2560, 1440) == 20 and ns.screenGridStep(3840, 2160) == 20 and ns.screenGridStep(7680, 4320) == 40)
+
+    -- anchor mode ends with the window / combat: ns.endScreenAnchor locks the current target, nothing else
+    local realUnlock, ended = ns.setScreenAnchorUnlocked, {}
+    ns.setScreenAnchorUnlocked = function(frame, unlocked) ended[#ended + 1] = { frame, unlocked } end
+    ns.screenAnchorTarget = nil
+    ns.endScreenAnchor()
+    check("endScreenAnchor: no target, no call", #ended == 0)
+    local target = {}
+    ns.screenAnchorTarget = target
+    ns.endScreenAnchor()
+    check("endScreenAnchor: locks the current target once", #ended == 1 and ended[1][1] == target and ended[1][2] == false)
+    ns.setScreenAnchorUnlocked, ns.screenAnchorTarget = realUnlock, nil
+
+    local w, h, wrap = ns.screenTextSize(100, 30, 1536)
+    check("text size: padding 16 per side and 4 top/bottom", w == 132 and h == 38 and wrap == false)
+    w, h, wrap = ns.screenTextSize(1504, 30, 1536)
+    check("text size: exactly the maximum does not wrap", w == 1536 and wrap == false)
+    w, h, wrap = ns.screenTextSize(1600, 30, 1536)
+    check("text size: wider than 80 % of the screen is capped and wraps", w == 1536 and h == 38 and wrap == true)
+    w, h, wrap = ns.screenTextSize(2000, 12, nil)
+    check("text size: no maximum never wraps; empty text is just the padding", wrap == false and w == 2032 and select(1, ns.screenTextSize(0, 0, 100)) == 32)
+
+    local cx, cy = ns.screenCenterOffset({ point = "CENTER", relativePoint = "CENTER", x = 12, y = -34 }, 1920, 1080)
+    check("anchor CENTER/CENTER is already the frame centre", cx == 12 and cy == -34)
+    cx, cy = ns.screenCenterOffset({ point = "TOPLEFT", relativePoint = "TOPLEFT", x = 10, y = -20 }, 1920, 1080)
+    check("legacy TOPLEFT anchor of the 800x80 frame becomes a centre offset", cx == -550 and cy == 480, cx .. "," .. cy)
+    cx, cy = ns.screenCenterOffset({ point = "BOTTOM", relativePoint = "BOTTOM", x = 0, y = 100 }, 1920, 1080)
+    check("legacy BOTTOM anchor", cx == 0 and cy == -540 + 100 + 40, cx .. "," .. cy)
+    cx, cy = ns.screenCenterOffset(nil, 1920, 1080)
+    check("missing anchor falls back to the default (0, 120)", cx == 0 and cy == 120)
+end
+
+-- Help tooltips: extra lines in order, a font override only where asked, reset by ns.resetTooltipFonts.
+do
+    local function newFontString(n)
+        local fs = { n = n }
+        function fs:SetFont(path, size, flags) self.font = path .. "|" .. size .. "|" .. flags end
+        function fs:SetFontObject(object) self.font = nil; self.object = object end
+        return fs
+    end
+    GameTooltipText = "default-tooltip-font"
+    for n = 1, 12 do _G["GameTooltipTextLeft" .. n] = newFontString(n) end
+    local function newTooltip()
+        local tooltip = { lines = {} }
+        function tooltip:SetText(text) self.lines = { { text = text } } end
+        function tooltip:AddLine(text, r, g, b, wrap) self.lines[#self.lines + 1] = { text = text, r = r, g = g, b = b, wrap = wrap } end
+        function tooltip:NumLines() return #self.lines end
+        return tooltip
+    end
+    local brace = { "Fonts\\ARIALN.TTF", 13, "" }
+    local tooltip = newTooltip()
+    ns.fillHelpTooltip(tooltip, "Title", "Explanation", {
+        { text = "{item} - first", font = brace },
+        { text = "plain" },
+        { text = "{slot} ready", r = 0.624, g = 0.878, b = 1, font = brace },
+    })
+    check("help tooltip: title, explanation, then the extra lines in order",
+        #tooltip.lines == 5 and tooltip.lines[1].text == "Title" and tooltip.lines[2].text == "Explanation"
+        and tooltip.lines[3].text == "{item} - first" and tooltip.lines[4].text == "plain" and tooltip.lines[5].text == "{slot} ready")
+    check("help tooltip: only lines with a font entry get the override (lines 3 and 5)",
+        GameTooltipTextLeft3.font == "Fonts\\ARIALN.TTF|13|" and GameTooltipTextLeft5.font == "Fonts\\ARIALN.TTF|13|"
+        and GameTooltipTextLeft1.font == nil and GameTooltipTextLeft2.font == nil and GameTooltipTextLeft4.font == nil)
+    check("help tooltip: extra line colour is passed on", tooltip.lines[5].r == 0.624 and tooltip.lines[5].b == 1 and tooltip.lines[4].r == 0.85)
+    ns.resetTooltipFonts()
+    check("help tooltip: reset hands the overridden lines back to the default font object",
+        GameTooltipTextLeft3.font == nil and GameTooltipTextLeft3.object == "default-tooltip-font"
+        and GameTooltipTextLeft5.object == "default-tooltip-font" and GameTooltipTextLeft4.object == nil)
+    ns.resetTooltipFonts()
+    check("help tooltip: reset twice is harmless", ns.tooltipFontLines == nil)
+    -- a second tooltip resets the first one's overrides before it adds its own lines
+    tooltip = newTooltip()
+    ns.fillHelpTooltip(tooltip, "A", nil, { { text = "{x}", font = brace } })
+    local overridden = GameTooltipTextLeft2.font ~= nil
+    ns.fillHelpTooltip(newTooltip(), "B", "plain only")
+    check("help tooltip: the next tooltip clears stale overrides", overridden and GameTooltipTextLeft2.font == nil)
+    -- a font that cannot be set is skipped without error
+    GameTooltipTextLeft2.SetFont = function() error("bad font") end
+    local ok = pcall(ns.fillHelpTooltip, newTooltip(), "C", nil, { { text = "{y}", font = brace } })
+    check("help tooltip: a failing SetFont is swallowed", ok and ns.tooltipFontLines == nil)
+    check("help tooltip: old three-argument callers still work", pcall(ns.fillHelpTooltip, newTooltip(), "D", "text"))
+end
+
+-- Never-secret auras (Sated family): readable in combat, nil is a reliable "absent".
+do
+    local secrecyLevel = { [57724] = 0, [2825] = 2, [999] = 1 }
+    C_Secrets = {
+        ShouldAurasBeSecret = function() return true end,
+        GetSpellAuraSecrecy = function(spellID) return secrecyLevel[spellID] end,
+    }
+    C_Spell = {
+        IsSelfBuff = function() return false end,
+        GetSpellInfo = function(spellID) return { name = "Spell " .. spellID, iconID = 1 } end,
+    }
+    check("auraSecrecy: 0 is never, 2 contextual, 1 always",
+        ns._Aura.auraSecrecy(57724) == "never" and ns._Aura.auraSecrecy(2825) == "contextual"
+        and ns._Aura.auraSecrecy(999) == "always")
+    check("auraSecrecy: unlisted ID is unknown", ns._Aura.auraSecrecy(12345) == "unknown")
+    local savedSecrets = C_Secrets
+    C_Secrets = { ShouldAurasBeSecret = savedSecrets.ShouldAurasBeSecret }
+    ns._Aura.secrecyCache = {}
+    check("auraSecrecy: missing API is unknown", ns._Aura.auraSecrecy(57724) == "unknown")
+    C_Secrets = savedSecrets
+    ns._Aura.secrecyCache = {}
+
+    C_VoiceChat = { SpeakText = function(_, message) table.insert(ttsMessages, message) end }
+    ns.AuraSoundFallback.Refresh = function() end
+    ns.AuraSoundFallback.LogAura = function() end
+    local present = {}
+    C_UnitAuras = {
+        GetPlayerAuraBySpellID = function(spellID) return present[spellID] end,
+    }
+    local function newAuraRule(spellID)
+        return {
+            id = "sated", enabled = true, applyEnabled = true, applyMessage = "Hammer Time",
+            expireEnabled = true, expireMessage = "Bloodlust ready", spellIDs = { spellID },
+            alertCategory = "none", voiceID = 8, volume = 100, speechSpeed = 100,
+            applySoundEnabled = false, expireSoundEnabled = false,
+            applySoundChannel = "Master", expireSoundChannel = "Master", screenProfiles = {},
+        }
+    end
+    local function setup(spellID)
+        clearOutput()
+        present = {}
+        WoWraVoxDB = { auras = { newAuraRule(spellID) } }
+        ns._Aura.syncAllAuras(true) -- baseline: nothing active
+        runTimers()
+        ttsMessages = {}
+    end
+
+    -- never secret: apply and expire are spoken although auras are secret (combat)
+    setup(57724)
+    present[57724] = { spellId = 57724, auraInstanceID = 1, expirationTime = 600 }
+    ns._Aura.processAura(57724, false, "UNIT_AURA")
+    runTimers()
+    check("never-secret aura applies in combat", ttsMessages[1] == "Hammer Time", tostring(ttsMessages[1]))
+    ttsMessages = {}
+    present[57724] = nil
+    now = 100 -- removed long before its expiry moment: early removal stays silent, state is cleared
+    ns._Aura.processAura(57724, false, "UNIT_AURA")
+    runTimers()
+    check("never-secret early removal clears state without Expire", #ttsMessages == 0)
+    present[57724] = { spellId = 57724, auraInstanceID = 2, expirationTime = 600 }
+    ns._Aura.processAura(57724, false, "UNIT_AURA")
+    runTimers()
+    check("never-secret aura applies again after clearing", ttsMessages[#ttsMessages] == "Hammer Time")
+    ttsMessages = {}
+    present[57724] = nil
+    now = 600
+    ns._Aura.processAura(57724, false, "AURA_TIMER")
+    runTimers()
+    check("never-secret aura expires in combat", ttsMessages[1] == "Bloodlust ready", tostring(ttsMessages[1]))
+
+    -- contextual: nil in combat stays unknown, nothing is spoken or cleared
+    setup(2825)
+    present[2825] = { spellId = 2825, auraInstanceID = 3, expirationTime = 600 }
+    ns._Aura.processAura(2825, false, "UNIT_AURA")
+    runTimers()
+    ttsMessages = {}
+    present[2825] = nil
+    now = 100
+    ns._Aura.processAura(2825, false, "UNIT_AURA")
+    runTimers()
+    check("contextual aura: nil in combat is unknown, no output", #ttsMessages == 0)
+end
+
+-- One-effect rules (Bloodlust buffs + Sated debuffs), built-in rules and the /wvdebug sim playback.
+do
+    local queue = {}
+    C_Timer = { After = function(delay, callback) table.insert(queue, { at = now + delay, cb = callback }) end }
+    local function advance(untilTime)
+        while true do
+            local bestIndex
+            for index, item in ipairs(queue) do
+                if item.at <= untilTime and (not bestIndex or item.at < queue[bestIndex].at) then bestIndex = index end
+            end
+            if not bestIndex then break end
+            local item = table.remove(queue, bestIndex)
+            if item.at > now then now = item.at end
+            item.cb()
+        end
+        now = untilTime
+    end
+    local chat = {}
+    DEFAULT_CHAT_FRAME = { AddMessage = function(_, line) table.insert(chat, line) end }
+    InCombatLockdown = function() return false end
+    C_Secrets = {
+        ShouldAurasBeSecret = function() return true end,
+        GetSpellAuraSecrecy = function(spellID) return spellID == 57724 and 0 or 2 end,
+    }
+    C_Spell = { IsSelfBuff = function(spellID) return selfBuffIDs[spellID] == true end,
+        GetSpellInfo = function(spellID) return { name = "Spell " .. spellID, iconID = 1 } end }
+    C_VoiceChat = { SpeakText = function(_, message) table.insert(ttsMessages, message) end }
+    ns.AuraSoundFallback.Refresh = function() end
+    ns.AuraSoundFallback.LogAura = function() end
+    ns.Defaults = { auras = { {
+        presetID = "heroism-bloodlust", builtin = true, oneEffect = true, enabled = true,
+        spellIDs = { 2825, 57724 }, applyEnabled = true, applyMessage = "Bloodlust",
+        expireEnabled = true, expireMessage = "Bloodlust ready",
+    } } }
+
+    local function bloodlustRule(oneEffect)
+        return {
+            id = "bl", presetID = "heroism-bloodlust", builtin = true, oneEffect = oneEffect, enabled = true,
+            spellIDs = { 2825, 57724 }, applyEnabled = true, applyMessage = "Bloodlust",
+            expireEnabled = true, expireMessage = "Bloodlust ready", alertCategory = "none",
+            voiceID = 8, volume = 100, speechSpeed = 100, applySoundEnabled = false, expireSoundEnabled = false,
+            applySoundChannel = "Master", expireSoundChannel = "Master", screenProfiles = {},
+        }
+    end
+    local function reset(rule)
+        clearOutput()
+        queue = {}
+        chat = {}
+        ttsMessages = {}
+        ns._Aura.sim = nil
+        WoWraVoxDB = { auras = { rule } }
+        ns._Aura.syncAllAuras(true)
+        ttsMessages = {}
+    end
+
+    -- ensureBuiltinRules
+    local list = {}
+    ns.ensureBuiltinRules(list)
+    check("builtin rule is created when missing",
+        #list == 1 and list[1].presetID == "heroism-bloodlust" and list[1].builtin and list[1].oneEffect
+        and list[1].enabled == true and list[1].id == "builtin-heroism-bloodlust")
+    local old = { presetID = "heroism-bloodlust", enabled = false, spellIDs = { 2825 }, expireMessage = "mine" }
+    local oldList = { old }
+    ns.ensureBuiltinRules(oldList)
+    ns.ensureBuiltinRules(oldList)
+    check("existing preset rule gains the missing IDs, keeps the user's settings, stays one rule",
+        #oldList == 1 and #old.spellIDs == 2 and old.spellIDs[2] == 57724 and old.expireMessage == "mine"
+        and old.enabled == false and old.builtin and old.oneEffect)
+    check("builtin trigger lookup", ns.isBuiltinTrigger(old, 57724) and not ns.isBuiltinTrigger(old, 1)
+        and not ns.isBuiltinTrigger({ spellIDs = {} }, 57724))
+
+    -- core: one effect, both readable
+    local present = {}
+    C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return present[spellID] end }
+    C_Secrets.ShouldAurasBeSecret = function() return false end
+    reset(bloodlustRule(true))
+    present[2825] = { spellId = 2825, auraInstanceID = 1, expirationTime = 40 }
+    present[57724] = { spellId = 57724, auraInstanceID = 2, expirationTime = 600 }
+    ns._Aura.processAura(2825, false, "UNIT_AURA")
+    ns._Aura.processAura(57724, false, "UNIT_AURA")
+    advance(0.5)
+    check("one effect: buff and debuff together announce the start once",
+        #ttsMessages == 1 and ttsMessages[1] == "Bloodlust", #ttsMessages)
+    ttsMessages = {}
+    present[2825] = nil
+    advance(40.5)
+    check("one effect: the buff ending is silent while the debuff runs", #ttsMessages == 0)
+    present[57724] = nil
+    advance(601)
+    check("one effect: the debuff ending announces the end once",
+        #ttsMessages == 1 and ttsMessages[1] == "Bloodlust ready", #ttsMessages)
+
+    -- without the option every trigger announces on its own
+    reset(bloodlustRule(false))
+    now = 1000
+    present = { [2825] = { spellId = 2825, auraInstanceID = 1, expirationTime = 1040 },
+        [57724] = { spellId = 57724, auraInstanceID = 2, expirationTime = 1600 } }
+    ns._Aura.processAura(2825, false, "UNIT_AURA")
+    ns._Aura.processAura(57724, false, "UNIT_AURA")
+    advance(1000.5)
+    check("without the option both triggers announce (joined into one call)",
+        #ttsMessages == 1 and ttsMessages[1] == "Bloodlust. Bloodlust", tostring(ttsMessages[1]))
+
+    -- own cast first, readable debuff a moment later: one start
+    present = {}
+    reset(bloodlustRule(true))
+    now = 2000
+    C_Secrets.ShouldAurasBeSecret = function() return true end
+    selfBuffIDs[2825] = true
+    ns._Aura.handleCast("player", "guid-bl", 2825)
+    advance(2000.2)
+    present[57724] = { spellId = 57724, auraInstanceID = 2, expirationTime = 2600 }
+    ns._Aura.processAura(57724, false, "UNIT_AURA")
+    advance(2000.6)
+    check("own cast then its Sated debuff: the start is spoken once", #ttsMessages == 1, #ttsMessages)
+    selfBuffIDs[2825] = nil
+
+    -- category word: one-effect rule with a readable trigger registers it for no ID (policy lives in AuraSoundFallback)
+    -- /wvdebug sim
+    present = {}
+    reset(bloodlustRule(true))
+    now = 3000
+    ns.Simulation.Start()
+    advance(3040)
+    local verdict = chat[#chat] or ""
+    check("sim: one-effect rule passes both scenarios", verdict:find("PASS", 1, true) ~= nil, table.concat(chat, " | "))
+    check("sim: simulation hook is removed afterwards", ns._Aura.sim == nil)
+    reset(bloodlustRule(false))
+    now = 4000
+    ns.Simulation.Start()
+    advance(4040)
+    print("INFO sim output: " .. table.concat(chat, " | "))
+    check("sim: a rule without one-effect fails the check (double start)",
+        (chat[#chat] or ""):find("FAIL", 1, true) ~= nil, table.concat(chat, " | "))
+    reset(bloodlustRule(true))
+    ns.Simulation.Start()
+    ns.Simulation.Stop()
+    check("sim: stop aborts and cleans up", ns._Aura.sim == nil)
+end
+
+-- Slot rules are named after the slot, not after the trinket that sits there.
+do
+    local itemNames = { [193762] = "Blazebinder's Hoof", [242395] = "Astral Antenna" }
+    GetItemInfo = function(itemID) return itemNames[itemID] end
+    GetInventoryItemTexture = function() return 1 end
+    local worn = { [13] = 242395 }
+    GetInventoryItemID = function(_, slotID) return worn[slotID] end
+
+    local rule = { name = "Blazebinder's Hoof", members = { { itemID = 193762, slotID = 13 } } }
+    ns.nameSlotRule(rule)
+    check("slot rule saved with the item's name is renamed to the slot", rule.name == "Trinket 1", rule.name)
+    ns.nameSlotRule(rule)
+    check("renaming a slot rule twice changes nothing", rule.name == "Trinket 1")
+
+    local rewritten = { name = "Astral Antenna", members = { { itemID = 193762, slotID = 13 } } }
+    ns.nameSlotRule(rewritten)
+    check("the name of the item sitting in the slot now is replaced too", rewritten.name == "Trinket 1")
+
+    local custom = { name = "My trinket", members = { { itemID = 193762, slotID = 13 } } }
+    ns.nameSlotRule(custom)
+    check("a name the user typed is kept", custom.name == "My trinket")
+
+    local exact = { name = "Blazebinder's Hoof", members = { { itemID = 193762 } } }
+    ns.nameSlotRule(exact)
+    check("a rule for one exact item keeps the item's name", exact.name == "Blazebinder's Hoof")
+
+    local starter = { starter = "trinket", name = "Add a trinket", members = {} }
+    ns.retargetItemRule(starter, 1, 242395, "Astral Antenna", 1, 13)
+    check("picking a trinket for the starter names the rule after the slot",
+        starter.name == "Trinket 1" and starter.message == "Trinket 1 ready", starter.name .. " / " .. tostring(starter.message))
+    local exactPick = { starter = "trinket", name = "Add a trinket", members = {} }
+    ns.retargetItemRule(exactPick, 1, 242395, "Astral Antenna", 1, nil)
+    check("picking one exact item keeps the item's name", exactPick.name == "Astral Antenna")
+end
+
+-- Shipped starter set: Bloodlust, an empty defensives rule, one rule per trinket slot, nothing else.
+do
+    ns.Defaults = ns.RealDefaults
+    local db = ns.CreateStarterDatabase()
+    check("starter: exactly two aura rules (Bloodlust, defensives)", #db.auras == 2)
+    local bl, def = db.auras[1], db.auras[2]
+    check("starter: Bloodlust is built in, one effect, with buffs and Sated debuffs",
+        bl.presetID == "heroism-bloodlust" and bl.builtin and bl.oneEffect and bl.enabled and #bl.spellIDs == 13)
+    check("starter: defensives rule is empty and off", def.presetID == "defensives" and #def.spellIDs == 0 and not def.enabled)
+    check("starter: fallback categories are on and the defensives rule is called Defensives",
+        bl.alertCategory == "bloodlust" and def.alertCategory == "defensive" and def.name == "Defensives")
+    check("starter: no skill rules", #db.skills == 0)
+    check("starter: exactly two item rules, one per trinket slot", #db.items == 2
+        and db.items[1].members[1].slotID == 13 and db.items[2].members[1].slotID == 14
+        and db.items[1].members[1].itemID == nil and #db.items[1].members == 1)
+    check("starter: trinket rules are named and worded after the slot",
+        db.items[1].name == "Trinket 1" and db.items[1].message == "Trinket 1 ready"
+        and db.items[2].name == "Trinket 2" and db.items[2].message == "Trinket 2 ready")
+    check("starter: the old 'Add a trinket' placeholder is gone",
+        db.items[1].starter == nil and db.items[2].starter == nil)
+    local item = db.items[1]
+    ns.normalizeItemRule(item)
+    check("starter: a slot member without an item survives normalizing",
+        #item.members == 1 and item.members[1].slotID == 13 and ns.isEmptyStarter(item) == false)
+    ns.nameSlotRule(item)
+    check("starter: naming the slot rule keeps the slot name", item.name == "Trinket 1")
+end
+
+-- expireCategory normalizing and the one-time category switch for an existing built-in rule.
+do
+    local rule = { alertCategory = "Bloodlust", expireCategory = "Defensive cooldown" }
+    ns.normalizeNotificationSettings(rule, "auras")
+    check("expireCategory accepts the same values as alertCategory", rule.alertCategory == "bloodlust" and rule.expireCategory == "defensive")
+    local bare = {}
+    ns.normalizeNotificationSettings(bare, "auras")
+    check("expireCategory defaults to none for aura rules", bare.expireCategory == "none")
+    local item = {}
+    ns.normalizeNotificationSettings(item, "items")
+    check("item rules get no expireCategory", item.expireCategory == nil)
+    ns.Defaults = ns.RealDefaults
+    local old = { presetID = "heroism-bloodlust", alertCategory = "none", spellIDs = { 2825 } }
+    local list = { old }
+    ns.ensureBuiltinRules(list)
+    check("existing built-in rule gets the fallback cue once", old.alertCategory == "bloodlust" and old.builtinCategorySet == true)
+    old.alertCategory = "none" -- the user switched it off on purpose
+    ns.ensureBuiltinRules(list)
+    check("the user's later choice is kept", old.alertCategory == "none")
+end

@@ -4,7 +4,7 @@ WoWraVox is a World of Warcraft Retail addon for Heroism, Bloodlust, Time Warp, 
 
 ## Version
 
-Current stable version: **0.10.0**.
+Current stable version: **0.11.0**.
 
 ## What it does
 
@@ -19,13 +19,13 @@ Current stable version: **0.10.0**.
 
 ## First launch
 
-A new profile starts with three disabled examples:
+A new profile starts with these rules and nothing else:
 
-1. **Heroism / Bloodlust** shows a completed seven-trigger aura rule.
-2. **Add your defensive auras** is an empty aura rule ready for your spell IDs.
-3. **Add a trinket** opens the equipped-item picker and becomes an item rule after selection.
+1. **Heroism / Bloodlust** is a built-in aura rule (buffs plus the Sated family, which stays readable in combat). It is active, cannot be deleted, and announces the start once and the end once.
+2. **Defensives** is an empty aura rule ready for your spell IDs (off until you fill it).
+3. **Trinket 1** and **Trinket 2** are item rules for the two trinket slots. They follow whichever trinket you wear and announce when it is ready again.
 
-Examples are copied only on first launch. Existing WoWraVox settings are preserved and never replaced.
+These rules are created only for a new profile. Existing WoWraVox settings are preserved and never replaced.
 
 ## Usage
 
@@ -34,6 +34,19 @@ Examples are copied only on first launch. Existing WoWraVox settings are preserv
 - An equipped-item rule can hold several items or slots (**Add item**); each announces on its own when its cooldown ends, `{item}` and `{slot}` in the message stand for the one that became ready, and an entry's tag switches between tracking the item and the slot it sits in.
 - Settings are stored in profiles that can be assigned per character and per specialization.
 - On-screen text profiles can be previewed, recolored, and independently anchored.
+
+## Interface skins
+
+The WoWraVox window can use one of two looks: **WoWraVox** (default, unchanged) or **Clean**. Pick one under the gear button (**Display options → Interface skin**) or with `/wvskin <wowravox|clean>`; `/wvskin` alone lists them, and `/wvskin errors` prints skin errors for troubleshooting. A change takes effect after `/reload` (the button and the slash command reload outside combat). The choice is stored in the active profile.
+
+The Clean textures live in `Assets/skin/` and `SkinData.lua` is generated from them. To rebuild them from the design PNG set (default `.agents/ui-skin/out/assets`, or pass `--src <dir>`):
+
+```
+pip install pillow numpy
+python tools/Build-SkinAssets.py
+```
+
+The build losslessly trims the stretched centre of nine-slice textures to a small power-of-two strip (the game stretches it anyway) and verifies it by stretching each trimmed image back to the source PNG, pixel for pixel; textures whose centre is not uniform stay full size.
 
 ## Localization
 
@@ -62,6 +75,7 @@ python tools/Test-LuaSyntax.py                      # Lua 5.1 syntax + locals he
 node tools/Test-AuraSoundFallback.js                # one harness per tools/Test-*.js (Fengari)
 node tools/Test-SkillCharges.js
 node tools/Test-TargetNotifications.js
+node tools/Test-Skin.js
 pwsh tools/Test-DailyRelease.ps1 -Version <v>       # version, README, CHANGELOG, tag, repo hygiene, and same-day gate
 pwsh tools/New-ReleaseArchive.ps1 -Version <v>      # builds release/WoWraVox-<v>.zip and checks it against the TOC
 pwsh tools/Get-ChangelogSection.ps1 -Version <v>    # release notes used for GitHub, Wago, and CurseForge

@@ -106,7 +106,7 @@ ns.Layout.VALUE_W = 42      -- slider value label incl. its 8 px offset
 ns.Layout.ROW_X = 24        -- left edge of the first control (checkbox) of a panel row
 ns.Layout.BUTTON_W = 112    -- width of the right-hand test/preview/anchor buttons
 ns.Layout.MARGIN = 16       -- outer window margin / add-rule view inset
-ns.Layout.EXTRA_X = 16      -- left edge of the skill/item extra rows (heading, source text)
+ns.Layout.MEMBER_ROW_H = 28 -- trigger / item member rows: 20 px icon + the 8 px edges of the skin row art
 ns.Layout.refreshListPending = false
 
 -- The window is always maxWidth x maxHeight; on small screens it is scaled down instead of resized.
@@ -131,11 +131,26 @@ ns.Layout.getColumns = function(width)
     }
 end
 
+-- UIDropDownMenu_SetWidth plus the text zone (SetWidth resets the Text width, so the zone is applied after every
+-- call). Texture skins end the text before the arrow divider, cut off instead of wrapped; current keeps
+-- the native zone, which already ends before the arrow button.
+ns.Layout.setDropdownWidth = function(dropdown, width)
+    UIDropDownMenu_SetWidth(dropdown, width)
+    local right, textWidth = ns.Skin.DropdownTextZone(width + ns.Layout.DD_CHROME)
+    local text = right and dropdown.Text
+    if not text then return end
+    text:ClearAllPoints()
+    text:SetPoint("RIGHT", dropdown, "RIGHT", -right, 2)
+    text:SetWidth(textWidth)
+    text:SetJustifyH("RIGHT")
+    text:SetWordWrap(false)
+end
+
 -- Places a UIDropDownMenuTemplate frame so that its VISIBLE box spans visLeft .. visLeft + visWidth.
 ns.Layout.placeDropdown = function(dropdown, parent, visLeft, y, visWidth)
     dropdown:ClearAllPoints()
     dropdown:SetPoint("TOPLEFT", parent, "TOPLEFT", visLeft - ns.Layout.DD_INSET_L, y)
-    UIDropDownMenu_SetWidth(dropdown, visWidth + ns.Layout.DD_INSET_L + ns.Layout.DD_INSET_R - ns.Layout.DD_CHROME)
+    ns.Layout.setDropdownWidth(dropdown, visWidth + ns.Layout.DD_INSET_L + ns.Layout.DD_INSET_R - ns.Layout.DD_CHROME)
 end
 
 ns.Layout.clampEditorScroll = function(offset)
@@ -147,7 +162,7 @@ end
 ns.screenControls = {}
 ns.screenFrames = {}
 ns.notificationPanels = {}
-ns.Layout.expirationPanelState = setmetatable({}, { __mode = "k" })
+ns.Layout.panelState = setmetatable({}, { __mode = "k" }) -- rule -> { apply | expire | voice = expanded }; session only
 ns.listSectionCollapsed = ns.listSectionCollapsed or { Active = false, Inactive = false }
 ns.screenAnchorUnlocked = false
 ns.screenAnchorTarget = nil
@@ -514,6 +529,7 @@ local function newAuraRule()
         spellIDs = {},
         enabled = true,
         alertCategory = "none",
+        expireCategory = "none",
         applyEnabled = false,
         applyMessage = "",
         applySoundEnabled = false,
@@ -583,11 +599,19 @@ end
 
 function ns.CreateStarterDatabase()
     local defaults = ns.Defaults or {}
+    local items = copyDefault(defaults.items or {})
+    for _, rule in ipairs(items) do
+        local slotID = rule.members and rule.members[1] and rule.members[1].slotID
+        if slotID then
+            rule.name = ns.slotName(slotID)
+            rule.message = ns.slotDefaultMessage(slotID)
+        end
+    end
     return {
         version = DB_VERSION,
         starterPresetVersion = tonumber(defaults.version) or 1,
         auras = copyDefault(defaults.auras or {}),
-        items = copyDefault(defaults.items or {}),
+        items = items,
         skills = {},
     }
 end
@@ -664,6 +688,7 @@ end
 
 function ns.normalizeNotificationSettings(rule, category)
     rule.alertCategory = NOTIFICATION_CUE_ALIASES[rule.alertCategory] or "none"
+    if category == "auras" then rule.expireCategory = NOTIFICATION_CUE_ALIASES[rule.expireCategory] or "none" end
     local soundEvents = category == "auras" and { "apply", "expire" } or { "ready" }
     for _, eventKey in ipairs(soundEvents) do
         local mediaField = eventKey .. "SoundMediaName"
@@ -747,6 +772,54 @@ function ns.normalizeTargetRule(rule)
     rule.targetMessage = nil
     rule.combatCastByAuraID = nil
     rule.defensiveMappingVersion = nil
+end
+
+-- Built-in presets (Defaults.lua, builtin = true), currently the Bloodlust rule: always present, cannot be
+-- deleted, and their default triggers cannot be removed.  Everything else (texts, voice, on/off) stays editable.
+-- Idempotent: runs on every load for every profile.
+function ns.ensureBuiltinRules(rules)
+    if type(rules) ~= "table" then return end
+    for _, preset in ipairs(ns.Defaults and ns.Defaults.auras or {}) do
+        if preset.builtin and preset.presetID then
+            local found
+            for _, rule in ipairs(rules) do
+                if type(rule) == "table" and rule.presetID == preset.presetID then found = rule; break end
+            end
+            if not found then
+                found = copyDefault(preset)
+                found.id = "builtin-" .. preset.presetID
+                table.insert(rules, found)
+            end
+            found.builtin = true
+            found.oneEffect = preset.oneEffect == true
+            -- The fallback cue is switched on once for rules created before it was part of the preset.
+            if not found.builtinCategorySet then
+                found.builtinCategorySet = true
+                if preset.alertCategory and (found.alertCategory == nil or found.alertCategory == "none") then
+                    found.alertCategory = preset.alertCategory
+                end
+            end
+            found.spellIDs = type(found.spellIDs) == "table" and found.spellIDs or {}
+            local have = {}
+            for _, id in ipairs(found.spellIDs) do have[id] = true end
+            for _, id in ipairs(preset.spellIDs or {}) do
+                if not have[id] then table.insert(found.spellIDs, id) end
+            end
+        end
+    end
+end
+
+-- True when spellID is a trigger the built-in rule must keep.
+function ns.isBuiltinTrigger(rule, spellID)
+    if not (rule and rule.builtin) then return false end
+    for _, preset in ipairs(ns.Defaults and ns.Defaults.auras or {}) do
+        if preset.presetID == rule.presetID then
+            for _, id in ipairs(preset.spellIDs or {}) do
+                if id == spellID then return true end
+            end
+        end
+    end
+    return false
 end
 
 -- Holy Armaments (432459 Holy Bulwark / 432472 Sacred Weapon) used to be a linked "shared charge" pair.
@@ -841,6 +914,7 @@ local function initializeDatabase()
     local usedRuleIDs = {}
     local nextRuleID = tonumber(WoWraVoxDB.nextRuleID) or 0
 
+    ns.ensureBuiltinRules(WoWraVoxDB.auras)
     for _, rule in ipairs(WoWraVoxDB.auras) do
         nextRuleID = ns.ensureRuleID(rule, usedRuleIDs, nextRuleID)
         ns.Profiles.NormalizeRuleSpecializations(rule)
@@ -849,6 +923,7 @@ local function initializeDatabase()
         rule.enabled = rule.enabled ~= false
         rule.applyEnabled = rule.applyEnabled == true
         rule.applyMessage = type(rule.applyMessage) == "string" and rule.applyMessage or ""
+        rule.oneEffect = rule.oneEffect == true
         ns.normalizeTargetRule(rule)
         rule.applySoundEnabled = rule.applySoundEnabled == true
         rule.applySoundKitID = tonumber(rule.applySoundKitID) or DEFAULT_NOTIFICATION_SOUND_KIT
@@ -919,11 +994,13 @@ function ns.NormalizeAllProfiles()
             data.minimap = nil
             for _, category in ipairs({ "auras", "items", "skills" }) do
                 local rules = type(data[category]) == "table" and data[category] or {}
+                if category == "auras" and type(data.auras) == "table" then ns.ensureBuiltinRules(rules) end
                 for _, rule in ipairs(rules) do
                     if type(rule) == "table" then
                         ns.Profiles.NormalizeRuleSpecializations(rule)
                         if category == "auras" then
                             rule.spellIDs = copyIDs(rule.spellIDs or (rule.spellID and { tonumber(rule.spellID) } or {}))
+                            rule.oneEffect = rule.oneEffect == true
                             ns.normalizeTargetRule(rule)
                         end
                         if category == "items" then ns.normalizeItemRule(rule) end
@@ -1223,6 +1300,7 @@ local function safeAuraField(aura, key)
 end
 
 local function getAura(spellID)
+    if ns._Aura.sim then return ns._Aura.sim.getAura(spellID) end -- /wvdebug sim (Simulation.lua)
     if not (C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID) then return nil, false end
     local ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, spellID)
     if not ok or (issecretvalue and issecretvalue(aura))
@@ -1244,6 +1322,7 @@ end
 -- True while aura queries generally return secret values.  Falls back to combat
 -- lockdown when the API is missing or its result is not a readable boolean.
 function ns._Aura.aurasAreSecret()
+    if ns._Aura.sim then return ns._Aura.sim.secret end -- /wvdebug sim (Simulation.lua)
     if C_Secrets and type(C_Secrets.ShouldAurasBeSecret) == "function" then
         local ok, secret = pcall(C_Secrets.ShouldAurasBeSecret)
         if ok and type(secret) == "boolean" and not (issecretvalue and issecretvalue(secret)) then
@@ -1251,6 +1330,45 @@ function ns._Aura.aurasAreSecret()
         end
     end
     return InCombatLockdown and InCombatLockdown() or false
+end
+
+-- Blizzard's base secrecy class for an aura ID (C_Secrets.GetSpellAuraSecrecy): "never" auras (e.g. the
+-- Sated/Exhaustion family) stay readable in combat, "always"/"contextual" ones can be hidden.
+-- Returns "never", "always", "contextual" or "unknown" (API missing or unreadable).
+ns._Aura.secrecyCache = {}
+function ns._Aura.auraSecrecy(spellID)
+    local cache = ns._Aura.secrecyCache
+    if cache[spellID] then return cache[spellID] end
+    local result = "unknown"
+    if C_Secrets and type(C_Secrets.GetSpellAuraSecrecy) == "function" and isPublicNumber(spellID) then
+        local ok, level = pcall(C_Secrets.GetSpellAuraSecrecy, spellID)
+        if ok and type(level) == "number" and not (issecretvalue and issecretvalue(level)) then
+            local levels = Enum and Enum.SecrecyLevel
+            if level == (levels and levels.NeverSecret or 0) then result = "never"
+            elseif level == (levels and levels.AlwaysSecret or 1) then result = "always"
+            elseif level == (levels and levels.ContextuallySecret or 2) then result = "contextual" end
+        end
+    end
+    if result ~= "unknown" then cache[spellID] = result end
+    return result
+end
+
+-- /wvdebug secrecy: Blizzard's secrecy class for every aura ID in the aura rules.
+function ns._Aura.printSecrecy()
+    local function say(line)
+        if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. line) end
+    end
+    say("ShouldAurasBeSecret: " .. tostring(ns._Aura.aurasAreSecret()))
+    local seen = {}
+    for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+        for _, spellID in ipairs(type(rule.spellIDs) == "table" and rule.spellIDs or {}) do
+            if not seen[spellID] then
+                seen[spellID] = true
+                local info = getSpellInfo(spellID)
+                say(string.format("%s · %s · %s", info and info.name or "?", tostring(spellID), ns._Aura.auraSecrecy(spellID)))
+            end
+        end
+    end
 end
 
 function ns._Aura.getTTSRate(speedPercent)
@@ -1399,13 +1517,78 @@ function ns.applyScreenFrameStyle(frame, profile)
         frame.text:SetShadowColor(0, 0, 0, 0)
         frame.text:SetShadowOffset(0, 0)
     end
+    ns.fitScreenFrame(frame) -- font / size changed: re-measure the current text
+end
+
+-- Frame size around a text of the given measured size: 16 px left/right and 4 px top/bottom padding. Wider than
+-- maxWidth: the frame is maxWidth wide and the third result tells the caller to wrap and measure again.
+function ns.screenTextSize(stringWidth, stringHeight, maxWidth)
+    local width = (tonumber(stringWidth) or 0) + 32
+    local height = (tonumber(stringHeight) or 0) + 8
+    maxWidth = tonumber(maxWidth)
+    if maxWidth and width > maxWidth then return maxWidth, height, true end
+    return width, height, false
+end
+
+-- The frame hugs its text (centred on the anchor point): one line, no wrapping, until 80 % of the screen width.
+function ns.fitScreenFrame(frame)
+    local text = frame and frame.text
+    if not (text and text:GetText()) then return end
+    local maxWidth = (UIParent:GetWidth() or 1920) * 0.8
+    text:SetWordWrap(false)
+    text:SetWidth(0)
+    local width, height, wrap = ns.screenTextSize(text:GetStringWidth(), text:GetStringHeight(), maxWidth)
+    if wrap then
+        text:SetWidth(maxWidth - 32)
+        text:SetWordWrap(true)
+        width, height = ns.screenTextSize(maxWidth - 32, text:GetStringHeight(), maxWidth)
+    end
+    frame:SetSize(width, height)
+end
+
+-- Snap an offset from the screen centre (x right, y up) to the guide grid: within 6 px of a grid line it lands
+-- on the line, otherwise it stays where it is. The centre lines (line 0) win: within 6 px of the centre the
+-- text always lands on it, even on a fine grid. free = no snapping. Whole pixels either way.
+function ns.snapScreenOffset(x, y, grid, free)
+    x, y = tonumber(x) or 0, tonumber(y) or 0
+    if free then return math.floor(x + 0.5), math.floor(y + 0.5) end
+    grid = tonumber(grid) or 10
+    if grid < 1 then grid = 10 end
+    local function snap(value)
+        if math.abs(value) <= 6 then return 0 end
+        local line = math.floor(value / grid + 0.5) * grid
+        return math.abs(value - line) <= 6 and line or math.floor(value + 0.5)
+    end
+    return snap(x), snap(y)
+end
+
+-- Spacing of the guide lines: 10 px, doubled while the screen would need more than 400 lines.
+function ns.screenGridStep(width, height)
+    width, height = tonumber(width) or 1920, tonumber(height) or 1080
+    local step = 10
+    while width / step + height / step + 2 > 400 do step = step * 2 end
+    return step
+end
+
+-- Offset of the frame CENTRE from the screen centre for a saved anchor. Anchors saved by older versions used any
+-- point of an 800 x 80 frame; they are converted so the text stays where it was.
+function ns.screenCenterOffset(anchor, screenWidth, screenHeight)
+    anchor = ns.copyScreenAnchor(anchor)
+    local function fraction(point)
+        return point:find("LEFT") and -0.5 or point:find("RIGHT") and 0.5 or 0,
+            point:find("BOTTOM") and -0.5 or point:find("TOP") and 0.5 or 0
+    end
+    local rx, ry = fraction(anchor.relativePoint)
+    local px, py = fraction(anchor.point)
+    return anchor.x + rx * (tonumber(screenWidth) or 0) - px * 800, anchor.y + ry * (tonumber(screenHeight) or 0) - py * 80
 end
 
 function ns.positionScreenFrame(frame, profile)
     if not (frame and profile) then return end
     frame:ClearAllPoints()
-    local anchor = ns.copyScreenAnchor(profile.anchor)
-    frame:SetPoint(anchor.point, UIParent, anchor.relativePoint, anchor.x, anchor.y)
+    local x, y = ns.screenCenterOffset(profile.anchor, UIParent:GetWidth(), UIParent:GetHeight())
+    frame:SetPoint("CENTER", UIParent, "CENTER", x, y)
+    if ns.screenAnchorTarget == frame then ns.updateScreenGuides(frame) end
 end
 
 function ns.updateScreenAnchorButtons()
@@ -1436,29 +1619,138 @@ function ns.saveScreenFrameAnchor(frame)
     if not (frame and frame.rule and frame.eventKey) then return end
     local profile = ns.getRuleScreenProfile(frame.rule, frame.eventKey)
     if not profile then return end
-    local point, _, relativePoint, x, y = frame:GetPoint(1)
+    local _, _, _, x, y = frame:GetPoint(1)
     profile.anchor = ns.copyScreenAnchor({
-        point = point,
-        relativePoint = relativePoint,
-        x = x,
-        y = y,
+        point = "CENTER",
+        relativePoint = "CENTER",
+        x = math.floor((x or 0) + 0.5),
+        y = math.floor((y or 0) + 0.5),
     })
+end
+
+-- Anchor-mode overlay (created once, under the text frames): a screen-filling grid (faint lines every 10 px, every
+-- 5th line stronger, gold centre lines), the crosshair at the anchor point and a fixed coordinate field at the top.
+function ns.getScreenGuides()
+    if ns.screenGuides then return ns.screenGuides end
+    local guides = CreateFrame("Frame", nil, UIParent)
+    guides:SetAllPoints(UIParent)
+    guides:SetFrameStrata("TOOLTIP")
+    guides:SetFrameLevel(1)
+    guides:EnableMouse(false)
+    guides.lines = {} -- texture pool: created on demand, reused for every layout
+    guides.step = 10
+    guides.cross = CreateFrame("Frame", nil, guides)
+    guides.cross:SetSize(1, 1)
+    local function arm(width, height)
+        local tex = guides:CreateTexture(nil, "OVERLAY")
+        tex:SetColorTexture(0.95, 0.72, 0.25, 1)
+        tex:SetPoint("CENTER", guides.cross, "CENTER", 0, 0)
+        tex:SetSize(width, height)
+    end
+    arm(41, 1)
+    arm(1, 41)
+    -- above the text frames (level 5): the text can never cover the field
+    guides.coords = CreateFrame("Frame", nil, guides, "BackdropTemplate")
+    guides.coords:SetSize(150, 40)
+    guides.coords:SetPoint("TOP", UIParent, "TOP", 0, -30)
+    guides.coords:SetFrameLevel(10)
+    guides.coords:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
+    guides.coords:SetBackdropColor(0.03, 0.03, 0.04, 0.92)
+    guides.coords:SetBackdropBorderColor(0.72, 0.55, 0.22, 1)
+    guides.coords.text = guides.coords:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    guides.coords.text:SetPoint("CENTER", guides.coords, "CENTER", 0, 0)
+    guides.coords.text:SetJustifyH("CENTER")
+    guides:Hide()
+    ns.screenGuides = guides
+    return guides
+end
+
+-- (Re)build the grid for the current screen size; skipped while the size is unchanged.
+function ns.layoutScreenGuides(guides)
+    local width, height = UIParent:GetWidth() or 1920, UIParent:GetHeight() or 1080
+    local key = width .. "x" .. height
+    if guides.gridKey == key then return end
+    guides.gridKey = key
+    guides.step = ns.screenGridStep(width, height)
+    local used = 0
+    local function place(vertical, index)
+        used = used + 1
+        local tex = guides.lines[used]
+        if not tex then
+            tex = guides:CreateTexture(nil, "ARTWORK")
+            guides.lines[used] = tex
+        end
+        if index == 0 then tex:SetColorTexture(0.95, 0.72, 0.25, 0.4)
+        elseif index % 5 == 0 then tex:SetColorTexture(1, 1, 1, 0.12)
+        else tex:SetColorTexture(1, 1, 1, 0.04) end
+        local offset = index * guides.step
+        tex:ClearAllPoints()
+        if vertical then
+            tex:SetPoint("TOP", UIParent, "TOP", offset, 0)
+            tex:SetPoint("BOTTOM", UIParent, "BOTTOM", offset, 0)
+            tex:SetWidth(1)
+        else
+            tex:SetPoint("LEFT", UIParent, "LEFT", 0, offset)
+            tex:SetPoint("RIGHT", UIParent, "RIGHT", 0, offset)
+            tex:SetHeight(1)
+        end
+        tex:Show()
+    end
+    local columns, rows = math.floor(width / 2 / guides.step), math.floor(height / 2 / guides.step)
+    for index = -columns, columns do place(true, index) end
+    for index = -rows, rows do place(false, index) end
+    for index = used + 1, #guides.lines do guides.lines[index]:Hide() end
+end
+
+-- Put the crosshair on the frame's centre (= the anchor point) and refresh the coordinate field.
+function ns.updateScreenGuides(frame)
+    local guides = ns.screenGuides
+    if not (guides and frame) then return end
+    guides.cross:ClearAllPoints()
+    guides.cross:SetPoint("CENTER", frame, "CENTER", 0, 0)
+    local _, _, _, x, y = frame:GetPoint(1)
+    x, y = math.floor((x or 0) + 0.5), math.floor((y or 0) + 0.5)
+    if guides.shownX ~= x or guides.shownY ~= y then
+        guides.shownX, guides.shownY = x, y
+        guides.coords.text:SetText(string.format("x: %d  y: %d\n|cff8c929a%s|r", x, y, L("Shift = free")))
+    end
+end
+
+-- Drag in anchor mode: the frame follows the cursor and snaps to the grid (Shift = free). OnUpdate only runs
+-- while dragging.
+function ns.dragScreenFrame(frame)
+    local drag = frame.drag
+    if not drag then return end
+    local cursorX, cursorY = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale()
+    local x, y = ns.snapScreenOffset(drag.x + cursorX / scale - drag.cursorX, drag.y + cursorY / scale - drag.cursorY,
+        ns.screenGuides and ns.screenGuides.step or 10, IsShiftKeyDown())
+    frame:ClearAllPoints()
+    frame:SetPoint("CENTER", UIParent, "CENTER", x, y)
+    ns.updateScreenGuides(frame)
 end
 
 function ns.createScreenFrame(rule, eventKey)
     local frame = CreateFrame("Frame", nil, UIParent)
-    frame:SetSize(800, 80)
+    frame:SetSize(1, 1) -- fitted to the text by ns.fitScreenFrame
     frame:SetFrameStrata("TOOLTIP")
+    frame:SetFrameLevel(5)
     frame:SetClampedToScreen(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", function(self)
-        if ns.screenAnchorUnlocked and ns.screenAnchorTarget == self then self:StartMoving() end
+        if not (ns.screenAnchorUnlocked and ns.screenAnchorTarget == self) then return end
+        local _, _, _, x, y = self:GetPoint(1)
+        local cursorX, cursorY = GetCursorPosition()
+        local scale = UIParent:GetEffectiveScale()
+        self.drag = { cursorX = cursorX / scale, cursorY = cursorY / scale, x = x or 0, y = y or 0 }
+        self:SetScript("OnUpdate", ns.dragScreenFrame)
     end)
     frame:SetScript("OnDragStop", function(self)
-        if ns.screenAnchorUnlocked and ns.screenAnchorTarget == self then
-            self:StopMovingOrSizing()
+        self:SetScript("OnUpdate", nil)
+        if self.drag and ns.screenAnchorUnlocked and ns.screenAnchorTarget == self then
             ns.saveScreenFrameAnchor(self)
         end
+        self.drag = nil
     end)
     frame.anchorBorder = CreateFrame("Frame", nil, frame, "BackdropTemplate")
     frame.anchorBorder:SetAllPoints()
@@ -1467,11 +1759,10 @@ function ns.createScreenFrame(rule, eventKey)
     frame.anchorBorder:SetBackdropBorderColor(0.95, 0.72, 0.25, 1)
     frame.anchorBorder:Hide()
     frame.text = frame:CreateFontString(nil, "OVERLAY")
-    frame.text:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -4)
-    frame.text:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 4)
+    frame.text:SetPoint("CENTER", frame, "CENTER", 0, 0)
     frame.text:SetJustifyH("CENTER")
     frame.text:SetJustifyV("MIDDLE")
-    frame.text:SetWordWrap(true)
+    frame.text:SetWordWrap(false)
     frame.rule = rule
     frame.eventKey = eventKey
     frame.active = false
@@ -1493,32 +1784,42 @@ end
 function ns.setScreenAnchorUnlocked(frame, unlocked)
     if unlocked then
         if ns.screenAnchorTarget and ns.screenAnchorTarget ~= frame then
-            ns.screenAnchorTarget:SetMovable(false)
+            ns.screenAnchorTarget:SetScript("OnUpdate", nil)
+            ns.screenAnchorTarget.drag = nil
             ns.screenAnchorTarget:EnableMouse(false)
             ns.screenAnchorTarget.anchorBorder:Hide()
             if not ns.screenAnchorTarget.active then ns.screenAnchorTarget:Hide() end
         end
         ns.screenAnchorTarget = frame
         ns.screenAnchorUnlocked = true
-        frame:SetMovable(true)
         frame:EnableMouse(true)
         frame.anchorBorder:Show()
         local profile = ns.getRuleScreenProfile(frame.rule, frame.eventKey)
-        ns.applyScreenFrameStyle(frame, profile)
-        ns.positionScreenFrame(frame, profile)
         frame.text:SetText(trim(profile and profile.text or "") ~= "" and profile.text or "WoWraVox")
+        ns.applyScreenFrameStyle(frame, profile) -- also fits the frame to the text
+        local guides = ns.getScreenGuides()
+        ns.layoutScreenGuides(guides)
+        guides:Show()
+        ns.positionScreenFrame(frame, profile)
         frame:Show()
     elseif not frame or ns.screenAnchorTarget == frame then
         ns.screenAnchorUnlocked = false
         ns.screenAnchorTarget = nil
+        if ns.screenGuides then ns.screenGuides:Hide() end
         if frame then
-            frame:SetMovable(false)
+            frame:SetScript("OnUpdate", nil)
+            frame.drag = nil
             frame:EnableMouse(false)
             frame.anchorBorder:Hide()
             if not frame.active then frame:Hide() end
         end
     end
     ns.updateScreenAnchorButtons()
+end
+
+-- Anchor mode belongs to the open options window: ends it for the current target (no-op when none).
+function ns.endScreenAnchor()
+    if ns.screenAnchorTarget then ns.setScreenAnchorUnlocked(ns.screenAnchorTarget, false) end
 end
 
 function ns.showScreenText(rule, eventKey, message, force)
@@ -1531,9 +1832,9 @@ function ns.showScreenText(rule, eventKey, message, force)
     frame.generation = (frame.generation or 0) + 1
     local generation = frame.generation
     frame.active = true
-    ns.applyScreenFrameStyle(frame, profile)
-    ns.positionScreenFrame(frame, profile)
     frame.text:SetText(message)
+    ns.applyScreenFrameStyle(frame, profile) -- also fits the frame to the text
+    ns.positionScreenFrame(frame, profile)
     frame:Show()
     C_Timer.After(3, function()
         if frame.generation == generation then
@@ -1602,8 +1903,9 @@ local function notifyRule(rule, eventKey, message, spellID, sourceEvent, detecte
     local native = ns.AuraSoundFallback
     -- WoW plays registered native sounds itself; the category word replaces the apply sound.
     local nativeSound = native and native.IsRegistered(spellID, eventKey)
-    local categorySelected = eventKey == "apply" and rule.alertCategory ~= "none"
-        and native and native.GetCategorySoundFile(rule.alertCategory) ~= nil
+    local cueCategory = eventKey == "apply" and rule.alertCategory or eventKey == "expire" and rule.expireCategory or nil
+    local categorySelected = cueCategory ~= nil and cueCategory ~= "none"
+        and native and native.GetCategorySoundFile(cueCategory) ~= nil
     local profile = ns.getRuleScreenProfile(rule, eventKey)
     local ttsEnabled = eventKey == "apply" and rule.applyEnabled
         or eventKey == "expire" and rule.expireEnabled
@@ -1639,6 +1941,7 @@ end
 function ns._Aura.resetEventState()
     ns._Aura.eventStates = {}
     ns._Aura.unreadableBaselines = {}
+    if ns._Aura.oneEffectApplyAt then wipe(ns._Aura.oneEffectApplyAt) end
 end
 
 function ns._Aura.getEventState(rule, spellID)
@@ -1725,10 +2028,24 @@ function ns._Aura.shouldAnnounceApply(rule, spellID, sourceEvent, castGUID)
     return true
 end
 
+-- Rules with oneEffect treat all their triggers as one effect: while another trigger of the rule is still
+-- active, neither the start nor the end of this one is announced.  A start is also skipped right after the
+-- rule announced one (own cast first, its readable debuff a moment later).
+ns._Aura.oneEffectApplyAt = setmetatable({}, { __mode = "k" })
+function ns._Aura.otherTriggerActive(rule, spellID, eventKind)
+    if not rule.oneEffect then return false end
+    for _, otherID in ipairs(rule.spellIDs) do
+        if otherID ~= spellID and activeAuras[otherID] then return true end
+    end
+    local lastApply = ns._Aura.oneEffectApplyAt[rule]
+    return eventKind == "apply" and lastApply ~= nil and GetTime() - lastApply < 3
+end
+
 local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
     for _, rule in ipairs(WoWraVoxDB.auras) do
         if (not targetRule or targetRule == rule) and rule.enabled
-            and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
+            and ns.Profiles.RuleMatchesCurrentSpecialization(rule)
+            and not ns._Aura.otherTriggerActive(rule, spellID, eventKind) then
             local matches = false
             for _, configuredID in ipairs(rule.spellIDs) do
                 if configuredID == spellID then matches = true; break end
@@ -1746,6 +2063,7 @@ local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
                 else soundEnabled = rule.expireSoundEnabled end
                 if enabled or soundEnabled or (profile and profile.enabled) then
                     if eventKind ~= "apply" or ns._Aura.shouldAnnounceApply(rule, spellID, sourceEvent, castGUID) then
+                        if eventKind == "apply" and rule.oneEffect then ns._Aura.oneEffectApplyAt[rule] = GetTime() end
                         notifyRule(rule, eventKind, enabled and message or "", spellID, sourceEvent, eventKind)
                     end
                 end
@@ -1761,7 +2079,7 @@ local function rebuildAuraWatches()
         local expireScreen = ns.getRuleScreenProfile(rule, "expire")
         if rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule)
             and (rule.applyEnabled or rule.expireEnabled or rule.applySoundEnabled or rule.expireSoundEnabled
-            or rule.alertCategory ~= "none" or applyScreen.enabled or expireScreen.enabled) then
+            or rule.alertCategory ~= "none" or (rule.expireCategory or "none") ~= "none" or applyScreen.enabled or expireScreen.enabled) then
             for _, spellID in ipairs(rule.spellIDs) do
                 local _, status = getSpellInfo(spellID)
                 if status == "valid" then auraWatchBySpellID[spellID] = true end
@@ -1781,7 +2099,7 @@ local function rebuildAuraWatches()
         local expireScreen = ns.getRuleScreenProfile(rule, "expire")
         local ruleActive = rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule)
             and (rule.applyEnabled or rule.expireEnabled or rule.applySoundEnabled or rule.expireSoundEnabled
-            or rule.alertCategory ~= "none" or applyScreen.enabled or expireScreen.enabled)
+            or rule.alertCategory ~= "none" or (rule.expireCategory or "none") ~= "none" or applyScreen.enabled or expireScreen.enabled)
         if not ruleActive then
             ns._Aura.eventStates[rule] = nil
         else
@@ -1928,11 +2246,12 @@ processAura = function(spellID, isBaseline, sourceEvent)
     end
 
     -- aura == nil.  While auras are secret, "absent" is only trusted at the aura's
-    -- known expiry moment; otherwise it is unknown and no state is touched.
+    -- known expiry moment; otherwise it is unknown and no state is touched.  Auras Blizzard
+    -- marks as never secret stay readable in combat, so nil is a reliable "absent" for them.
     local now = GetTime()
     local atExpiry = state and state.expirationTime > 0
         and now >= state.expirationTime - 0.5 and now <= state.expirationTime + 3
-    if not atExpiry and ns._Aura.aurasAreSecret() then
+    if not atExpiry and ns._Aura.aurasAreSecret() and ns._Aura.auraSecrecy(spellID) ~= "never" then
         if ns.AuraSoundFallback then ns.AuraSoundFallback.LogAura(spellID, "aura-absent-unknown-secret", sourceEvent) end
         return
     end
@@ -1947,6 +2266,8 @@ processAura = function(spellID, isBaseline, sourceEvent)
     end
 end
 
+ns._Aura.processAura = processAura
+
 local function syncAllAuras(isBaseline)
     local profiling = ns.Prof.on
     local started = profiling and ns.Prof.clock()
@@ -1955,6 +2276,7 @@ local function syncAllAuras(isBaseline)
     if isBaseline then auraBaselineComplete = true end
     if profiling then ns.Prof.add("syncAllAuras", ns.Prof.clock() - started) end
 end
+ns._Aura.syncAllAuras = syncAllAuras
 
 local auraSyncPending = false
 local function queueAuraSync()
@@ -2229,6 +2551,12 @@ function ns.scanItemRules()
     itemScanPending = false
     local profiling = ns.Prof.on
     local started = profiling and ns.Prof.clock()
+    -- Once per loaded profile, when item names can be resolved: slot rules are named after their slot.
+    if ns.slotNamesChecked ~= WoWraVoxDB then
+        ns.slotNamesChecked = WoWraVoxDB
+        for _, rule in ipairs(WoWraVoxDB.items) do ns.nameSlotRule(rule) end
+        if optionsFrame and optionsFrame:IsShown() then refreshList() end
+    end
     for _, rule in ipairs(WoWraVoxDB.items) do ns.checkItemRule(rule) end
     if profiling then ns.Prof.add("scanItemRules", ns.Prof.clock() - started) end
 end
@@ -2298,6 +2626,24 @@ local function getItemInfo(itemID, slotID)
         pcall(C_Item.RequestLoadItemDataByID, itemID)
     end
     return name or ("Item " .. tostring(itemID)), icon
+end
+
+-- A rule whose first member tracks a slot is named after the slot ("Trinket 1"), not after the item that
+-- happens to sit there.  Rules saved with the item's name (also the placeholder "Item <id>") are renamed;
+-- a name the user typed is kept.  Idempotent.
+function ns.nameSlotRule(rule)
+    local first = ns.itemMembers(rule)[1]
+    if not (first and first.slotID) then return end
+    local slotName = ns.slotName(first.slotID)
+    if rule.name == slotName then return end
+    local candidates = {}
+    for _, itemID in ipairs({ first.itemID or 0, ns.getEquippedItemID(first.slotID) or 0 }) do
+        if itemID > 0 then
+            candidates[(getItemInfo(itemID, first.slotID))] = true
+            candidates["Item " .. itemID] = true
+        end
+    end
+    if rule.name == nil or candidates[rule.name] then rule.name = slotName end
 end
 
 -- A slot member saw another item in its slot: follow it (rule icon always, rule name while it was the old
@@ -2387,7 +2733,7 @@ function ns.retargetItemRule(rule, index, itemID, name, icon, slotID)
     if members[index] then ns.setItemState(rule, ns.memberKey(members[index]), nil) end
     members[index] = { itemID = itemID, slotID = slotID }
     if index == 1 then
-        rule.name = name
+        rule.name = slotID and ns.slotName(slotID) or name
         rule.icon = icon
     end
     rule.starter = nil
@@ -2490,17 +2836,73 @@ local function createLabel(parent, text, template)
     return label
 end
 
-local function addHelpTooltip(widget, title, explanation)
-    widget:HookScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText(L(title), 1, 0.82, 0.2)
-        GameTooltip:AddLine(L(explanation), 0.85, 0.88, 0.94, true)
-        GameTooltip:Show()
-    end)
-    widget:HookScript("OnLeave", function() GameTooltip:Hide() end)
+-- GameTooltip reuses its line FontStrings, so a font set on one line sticks to later tooltips: every overridden
+-- line is remembered here and handed back to the default tooltip font.
+function ns.resetTooltipFonts()
+    local lines = ns.tooltipFontLines
+    if not lines then return end
+    ns.tooltipFontLines = nil
+    for _, fontString in ipairs(lines) do
+        pcall(fontString.SetFontObject, fontString, GameTooltipText)
+    end
 end
 
-local function stylePanel(panel, r, g, b)
+-- Title, optional wrapped explanation, then optional extra lines { text, r, g, b, font = { path, size, flags } }
+-- (text goes through L()). A font override is for lines with characters the default tooltip font draws badly.
+function ns.fillHelpTooltip(tooltip, title, explanation, lines)
+    ns.resetTooltipFonts()
+    tooltip:SetText(L(title), 1, 0.82, 0.2)
+    if explanation then tooltip:AddLine(L(explanation), 0.85, 0.88, 0.94, true) end
+    for _, entry in ipairs(lines or {}) do
+        tooltip:AddLine(L(entry.text), entry.r or 0.85, entry.g or 0.88, entry.b or 0.94, true)
+        if entry.font then
+            local fontString = _G["GameTooltipTextLeft" .. tooltip:NumLines()]
+            if fontString and pcall(fontString.SetFont, fontString, entry.font[1], entry.font[2], entry.font[3] or "") then
+                ns.tooltipFontLines = ns.tooltipFontLines or {}
+                ns.tooltipFontLines[#ns.tooltipFontLines + 1] = fontString
+            end
+        end
+    end
+end
+
+local function addHelpTooltip(widget, title, explanation, lines)
+    if not ns.tooltipHideHooked then
+        ns.tooltipHideHooked = true
+        GameTooltip:HookScript("OnHide", ns.resetTooltipFonts)
+    end
+    widget:HookScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        ns.fillHelpTooltip(GameTooltip, title, explanation, lines)
+        GameTooltip:Show()
+    end)
+    widget:HookScript("OnLeave", function()
+        GameTooltip:Hide()
+        ns.resetTooltipFonts()
+    end)
+end
+
+-- Skin helpers (no-ops unless a texture skin is active). A 1 px rule texture is replaced by an 8 px divider
+-- strip centred on it; an icon texture gets a frame holder around it (the frame art has a clear centre).
+function ns.skinDivider(line)
+    if not ns.Skin.Data() then return end
+    local holder = CreateFrame("Frame", nil, line:GetParent())
+    holder:SetHeight(8)
+    holder:SetPoint("LEFT", line, "LEFT", 0, 0)
+    holder:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+    line:Hide()
+    ns.Skin.Register(holder, "divider")
+end
+
+function ns.skinIconFrame(icon)
+    if not ns.Skin.Data() then return end
+    local holder = CreateFrame("Frame", nil, icon:GetParent())
+    holder:SetPoint("TOPLEFT", icon, "TOPLEFT", -2, 2)
+    holder:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 2, -2)
+    ns.Skin.Register(holder, "iconFrame", { scale = 0.5 })
+end
+
+-- kind: skin kind of the panel ("panel" by default); false = the caller registers it later.
+local function stylePanel(panel, r, g, b, kind)
     if panel.SetBackdrop then
         panel:SetBackdrop({
             bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -2537,8 +2939,10 @@ local function stylePanel(panel, r, g, b)
         corner:SetColorTexture(0.88, 0.68, 0.24, 0.95)
     end
     local borderColor = { 0.35, 0.29, 0.18, 0.78 }
+    panel.lines = {}
     for _, edge in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
         local line = panel:CreateTexture(nil, "BORDER")
+        panel.lines[#panel.lines + 1] = line
         if edge == "TOP" or edge == "BOTTOM" then
             line:SetTexture("Interface\\Buttons\\WHITE8X8")
             line:SetColorTexture(unpack(borderColor))
@@ -2552,6 +2956,7 @@ local function stylePanel(panel, r, g, b)
             line:SetWidth(1)
         end
     end
+    if kind ~= false then ns.Skin.Register(panel, kind or "panel") end
 end
 
 local function createEditBox(parent, width, height)
@@ -2565,13 +2970,14 @@ local function createEditBox(parent, width, height)
     box:SetScript("OnEditFocusLost", function()
         if not editorLoading then saveDetails() end
     end)
+    ns.Skin.Register(box, "editbox")
     return box
 end
 
 local function createVoiceDropdown(parent, point, relativeTo, x, y, onChange)
     local dropdown = CreateFrame("Frame", nil, parent, "UIDropDownMenuTemplate")
     dropdown:SetPoint(point, relativeTo, point, x, y)
-    UIDropDownMenu_SetWidth(dropdown, 145)
+    ns.Layout.setDropdownWidth(dropdown, 145)
     UIDropDownMenu_Initialize(dropdown, function(menu, level)
         local voices = getVoices()
         if #voices == 0 then
@@ -2598,6 +3004,7 @@ local function createVoiceDropdown(parent, point, relativeTo, x, y, onChange)
             UIDropDownMenu_AddButton(info, level)
         end
     end)
+    ns.Skin.Register(dropdown, "dropdown")
     return dropdown
 end
 
@@ -2614,6 +3021,8 @@ local function makeVolumeSlider(parent, point, relativeTo, x, y, onChange, minVa
             or math.floor(value + 0.5)
         onChange(math.max(minValue or 0, math.min(maxValue or 100, snappedValue)))
     end)
+    ns.Skin.Register(slider, "sliderTrack")
+    ns.Skin.Register(slider, "sliderThumb")
     return slider
 end
 
@@ -2658,7 +3067,7 @@ local function removeSelectedRule()
     if selectedCategory == "auras" then selected = selectedAuraRule
     elseif selectedCategory == "items" then selected = selectedItemRule
     else selected = selectedSkillRule end
-    if not selected then return end
+    if not selected or selected.builtin then return end
     if ns.SkillTracking.learning and ns.SkillTracking.learning.rule == selected then
         ns.SkillTracking.CancelLearning(L("The learned spell rule was removed."), true)
     end
@@ -2885,7 +3294,7 @@ function refreshList()
             row.remove:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -5, 6)
             addHelpTooltip(row, "Edit rule", "Select this rule and show its settings.")
             addHelpTooltip(row.toggle, "Enable or disable rule", "Toggle this rule without deleting it.")
-            addHelpTooltip(row.remove, "Remove rule", "Delete this rule.")
+            addHelpTooltip(row.remove, "Remove rule", "Delete this rule. Built-in rules can be switched off but not deleted.")
             -- Scripts read self.rule/self.category, so they are set once per row frame.
             row:SetScript("OnClick", function(self)
                 selectRule(self.rule, self.category)
@@ -2912,10 +3321,15 @@ function refreshList()
             end)
             row.remove:SetScript("OnClick", function(self)
                 local parent = self:GetParent()
+                if parent.rule.builtin then return end
                 selectRule(parent.rule, parent.category)
                 StaticPopup_Show("WOWRAVOX_DELETE_RULE", string.format(L("Delete rule \"%s\"?"), ruleDisplay(parent.rule, parent.category)),
                     nil, { rule = parent.rule, category = parent.category })
             end)
+            ns.Skin.Register(row, "listRow")
+            ns.Skin.Register(row.toggle, "checkbox")
+            ns.Skin.Register(row.remove, "dangerButton")
+            ns.skinIconFrame(row.icon)
             listRows[index] = row
         end
 
@@ -2930,6 +3344,7 @@ function refreshList()
                 or (category == "skills" and selectedSkillRule == rule))
         local active = rule.enabled and entry.specMatches
         local muted = not active
+        ns.Skin.SetState(row, "selected", selected)
         if selected then
             row.bg:SetColorTexture(0.31, 0.23, 0.10, 0.95)
             row:SetBackdropColor(0.31, 0.23, 0.10, 0.95)
@@ -2952,6 +3367,7 @@ function refreshList()
         row.sub:SetTextColor(muted and 0.55 or 1, muted and 0.55 or 0.82, muted and 0.55 or 0.2)
         row.toggle:SetAlpha(muted and 0.72 or 1)
         row.remove:SetAlpha(muted and 0.5 or 1)
+        row.remove:SetEnabled(not rule.builtin)
         local inactiveReason = not rule.enabled and "Disabled"
             or (not entry.specMatches and (currentSpecID and "Other specialization" or "Specialization unavailable"))
         if category == "auras" then
@@ -2967,7 +3383,11 @@ function refreshList()
                 row.sub:SetText(L("Choose an equipped item") .. (inactiveReason and (" · " .. L(inactiveReason)) or ""))
             else
                 local members = ns.itemMembers(rule)
+                -- A slot rule is named after its slot, so the line below shows the item sitting there now.
+                local slotItemName = #members == 1 and members[1].slotID and rule.name == ns.slotName(members[1].slotID)
+                    and (ns.itemMemberInfo(members[1]))
                 local sourceText = #members > 1 and string.format(L("%d items"), #members)
+                    or slotItemName
                     or (members[1] and members[1].slotID and ns.slotName(members[1].slotID))
                     or ("Item " .. tostring(ns.firstItemID(rule) or 0))
                 row.sub:SetText(sourceText .. " · " .. L("Ready") .. (inactiveReason and (" · " .. L(inactiveReason)) or ""))
@@ -3018,32 +3438,50 @@ ns.Layout.refreshPanelHeader = function(panel)
     local expanded = panel.expanded ~= false
     panel.headerIndicator:SetTexture(expanded and "Interface\\Buttons\\UI-MinusButton-Up" or "Interface\\Buttons\\UI-PlusButton-Up")
     panel.headerHint:SetText(L(expanded and "Click to collapse" or "Click to expand"))
+    ns.Skin.SetState(panel.headerIndicator, expanded and "expanded" or "collapsed")
+    -- Expanded: the panel art alone frames the panel (the header art has its own bottom border); collapsed: header art.
+    ns.Skin.SetArtShown(panel.headerButton, not expanded)
 end
 
-ns.Layout.ensureExpirationPanelState = function(panel, rule)
-    if panel.eventKey ~= "expire" then
+-- The rule being edited (any category), or nil.
+ns.Layout.currentRule = function()
+    return selectedCategory == "auras" and selectedAuraRule or selectedCategory == "items" and selectedItemRule
+        or selectedCategory == "skills" and selectedSkillRule or nil
+end
+
+-- Collapsible panels (panel.collapsible): Application, Expiration and TTS. The state is kept per rule and panel
+-- in ns.Layout.panelState; Expiration starts collapsed while no channel is on, the others start expanded.
+ns.Layout.ensurePanelState = function(panel, rule)
+    if not panel.collapsible then
         panel.expanded = true
         return true
     end
-    if rule and ns.Layout.expirationPanelState[rule] == nil then
-        ns.Layout.expirationPanelState[rule] = ns.Layout.notificationPanelHasEnabledChannel(panel)
+    local states = rule and ns.Layout.panelState[rule]
+    if rule and not states then
+        states = {}
+        ns.Layout.panelState[rule] = states
     end
-    panel.expanded = not rule or ns.Layout.expirationPanelState[rule] ~= false
+    if rule and states[panel.key] == nil then
+        states[panel.key] = panel.key ~= "expire" or ns.Layout.notificationPanelHasEnabledChannel(panel)
+    end
+    panel.expanded = not rule or states[panel.key] ~= false
     ns.Layout.refreshPanelHeader(panel)
     return panel.expanded
 end
 
-ns.Layout.setExpirationPanelExpanded = function(panel, expanded)
-    if not panel or panel.eventKey ~= "expire" then return end
+ns.Layout.setPanelExpanded = function(panel, expanded)
+    if not panel or not panel.collapsible then return end
     panel.expanded = expanded ~= false
-    if selectedCategory == "auras" and selectedAuraRule then
-        ns.Layout.expirationPanelState[selectedAuraRule] = panel.expanded
+    local rule = ns.Layout.currentRule()
+    if rule then
+        ns.Layout.panelState[rule] = ns.Layout.panelState[rule] or {}
+        ns.Layout.panelState[rule][panel.key] = panel.expanded
     end
     ns.Layout.refreshPanelHeader(panel)
 end
 
-ns.Layout.isNotificationPanelExpanded = function(panel)
-    return panel.eventKey ~= "expire" or panel.expanded ~= false
+ns.Layout.isPanelExpanded = function(panel)
+    return not panel.collapsible or panel.expanded ~= false
 end
 
 local function layoutScreenRow(row, parent, y)
@@ -3101,15 +3539,23 @@ local function layoutNotificationPanel(panel, y)
     frame:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", 0, y)
     local lowestControl = math.max(43 + 30, 78 + 30, -screenY + 30)
     if screenEnabled then lowestControl = math.max(lowestControl, -screenY + 36 + 30) end
-    frame:SetHeight(ns.Layout.isNotificationPanelExpanded(panel) and lowestControl + 10 or 34)
+    local expanded = ns.Layout.isPanelExpanded(panel)
+    frame:SetHeight(expanded and lowestControl + 10 or 34)
     panel.heading:ClearAllPoints()
-    panel.heading:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -10)
+    panel.heading:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + (panel.collapsible and 22 or 0), -10) -- 22 = room for the chevron
     if panel.categoryChoice then
         panel.categoryChoice:ClearAllPoints()
         panel.categoryChoice:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT, -4)
-        UIDropDownMenu_SetWidth(panel.categoryChoice, 142)
+        ns.Layout.setDropdownWidth(panel.categoryChoice, 142)
         panel.categoryLabel:ClearAllPoints()
         panel.categoryLabel:SetPoint("RIGHT", panel.categoryChoice, "LEFT", -8, 0)
+        -- expanded, the fallback dropdown holds the right end of the header row: the hint moves left of it
+        panel.headerHint:ClearAllPoints()
+        if expanded then
+            panel.headerHint:SetPoint("RIGHT", panel.categoryLabel, "LEFT", -12, 0)
+        else
+            panel.headerHint:SetPoint("RIGHT", panel.headerButton, "RIGHT", ns.Layout.RIGHT, 0)
+        end
     end
     panel.ttsEnabled:ClearAllPoints()
     panel.ttsEnabled:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.ROW_X, -43)
@@ -3138,13 +3584,13 @@ end
 
 function ns.setNotificationPanelShown(panel, shown)
     if not panel then return end
-    local expanded = ns.Layout.isNotificationPanelExpanded(panel)
+    local expanded = ns.Layout.isPanelExpanded(panel)
     panel.frame:SetShown(shown)
     if panel.categoryChoice then
         panel.categoryChoice:SetShown(shown and expanded)
         panel.categoryLabel:SetShown(shown and expanded)
     end
-    if panel.headerButton then panel.headerButton:SetShown(shown and panel.eventKey == "expire") end
+    if panel.headerButton then panel.headerButton:SetShown(shown and panel.collapsible) end
     local ttsChecked = panel.ttsEnabled:GetChecked()
     local ttsDetails = shown and expanded and (ttsChecked == true or ttsChecked == 1)
     panel.ttsEnabled:SetShown(shown and expanded)
@@ -3192,9 +3638,11 @@ local function layoutSharedEditor(isAura)
     triggerPanel:ClearAllPoints()
     triggerPanel:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 0, triggerHeadingY)
     triggerPanel:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", 0, triggerHeadingY)
-    -- Item rules reuse this panel as their member list: header plus four 27 px rows instead of the aura height.
+    -- Item rules reuse this panel as their member list (header plus four member rows); spell rules as the one-row
+    -- trigger panel (dropdown, Learn, status line). Every category stacks its panels with the same 6 px gaps.
     local isItem = not isAura and selectedCategory == "items"
-    local triggerPanelHeight = isItem and 186 or 226
+    local isSkill = not isAura and selectedCategory == "skills"
+    local triggerPanelHeight = isItem and 190 or isSkill and 74 or 226
     triggerPanel:SetHeight(triggerPanelHeight)
     triggerLabel:ClearAllPoints()
     triggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -10)
@@ -3219,38 +3667,30 @@ local function layoutSharedEditor(isAura)
     triggerAddButton:SetShown(isAura or isItem)
     triggerStatus:SetShown(isAura or isItem)
 
-    local firstMessageY = isAura and triggerHeadingY - triggerPanelHeight - 6
-        or -(headerHeight + 60) - (isItem and triggerPanelHeight + 6 or 0)
-    local isSkill = not isAura and selectedCategory == "skills"
-    local messageY = firstMessageY - (isSkill and 24 or 0)
+    local messageY = triggerHeadingY - triggerPanelHeight - 6
     local voiceY
+    local voiceExpanded = ns.Layout.isPanelExpanded(auraEditor.voice)
+    local voiceHeight = voiceExpanded and 118 or 34
     if isAura then
         auraEditor.skillTriggerLabel:Hide()
         auraEditor.skillTriggerDropdown:Hide()
         auraEditor.skillLearnButton:Hide()
         auraEditor.skillLearningStatus:Hide()
-        auraEditor.notificationsHeading:Hide()
         ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
-        layoutNotificationPanel(ns.notificationPanels.apply, firstMessageY)
-        local expireY = firstMessageY - ns.notificationPanels.apply.frame:GetHeight() - 6
+        layoutNotificationPanel(ns.notificationPanels.apply, messageY)
+        local expireY = messageY - ns.notificationPanels.apply.frame:GetHeight() - 6
         layoutNotificationPanel(ns.notificationPanels.expire, expireY)
         voiceY = expireY - ns.notificationPanels.expire.frame:GetHeight() - 6
     else
-        auraEditor.notificationsHeading:Show()
-        auraEditor.notificationsHeading:ClearAllPoints()
-        auraEditor.notificationsHeading:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", ns.Layout.EXTRA_X, firstMessageY + 48)
-        itemSourceText:ClearAllPoints()
-        itemSourceText:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", ns.Layout.EXTRA_X, firstMessageY + 26)
-        itemSourceText:SetWidth(190)
         auraEditor.skillTriggerLabel:ClearAllPoints()
-        auraEditor.skillTriggerLabel:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 220, firstMessageY + 25)
-        auraEditor.skillTriggerDropdown:ClearAllPoints()
-        auraEditor.skillTriggerDropdown:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 258, firstMessageY + 34)
+        auraEditor.skillTriggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -22)
+        ns.Layout.placeDropdown(auraEditor.skillTriggerDropdown, triggerPanel, cols.col1, -13, cols.col1Width)
         auraEditor.skillLearnButton:ClearAllPoints()
-        auraEditor.skillLearnButton:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", ns.Layout.RIGHT, firstMessageY + 25)
+        auraEditor.skillLearnButton:SetSize(ns.Layout.BUTTON_W, 30)
+        auraEditor.skillLearnButton:SetPoint("TOPRIGHT", triggerPanel, "TOPRIGHT", ns.Layout.RIGHT, -13)
         auraEditor.skillLearningStatus:ClearAllPoints()
-        auraEditor.skillLearningStatus:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", ns.Layout.FIELD_X, firstMessageY - 2)
-        auraEditor.skillLearningStatus:SetWidth(math.max(1, editorWidth - 247))
+        auraEditor.skillLearningStatus:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -51)
+        auraEditor.skillLearningStatus:SetPoint("RIGHT", triggerPanel, "RIGHT", ns.Layout.RIGHT, 0)
         auraEditor.skillTriggerLabel:SetShown(isSkill)
         auraEditor.skillTriggerDropdown:SetShown(isSkill)
         auraEditor.skillLearnButton:SetShown(isSkill)
@@ -3259,18 +3699,16 @@ local function layoutSharedEditor(isAura)
         ns.setNotificationPanelShown(ns.notificationPanels.expire, false)
         ns.setNotificationPanelShown(ns.notificationPanels.ready, true)
         layoutNotificationPanel(ns.notificationPanels.ready, messageY)
-        local rowBottom = -messageY + ns.notificationPanels.ready.frame:GetHeight()
-        local viewportHeight = editorScroll and math.max(1, editorScroll:GetHeight()) or 620
-        local voiceTop = math.max(rowBottom + 16, viewportHeight - 118 - 16)
-        voiceY = -voiceTop
+        voiceY = messageY - ns.notificationPanels.ready.frame:GetHeight() - 6
     end
     auraEditor.voicePanel:ClearAllPoints()
     auraEditor.voicePanel:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 0, voiceY)
     auraEditor.voicePanel:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", 0, voiceY)
-    auraEditor.voicePanel:SetHeight(118)
+    auraEditor.voicePanel:SetHeight(voiceHeight)
     -- TTS panel on the same visible columns as the panels above: Voice = col1, Volume = col2, Speed = col3.
     auraEditor.voiceHeading:ClearAllPoints()
-    auraEditor.voiceHeading:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", ns.Layout.PAD, -8)
+    auraEditor.voiceHeading:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", ns.Layout.PAD + 22, -10) -- 22 = room for the chevron
+    for _, control in ipairs(auraEditor.voice.controls or {}) do control:SetShown(voiceExpanded) end
     auraEditor.voiceLabel:ClearAllPoints()
     auraEditor.voiceLabel:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", cols.col1, -31)
     auraEditor.volumeLabel:ClearAllPoints()
@@ -3286,7 +3724,7 @@ local function layoutSharedEditor(isAura)
     auraEditor.speedSlider:SetWidth(cols.right - cols.col3 - ns.Layout.VALUE_W)
     local viewportHeight = editorScroll and math.max(1, editorScroll:GetHeight()) or 620
     local contentHeight = -voiceY + auraEditor.voicePanel:GetHeight() + 16
-    auraEditor.minimumContentHeight = isAura and math.max(620, contentHeight) or contentHeight
+    auraEditor.minimumContentHeight = math.max(620, contentHeight)
     auraEditor:SetHeight(math.max(auraEditor.minimumContentHeight, viewportHeight))
 end
 
@@ -3514,6 +3952,16 @@ local function updateRulePreviewFromEditor()
 end
 ns.updateRulePreviewFromEditor = updateRulePreviewFromEditor
 
+-- One-line member text: the name keeps the FontString colour, "- id" (and a note) is dimmed by a colour code.
+function ns.memberRowText(name, id, note)
+    local parts = {}
+    if id ~= nil and tostring(id) ~= "" then parts[#parts + 1] = tostring(id) end
+    if note ~= nil and note ~= "" then parts[#parts + 1] = tostring(note) end
+    name = tostring(name or "")
+    if #parts == 0 then return name end
+    return name .. " |cff8c929a· " .. table.concat(parts, " · ") .. "|r"
+end
+
 local function updateSelectedTriggers()
     local rule = selectedAura()
     if not (triggerScroll and triggerChild and rule) then return end
@@ -3529,20 +3977,17 @@ local function updateSelectedTriggers()
         local row = triggerRows[index]
         if not row then
             row = CreateFrame("Frame", nil, triggerChild)
-            row:SetHeight(27)
+            row:SetHeight(ns.Layout.MEMBER_ROW_H)
             row.icon = row:CreateTexture(nil, "ARTWORK")
             row.icon:SetSize(20, 20)
             row.icon:SetPoint("LEFT", row, "LEFT", 3, 0)
             row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
             row.title = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 3)
-            row.title:SetPoint("RIGHT", row, "RIGHT", -58, 0)
+            row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
+            row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
             row.title:SetJustifyH("LEFT")
+            row.title:SetWordWrap(false)
             row.title:SetMaxLines(1)
-            row.idText = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-            row.idText:SetPoint("LEFT", row.icon, "RIGHT", 7, -8)
-            row.idText:SetPoint("RIGHT", row, "RIGHT", -58, 0)
-            row.idText:SetJustifyH("LEFT")
             row.remove = CreateFrame("Button", nil, row)
             row.remove:SetSize(22, 22)
             row.remove:SetPoint("RIGHT", row, "RIGHT", -4, 0)
@@ -3554,7 +3999,7 @@ local function updateSelectedTriggers()
             row.remove:SetScript("OnClick", function(self)
                 local parent = self:GetParent()
                 local auraRule = selectedAura()
-                if not (auraRule and parent.spellID) then return end
+                if not (auraRule and parent.spellID) or ns.isBuiltinTrigger(auraRule, parent.spellID) then return end
                 for triggerIndex, existingID in ipairs(auraRule.spellIDs) do
                     if existingID == parent.spellID then
                         table.remove(auraRule.spellIDs, triggerIndex)
@@ -3573,26 +4018,48 @@ local function updateSelectedTriggers()
                 local ok = pcall(GameTooltip.SetSpellByID, GameTooltip, self.spellID)
                 if not ok then GameTooltip:SetText(self.spellName or L("Unknown ID")) end
                 GameTooltip:AddLine("ID: " .. self.spellID, 0.72, 0.78, 0.86)
+                if self.combat == "spoken" then
+                    GameTooltip:AddLine(L("Blizzard marks this aura as readable in combat: text-to-speech works."), 0.44, 0.81, 0.5, true)
+                elseif self.combat == "cast" then
+                    GameTooltip:AddLine(L("Hidden in combat, but your own cast of it is spoken. Buffs from other players only play the category sound."), 0.44, 0.81, 0.5, true)
+                elseif self.combat == "sound" then
+                    GameTooltip:AddLine(L("This aura can be hidden in combat: only the category sound can play there. Use a matching readable aura (for Bloodlust: Sated / Exhaustion) for spoken text."), 0.88, 0.63, 0.25, true)
+                end
                 GameTooltip:Show()
             end)
             row:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            addHelpTooltip(row.remove, "Remove trigger", "Remove this spell ID from the aura rule.")
+            addHelpTooltip(row.remove, "Remove trigger", "Remove this spell ID from the aura rule. Triggers of built-in rules cannot be removed.")
+            ns.Skin.Register(row, "memberRow")
+            ns.Skin.Register(row.remove, "dangerButton")
+            ns.skinIconFrame(row.icon)
             triggerRows[index] = row
         end
 
         row.spellID = spellID
+        row.remove:SetEnabled(not ns.isBuiltinTrigger(rule, spellID))
         row.spellName = info and info.name or (state == "pending" and L("Loading…") or L("Unknown ID"))
         row.icon:SetTexture(info and info.iconID or "Interface\\Icons\\INV_Misc_QuestionMark")
-        row.title:SetText(row.spellName)
+        local secrecy = ns._Aura.auraSecrecy(spellID)
+        if secrecy == "never" then row.combat = "spoken"
+        elseif ns._Aura.getSelfBuffStatus(spellID) == "true" then row.combat = "cast"
+        elseif secrecy == "unknown" then row.combat = "unknown"
+        else row.combat = "sound" end
+        local note = state == "pending" and L("loading") or state ~= "valid" and L("invalid") or nil
+        if not note then
+            if row.combat == "spoken" then note = "|cff6fcf7f" .. L("combat: spoken") .. "|r|cff8c929a"
+            elseif row.combat == "cast" then note = "|cff6fcf7f" .. L("combat: own casts") .. "|r|cff8c929a"
+            elseif row.combat == "unknown" then note = L("combat: ?")
+            else note = "|cffe0a040" .. L("combat: sound only") .. "|r|cff8c929a" end
+        end
+        row.title:SetText(ns.memberRowText(row.spellName, spellID, note))
         row.title:SetTextColor(state == "valid" and 0.93 or 1, state == "valid" and 0.93 or 0.65, state == "valid" and 0.96 or 0.38)
-        row.idText:SetText(tostring(spellID) .. (state == "pending" and (" · " .. L("loading")) or state == "valid" and "" or (" · " .. L("invalid"))))
         row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", triggerChild, "TOPLEFT", 2, -((index - 1) * 27))
+        row:SetPoint("TOPLEFT", triggerChild, "TOPLEFT", 2, -((index - 1) * ns.Layout.MEMBER_ROW_H))
         row:SetPoint("RIGHT", triggerChild, "RIGHT", -2, 0)
         row:Show()
     end
     for index = #(rule.spellIDs or {}) + 1, #triggerRows do triggerRows[index]:Hide() end
-    triggerChild:SetHeight(math.max(1, #(rule.spellIDs or {}) * 27))
+    triggerChild:SetHeight(math.max(1, #(rule.spellIDs or {}) * ns.Layout.MEMBER_ROW_H))
     triggerScroll:SetVerticalScroll(math.min(triggerScroll:GetVerticalScroll(), math.max(0, triggerChild:GetHeight() - triggerScroll:GetHeight())))
 
     local count = #(rule.spellIDs or {})
@@ -3610,7 +4077,7 @@ ns.itemMemberRows = {}
 
 function ns.createItemMemberRow(index)
     local row = CreateFrame("Frame", nil, triggerChild)
-    row:SetHeight(27)
+    row:SetHeight(ns.Layout.MEMBER_ROW_H)
     row.iconButton = CreateFrame("Button", nil, row)
     row.iconButton:SetSize(20, 20)
     row.iconButton:SetPoint("LEFT", row, "LEFT", 3, 0)
@@ -3619,15 +4086,15 @@ function ns.createItemMemberRow(index)
     row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     row.iconButton:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
     row.title = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.title:SetPoint("LEFT", row.iconButton, "RIGHT", 7, 3)
-    row.title:SetPoint("RIGHT", row, "RIGHT", -58, 0)
+    row.title:SetPoint("LEFT", row.iconButton, "RIGHT", 7, 0)
     row.title:SetJustifyH("LEFT")
+    row.title:SetWordWrap(false)
     row.title:SetMaxLines(1)
     row.tag = CreateFrame("Button", nil, row)
     row.tag:SetHeight(12)
-    row.tag:SetPoint("LEFT", row.iconButton, "RIGHT", 7, -8)
     row.tag.text = row.tag:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    row.tag.text:SetPoint("LEFT", row.tag, "LEFT", 0, 0)
+    row.tag.pad = ns.Skin.Data() and 12 or 0 -- texture skins: the tag art has 8 px end caps
+    row.tag.text:SetPoint("LEFT", row.tag, "LEFT", row.tag.pad / 2, 0)
     row.remove = CreateFrame("Button", nil, row)
     row.remove:SetSize(22, 22)
     row.remove:SetPoint("RIGHT", row, "RIGHT", -4, 0)
@@ -3636,6 +4103,9 @@ function ns.createItemMemberRow(index)
     row.remove.mark:SetText("×")
     row.remove.mark:SetTextColor(0.92, 0.38, 0.32)
     row.remove:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    -- one line: icon | name · id (cut off, never wrapped) | item/slot tag | x
+    row.tag:SetPoint("RIGHT", row.remove, "LEFT", -6, 0)
+    row.title:SetPoint("RIGHT", row.tag, "LEFT", -8, 0)
 
     row.iconButton:SetScript("OnClick", function()
         local rule = selectedItem()
@@ -3681,6 +4151,10 @@ function ns.createItemMemberRow(index)
     addHelpTooltip(row.tag, "Item or slot",
         "Click to switch between this exact item and whatever is equipped in its slot. A swapped-in item never announces its equip lockout.")
     addHelpTooltip(row.remove, "Remove item", "Remove this entry from the rule.")
+    ns.Skin.Register(row, "memberRow")
+    ns.Skin.Register(row.tag, "tag")
+    ns.Skin.Register(row.remove, "dangerButton")
+    ns.skinIconFrame(row.icon)
     ns.itemMemberRows[index] = row
     return row
 end
@@ -3695,19 +4169,18 @@ function ns.updateItemMembers()
         local name, icon, equippedSlot = ns.itemMemberInfo(member)
         row.itemID = member.slotID and ns.getEquippedItemID(member.slotID) or member.itemID
         row.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-        row.title:SetText(name or L("Not equipped"))
+        row.title:SetText(ns.memberRowText(name or L("Not equipped"), row.itemID))
         -- A member whose item is not worn right now cannot announce anything: shown in amber.
         row.title:SetTextColor(equippedSlot and 0.93 or 1, equippedSlot and 0.93 or 0.65, equippedSlot and 0.96 or 0.25)
-        row.tag.text:SetText(member.slotID and (ns.slotName(member.slotID) .. " · " .. L("Slot"))
-            or (L("Item") .. " " .. tostring(member.itemID)))
-        row.tag:SetWidth(math.max(1, row.tag.text:GetStringWidth() + 4))
+        row.tag.text:SetText(member.slotID and (ns.slotName(member.slotID) .. " · " .. L("Slot")) or L("Item"))
+        row.tag:SetWidth(math.max(1, row.tag.text:GetStringWidth() + 4 + row.tag.pad))
         row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", triggerChild, "TOPLEFT", 2, -((index - 1) * 27))
+        row:SetPoint("TOPLEFT", triggerChild, "TOPLEFT", 2, -((index - 1) * ns.Layout.MEMBER_ROW_H))
         row:SetPoint("RIGHT", triggerChild, "RIGHT", -2, 0)
         row:Show()
     end
     for index = #members + 1, #ns.itemMemberRows do ns.itemMemberRows[index]:Hide() end
-    triggerChild:SetHeight(math.max(1, #members * 27))
+    triggerChild:SetHeight(math.max(1, #members * ns.Layout.MEMBER_ROW_H))
     triggerScroll:SetVerticalScroll(math.min(triggerScroll:GetVerticalScroll(), math.max(0, triggerChild:GetHeight() - triggerScroll:GetHeight())))
     triggerStatus:SetText(#members == 0 and L("Choose an equipped item")
         or #members == 1 and L("1 item") or string.format(L("%d items"), #members))
@@ -3989,7 +4462,9 @@ local function saveNotificationPanel(panel, rule, eventKey)
     end
     local channel = panel.soundChannel.screenValue
     rule[eventKey .. "SoundChannel"] = NOTIFICATION_SOUND_CHANNEL_SET[channel] and channel or "Master"
-    if panel.categoryChoice then rule.alertCategory = panel.categoryChoice.screenValue or "none" end
+    if panel.categoryChoice then
+        rule[eventKey == "expire" and "expireCategory" or "alertCategory"] = panel.categoryChoice.screenValue or "none"
+    end
     saveScreenRowProfile(panel.screen, rule)
 end
 
@@ -4012,7 +4487,7 @@ local function loadNotificationPanel(panel, rule, eventKey)
     UIDropDownMenu_SetSelectedValue(panel.soundChannel, channel)
     UIDropDownMenu_SetText(panel.soundChannel, L(channel == "SFX" and "Sound effects" or channel))
     if panel.categoryChoice then
-        local category = NOTIFICATION_CUE_ALIASES[rule.alertCategory] or "none"
+        local category = NOTIFICATION_CUE_ALIASES[rule[eventKey == "expire" and "expireCategory" or "alertCategory"]] or "none"
         panel.categoryChoice.screenValue = category
         UIDropDownMenu_SetSelectedValue(panel.categoryChoice, category)
         local categoryLabel = category == "none" and L("No category cue")
@@ -4020,7 +4495,7 @@ local function loadNotificationPanel(panel, rule, eventKey)
         UIDropDownMenu_SetText(panel.categoryChoice, categoryLabel)
     end
     loadScreenRowProfile(panel.screen, rule)
-    ns.Layout.ensureExpirationPanelState(panel, rule)
+    ns.Layout.ensurePanelState(panel, rule)
     ns.setNotificationPanelShown(panel, true)
 end
 
@@ -4090,6 +4565,7 @@ function updateDetails()
     end
 
     if auraEditor.UpdateSpecializationFilter then auraEditor.UpdateSpecializationFilter(rule) end
+    ns.Layout.ensurePanelState(auraEditor.voice, rule)
 
     local unchangedRule = lastRenderedRule == rule and lastRenderedCategory == selectedCategory
     local savedSearch = triggerAddButton and (triggerAddButton.nameSearch or triggerAddButton.exactResult)
@@ -4139,6 +4615,10 @@ function updateDetails()
         local info = firstID and getSpellInfo(firstID)
         auraEditor.ruleIcon:SetTexture(info and info.iconID or "Interface\\Icons\\Spell_Nature_Rejuvenation")
         auraEditor.heading:SetText(L("AURA RULE"))
+        auraEditor.oneEffectCheck:Show()
+        auraEditor.oneEffectLabel:Show()
+        auraEditor.oneEffectCheck:SetChecked(auraRule.oneEffect == true)
+        auraEditor.oneEffectCheck:SetEnabled(not auraRule.builtin)
         auraEditor.iconButton:Hide()
         itemSourceText:Hide()
         triggerLabel:SetText(L("TRIGGERS"))
@@ -4167,8 +4647,10 @@ function updateDetails()
         local skillInfo = skillRule and getSpellInfo(skillRule.spellID)
         auraEditor.ruleIcon:SetTexture(readyRule.icon or (skillInfo and skillInfo.iconID) or "Interface\\Icons\\INV_Misc_QuestionMark")
         auraEditor.heading:SetText(L(itemRule and "ITEM RULE" or "SPELL COOLDOWN"))
+        auraEditor.oneEffectCheck:Hide()
+        auraEditor.oneEffectLabel:Hide()
         auraEditor.iconButton:SetShown(itemRule ~= nil)
-        -- Item rules list their members in the trigger panel; spell cooldown rules have no panel.
+        -- Item rules list their members in the trigger panel; spell cooldown rules show their trigger row there.
         triggerLabel:SetShown(itemRule ~= nil)
         if itemRule then triggerLabel:SetText(L("ITEMS")) end
         triggerInputBox:Hide()
@@ -4179,7 +4661,7 @@ function updateDetails()
             triggerAddButton:SetEnabled(true)
         end
         triggerStatus:SetShown(itemRule ~= nil)
-        triggerScroll.backdrop:SetShown(itemRule ~= nil)
+        triggerScroll.backdrop:Show()
         triggerScroll:SetShown(itemRule ~= nil)
         for _, auraRow in ipairs(triggerRows) do auraRow:Hide() end
         itemSourceText:Show()
@@ -4383,6 +4865,7 @@ auraEditor.ruleIcon = auraEditor.rulePanel:CreateTexture(nil, "ARTWORK")
 auraEditor.ruleIcon:SetSize(38, 38)
 auraEditor.ruleIcon:SetPoint("TOPLEFT", auraEditor.rulePanel, "TOPLEFT", 12, -34)
 auraEditor.ruleIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+ns.skinIconFrame(auraEditor.ruleIcon)
 -- Item rules only: clicking the icon re-opens the item picker for this rule.  Anchored to the
 -- icon texture, so it follows every layoutSharedEditor placement.
 auraEditor.iconButton = CreateFrame("Button", nil, auraEditor.rulePanel)
@@ -4404,8 +4887,15 @@ ruleEnabledCheck:SetSize(30, 30)
 auraEditor.enabledLabel = createLabel(auraEditor.rulePanel, "Active", "GameFontNormalSmall")
 auraEditor.enabledLabel:SetPoint("LEFT", ruleEnabledCheck, "RIGHT", 4, 0)
 
+-- Aura rules only: all triggers count as one effect (announce the first start and the last end).
+auraEditor.oneEffectCheck = CreateFrame("CheckButton", nil, auraEditor.rulePanel, "UICheckButtonTemplate")
+auraEditor.oneEffectCheck:SetSize(24, 24)
+auraEditor.oneEffectCheck:SetPoint("TOPLEFT", auraEditor.rulePanel, "TOPLEFT", 90, -87)
+auraEditor.oneEffectLabel = createLabel(auraEditor.rulePanel, "Treat triggers as one effect", "GameFontNormalSmall")
+auraEditor.oneEffectLabel:SetPoint("LEFT", auraEditor.oneEffectCheck, "RIGHT", 4, 0)
+
     auraEditor.specFilter = CreateFrame("Frame", nil, auraEditor.rulePanel, "UIDropDownMenuTemplate")
-    UIDropDownMenu_SetWidth(auraEditor.specFilter, 138)
+    ns.Layout.setDropdownWidth(auraEditor.specFilter, 138)
     auraEditor.specFilterLabel = createLabel(auraEditor.rulePanel, "Specs", "GameFontNormalSmall")
     auraEditor.UpdateSpecializationFilter = function(rule)
         local filter = auraEditor.specFilter
@@ -4475,6 +4965,7 @@ UIDropDownMenu_Initialize(auraEditor.specFilter, function(menu, level)
     end
 end)
 addHelpTooltip(auraEditor.specFilter, "Specializations", "Choose the specializations for which this rule is active.")
+ns.Skin.Register(auraEditor.specFilter, "dropdown")
 
 end
 
@@ -4635,6 +5126,7 @@ triggerAddButton:SetScript("OnClick", function()
         ns.runPartialSpellSearch(query, nameSearch.rule, searchGeneration, false)
     end
 end)
+ns.Skin.Register(triggerAddButton, "button")
 triggerStatus = createLabel(triggerPanel, "", "GameFontNormalSmall")
 triggerScroll = CreateFrame("ScrollFrame", nil, triggerPanel, "UIPanelScrollFrameTemplate")
 triggerScroll.backdrop = triggerPanel
@@ -4646,13 +5138,15 @@ triggerScroll:HookScript("OnSizeChanged", function(self, width)
     updateSelectedTriggers()
     ns.updateItemMembers()
 end)
+ns.Skin.Register(triggerScroll, "scrollTrack")
+ns.Skin.Register(triggerScroll, "scrollThumb")
 itemSourceText = createLabel(auraEditor, "", "GameFontNormalSmall")
 
 end
 
 local function createScreenChoiceDropdown(parent, width, choices, valueOf, textOf, onChange)
     local dropdown = CreateFrame("Frame", nil, parent, "UIDropDownMenuTemplate")
-    UIDropDownMenu_SetWidth(dropdown, width)
+    ns.Layout.setDropdownWidth(dropdown, width)
     UIDropDownMenu_Initialize(dropdown, function(menu, level)
         for _, choice in ipairs(choices) do
             local chosen = choice
@@ -4671,6 +5165,7 @@ local function createScreenChoiceDropdown(parent, width, choices, valueOf, textO
             UIDropDownMenu_AddButton(info, level)
         end
     end)
+    ns.Skin.Register(dropdown, "dropdown")
     return dropdown
 end
 
@@ -4734,18 +5229,17 @@ local function buildScreenRow(parent, labelText, y, eventKey)
             ns.setScreenAnchorUnlocked(frame, true)
         end
     end)
+    ns.Skin.Register(row.color, "swatchFrame")
+    ns.Skin.Register(row.preview, "button")
+    ns.Skin.Register(row.anchor, "button")
     return row
 end
 
-local function buildAuraNotificationPanel(eventKey, title)
-    local panel = {}
-    panel.eventKey = eventKey
-    panel.expanded = true
-    panel.frame = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
-    panel.frame:SetHeight(162)
-    stylePanel(panel.frame, 0.09, 0.095, 0.105)
-    panel.heading = makeSectionLabel(panel.frame, title, 12, -8)
-    -- The whole 34 px heading row is the click target: chevron left of the title, hint on the right.
+-- Heading row of a panel (needs panel.frame, .heading, .key, .collapsible): the whole 34 px row is the click
+-- target, chevron at PAD, grey hint on the right. Only collapsible panels (Application, Expiration, TTS) show it
+-- and get the skin header art; the Ready panel builds it hidden. Create it before the panel's controls so they
+-- stay on top of the row.
+ns.Layout.buildPanelHeader = function(panel, title)
     panel.headerButton = CreateFrame("Button", nil, panel.frame)
     panel.headerButton:SetPoint("TOPLEFT", panel.frame, "TOPLEFT", 0, 0)
     panel.headerButton:SetPoint("TOPRIGHT", panel.frame, "TOPRIGHT", 0, 0)
@@ -4755,18 +5249,39 @@ local function buildAuraNotificationPanel(eventKey, title)
     panel.headerButton:GetHighlightTexture():SetAlpha(0.07)
     panel.headerIndicator = panel.headerButton:CreateTexture(nil, "ARTWORK")
     panel.headerIndicator:SetSize(16, 16)
-    panel.headerIndicator:SetPoint("LEFT", panel.headerButton, "LEFT", ns.Layout.PAD - 20, 0)
+    panel.headerIndicator:SetPoint("LEFT", panel.headerButton, "LEFT", ns.Layout.PAD, 0)
     panel.headerHint = panel.headerButton:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     panel.headerHint:SetPoint("RIGHT", panel.headerButton, "RIGHT", ns.Layout.RIGHT, 0)
     panel.headerHint:SetTextColor(0.6, 0.6, 0.62)
+    if panel.collapsible and ns.Skin.Data() then
+        -- the header art (child frame) would cover a heading that belongs to panel.frame
+        panel.heading:SetParent(panel.headerButton)
+    end
+    if panel.collapsible then
+        ns.Skin.Register(panel.headerButton, "panelHeader")
+        ns.Skin.Register(panel.headerIndicator, "chevron")
+    end
     ns.Layout.refreshPanelHeader(panel)
     panel.headerButton:SetScript("OnClick", function()
-        if panel.eventKey ~= "expire" then return end
-        ns.Layout.setExpirationPanelExpanded(panel, not ns.Layout.isNotificationPanelExpanded(panel))
-        ns.setNotificationPanelShown(panel, true)
-        layoutSharedEditor(true)
+        if not panel.collapsible then return end
+        ns.Layout.setPanelExpanded(panel, not ns.Layout.isPanelExpanded(panel))
+        if panel.ttsEnabled then ns.setNotificationPanelShown(panel, true) end
+        layoutSharedEditor(selectedCategory == "auras")
     end)
-    addHelpTooltip(panel.headerButton, "Expiration", "Click to expand or collapse this panel.")
+    addHelpTooltip(panel.headerButton, title, "Click to expand or collapse this panel.")
+end
+
+local function buildAuraNotificationPanel(eventKey, title)
+    local panel = {}
+    panel.eventKey = eventKey
+    panel.key = eventKey
+    panel.collapsible = eventKey ~= "ready"
+    panel.expanded = true
+    panel.frame = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
+    panel.frame:SetHeight(162)
+    stylePanel(panel.frame, 0.09, 0.095, 0.105)
+    panel.heading = makeSectionLabel(panel.frame, title, 12, -8)
+    ns.Layout.buildPanelHeader(panel, title)
 
     panel.ttsEnabled = CreateFrame("CheckButton", nil, panel.frame, "UICheckButtonTemplate")
     panel.ttsLabel = createLabel(panel.frame, "TTS", "GameFontNormal")
@@ -4805,8 +5320,10 @@ local function buildAuraNotificationPanel(eventKey, title)
             setStatus("Sound test could not be sent to WoW.", true)
         end
     end)
-    if eventKey == "apply" then
-        panel.categoryLabel = createLabel(panel.frame, "Application-Fallback", "GameFontNormalSmall")
+    ns.Skin.Register(panel.ttsTest, "button")
+    ns.Skin.Register(panel.soundTest, "button")
+    if eventKey == "apply" or eventKey == "expire" then
+        panel.categoryLabel = createLabel(panel.frame, eventKey == "apply" and "Application-Fallback" or "Expiration-Fallback", "GameFontNormalSmall")
         panel.categoryChoice = createScreenChoiceDropdown(panel.frame, 142, NOTIFICATION_CUE_CHOICES,
             function(choice) return choice.value end,
             function(choice) return L(choice.label) end,
@@ -4817,7 +5334,11 @@ local function buildAuraNotificationPanel(eventKey, title)
                 syncAllAuras(true)
                 updateRulePreviewFromEditor()
             end)
-        addHelpTooltip(panel.categoryChoice, "Application-Fallback", "WoW plays the category word itself when the aura is applied, for auras that are not your own self-cast buffs; it never plays on expiration.")
+        if eventKey == "apply" then
+            addHelpTooltip(panel.categoryChoice, "Application-Fallback", "WoW plays the category word itself when the aura is applied, for auras that are not your own self-cast buffs. It stays silent for auras the addon speaks itself.")
+        else
+            addHelpTooltip(panel.categoryChoice, "Expiration-Fallback", "WoW plays the category word itself when the aura ends, also in combat when the addon cannot read it. It is the same word as on application. Not used by rules that treat their triggers as one effect.")
+        end
     end
     panel.screen = buildScreenRow(panel.frame, "On-screen text", -89, eventKey)
     ns.screenControls[eventKey] = panel.screen
@@ -4826,7 +5347,6 @@ local function buildAuraNotificationPanel(eventKey, title)
 end
 
 local function buildMessageControls()
-    auraEditor.notificationsHeading = makeSectionLabel(auraEditor, "NOTIFICATIONS", ns.Layout.EXTRA_X, -255)
     local applyPanel = buildAuraNotificationPanel("apply", "Application")
     local expirePanel = buildAuraNotificationPanel("expire", "Expiration")
     local readyPanel = buildAuraNotificationPanel("ready", "Ready")
@@ -4849,12 +5369,28 @@ local function buildMessageControls()
     help.mark:SetPoint("CENTER", help, "CENTER", 0, 0)
     help.mark:SetText("?")
     help:Hide()
-    addHelpTooltip(help, "Wildcards",
-        "Wildcards: {item} - name of the item that became ready; {slot} - its slot (for example Trinket 1). Leave them out to speak a fixed text, for example 'Trinket ready'. Works in the spoken text and the on-screen text.")
+    -- The default tooltip font draws { } almost like [ ]: lines with braces use Arial Narrow. WoW's standard fonts
+    -- have no italics, so the example is set apart by its light-blue colour instead.
+    local braceFont = { "Fonts\\ARIALN.TTF", 13, "" }
+    addHelpTooltip(help, "Wildcards", nil, {
+        { text = "Type them with curly braces: {item} and {slot}.", font = braceFont },
+        { text = "{item} - name of the item that became ready", font = braceFont },
+        { text = "{slot} - its slot, for example Trinket 1", font = braceFont },
+        { text = "Example:", r = 1, g = 0.82, b = 0.2 },
+        { text = "{item} ready  =>  Blazebinder's Hoof ready", r = 0.624, g = 0.878, b = 1, font = braceFont },
+        { text = "Trinket ready  =>  stays the same", r = 0.624, g = 0.878, b = 1 },
+        { text = "Works in the spoken text and the on-screen text." },
+    })
+    ns.Skin.Register(help, "helpButton", { hide = { help.bg, help.mark } })
     ns.itemHelpButton = help
-    auraEditor.skillTriggerLabel = createLabel(auraEditor, "Trigger", "GameFontNormalSmall")
-    auraEditor.skillTriggerDropdown = CreateFrame("Frame", nil, auraEditor, "UIDropDownMenuTemplate")
-    UIDropDownMenu_SetWidth(auraEditor.skillTriggerDropdown, 180)
+    -- Source hint ("Choose an equipped item" / "Spellbook · ID n") sits in the Ready heading row, right-aligned.
+    itemSourceText:SetParent(readyPanel.frame)
+    itemSourceText:SetJustifyH("RIGHT")
+    itemSourceText:SetPoint("TOPRIGHT", readyPanel.frame, "TOPRIGHT", ns.Layout.RIGHT, -12)
+    itemSourceText:SetWidth(300)
+    auraEditor.skillTriggerLabel = createLabel(triggerPanel, "Trigger", "GameFontNormalSmall")
+    auraEditor.skillTriggerDropdown = CreateFrame("Frame", nil, triggerPanel, "UIDropDownMenuTemplate")
+    ns.Layout.setDropdownWidth(auraEditor.skillTriggerDropdown, 180)
     UIDropDownMenu_Initialize(auraEditor.skillTriggerDropdown, function(menu, level)
         local hasCharges = selectedSkillRule and ns.SkillTracking.HasCharges(selectedSkillRule.spellID)
         for _, choice in ipairs(ns.SkillTracking.triggerTypes) do
@@ -4883,8 +5419,9 @@ local function buildMessageControls()
             UIDropDownMenu_AddButton(info, level)
         end
     end)
-    auraEditor.skillLearnButton = CreateFrame("Button", nil, auraEditor, "UIPanelButtonTemplate")
-    auraEditor.skillLearnButton:SetSize(86, 26)
+    ns.Skin.Register(auraEditor.skillTriggerDropdown, "dropdown")
+    auraEditor.skillLearnButton = CreateFrame("Button", nil, triggerPanel, "UIPanelButtonTemplate")
+    auraEditor.skillLearnButton:SetSize(ns.Layout.BUTTON_W, 30)
     auraEditor.skillLearnButton:SetText(L("Learn"))
     auraEditor.skillLearnButton:SetScript("OnClick", function()
         if ns.SkillTracking.learning then
@@ -4893,7 +5430,8 @@ local function buildMessageControls()
             setStatus(L("Select a valid spell rule before learning."), true)
         end
     end)
-    auraEditor.skillLearningStatus = createLabel(auraEditor, "", "GameFontHighlightSmall")
+    ns.Skin.Register(auraEditor.skillLearnButton, "button")
+    auraEditor.skillLearningStatus = createLabel(triggerPanel, "", "GameFontHighlightSmall")
     auraEditor.skillLearningStatus:SetTextColor(0.75, 0.82, 0.92)
     ns.SkillTracking.onLearningChanged = function(session, status, remaining)
         if not auraEditor.skillLearnButton then return end
@@ -4917,6 +5455,8 @@ local function buildMessageControls()
     auraEditor.voicePanel = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
     stylePanel(auraEditor.voicePanel, 0.09, 0.095, 0.105)
     auraEditor.voiceHeading = makeSectionLabel(auraEditor.voicePanel, "TTS", ns.Layout.PAD, -8)
+    auraEditor.voice = { key = "voice", collapsible = true, expanded = true, frame = auraEditor.voicePanel, heading = auraEditor.voiceHeading }
+    ns.Layout.buildPanelHeader(auraEditor.voice, "TTS")
     auraEditor.voiceLabel = createLabel(auraEditor.voicePanel, "Voice", "GameFontNormalSmall")
     voiceDropdown = createVoiceDropdown(auraEditor.voicePanel, "TOPLEFT", auraEditor.voicePanel, 12, -43, function(voiceID)
     local rule = selectedAura() or selectedItem() or selectedSkill()
@@ -4938,6 +5478,8 @@ auraEditor.speedValue = createLabel(auraEditor.voicePanel, "100%", "GameFontHigh
 auraEditor.speedValue:SetPoint("LEFT", auraEditor.speedSlider, "RIGHT", 8, 0)
 if auraEditor.speedSlider.Low then auraEditor.speedSlider.Low:SetText("100%") end
 if auraEditor.speedSlider.High then auraEditor.speedSlider.High:SetText("200%") end
+auraEditor.voice.controls = { auraEditor.voiceLabel, voiceDropdown, auraEditor.volumeLabel, volumeSlider, volumeValue,
+    auraEditor.speedLabel, auraEditor.speedSlider, auraEditor.speedValue }
 
 end
 
@@ -5059,6 +5601,7 @@ creationView.cancelButton:SetPoint("BOTTOMRIGHT", creationView, "BOTTOMRIGHT", -
         resetSkillCreationSearch()
         updateDetails()
 end)
+    ns.Skin.Register(creationView.cancelButton, "button")
 creationView:Hide()
 
 end
@@ -5068,7 +5611,7 @@ local function wireScreenRow(row, helpText)
     row.text:HookScript("OnTextChanged", updatePreviewButtons)
     row.enabled:SetScript("OnClick", function()
         saveDetails()
-        if row.eventKey == "expire" then ns.Layout.setExpirationPanelExpanded(ns.notificationPanels.expire, true) end
+        ns.Layout.setPanelExpanded(ns.notificationPanels[row.eventKey], true)
         showScreenRow(row, true)
         layoutSharedEditor(selectedCategory == "auras")
         if selectedAura() then
@@ -5099,7 +5642,7 @@ local function wireScreenRow(row, helpText)
     addHelpTooltip(row.size, "Font size", "Choose the size for this on-screen text.")
     addHelpTooltip(row.style, "Style", "Choose the outline and shadow style for this on-screen text.")
     addHelpTooltip(row.color, "Text color", "Choose the color for this on-screen text.")
-    addHelpTooltip(row.anchor, "Anchor", "Unlock and drag this text to a separate screen position.")
+    addHelpTooltip(row.anchor, "Anchor", "Unlock the on-screen text and drag it where you want it. A grid fills the screen and the text snaps to its lines (grid every 10 px) and to the centre lines; hold Shift to place it freely. Click again to lock.")
 end
 
 local function wireEditorControls()
@@ -5146,17 +5689,27 @@ ruleEnabledCheck:SetScript("OnClick", function()
         updateRulePreviewFromEditor()
     end
 end)
+auraEditor.oneEffectCheck:SetScript("OnClick", function(self)
+    if editorLoading or not selectedAura() or selectedAuraRule.builtin then return end
+    saveDetails()
+    local checked = self:GetChecked()
+    selectedAuraRule.oneEffect = checked == true or checked == 1
+    rebuildAuraWatches()
+    syncAllAuras(true)
+end)
+addHelpTooltip(auraEditor.oneEffectCheck, "Treat triggers as one effect",
+    "Announces when the first trigger appears and when the last one is gone. Use it for an effect that applies several auras, such as Bloodlust and its Sated debuff.")
 for _, panel in pairs(ns.notificationPanels) do
     local notificationPanel = panel
     panel.ttsEnabled:SetScript("OnClick", function()
         if selectedAura() then onAuraToggle() else saveDetails(); updateRulePreviewFromEditor() end
-        ns.Layout.setExpirationPanelExpanded(notificationPanel, true)
+        ns.Layout.setPanelExpanded(notificationPanel, true)
         ns.setNotificationPanelShown(notificationPanel, true)
         layoutSharedEditor(selectedCategory == "auras")
     end)
     panel.soundEnabled:SetScript("OnClick", function()
         if selectedAura() then onAuraToggle() else saveDetails(); updateRulePreviewFromEditor() end
-        ns.Layout.setExpirationPanelExpanded(notificationPanel, true)
+        ns.Layout.setPanelExpanded(notificationPanel, true)
         ns.setNotificationPanelShown(notificationPanel, true)
         layoutSharedEditor(selectedCategory == "auras")
     end)
@@ -5217,6 +5770,14 @@ addHelpTooltip(creationView.itemButton, "Equipped item", "Choose an equipped ite
 addHelpTooltip(creationView.skillButton, "Spell cooldown", "Choose a spell from your spellbook and announce when its cooldown is ready.")
 addHelpTooltip(creationView.cancelButton, "Cancel", "Return to the selected rule without creating a new one.")
 updatePreviewButtons()
+-- Checkboxes last: their OnClick scripts were set above and must not run after the skin's HookScript hooks.
+ns.Skin.Register(ruleEnabledCheck, "checkbox")
+ns.Skin.Register(auraEditor.oneEffectCheck, "checkbox")
+for _, panel in pairs(ns.notificationPanels) do
+    ns.Skin.Register(panel.ttsEnabled, "checkbox")
+    ns.Skin.Register(panel.soundEnabled, "checkbox")
+    ns.Skin.Register(panel.screen.enabled, "checkbox")
+end
 end
 
 local function createEditorWidgets()
@@ -5300,7 +5861,7 @@ local function addPickedItem(slotID)
     elseif rule then
         ns.retargetItemRule(rule, replaceRule and replaceIndex or 1, itemID, name, icon, trackSlot and slotID or nil)
     else
-        rule = newItemRule(itemID, name, icon, trackSlot and slotID or nil)
+        rule = newItemRule(itemID, trackSlot and ns.slotName(slotID) or name, icon, trackSlot and slotID or nil)
         if trackSlot then rule.message = ns.slotDefaultMessage(slotID) end
         ns.registerNewRule(rule, "items")
         table.insert(WoWraVoxDB.items, rule)
@@ -5446,6 +6007,56 @@ local function createPickerPrompt()
     pickerPrompt:HookScript("OnHide", function()
         if pickerActive then stopItemPicker() end
     end)
+    ns.Skin.Register(pickerPrompt, "panel", { hide = { accent } })
+    ns.Skin.Register(cancel, "button")
+    ns.Skin.Register(pickerPrompt.slotCheck, "checkbox")
+end
+
+-- Interface skin (see Skin.lua): the choice is stored per profile and applied by the next /reload.
+ns.SKIN_LABELS = { current = "WoWraVox", clean = "Clean" }
+
+function ns.skinChosen()
+    local chosen = WoWraVoxDB and WoWraVoxDB.settings and WoWraVoxDB.settings.skin
+    return ns.Skin.IsValid(chosen) and chosen or "current"
+end
+
+-- Reload the UI (never in combat). Returns false when blocked.
+function ns.reloadUI()
+    if InCombatLockdown and InCombatLockdown() then return false end
+    if saveDetails then saveDetails() end
+    if C_UI and C_UI.Reload then C_UI.Reload() else ReloadUI() end
+    return true
+end
+
+function ns.SkinCommand(message)
+    local function say(text)
+        if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. text) end
+    end
+    local arg = trim(tostring(message or "")):lower()
+    if arg == "wowravox" then arg = "current" end -- the UI name of the default skin
+    local function display(name) return name == "current" and "WoWraVox (current)" or name end
+    local function list(chosen, active)
+        local names = {}
+        for _, name in ipairs(ns.Skin.Names()) do names[#names + 1] = display(name) end
+        say(string.format(L("Interface skin: %s (active: %s). Available: %s. Use /wvskin <name>."),
+            display(chosen), display(active), table.concat(names, ", ")))
+    end
+    if arg == "errors" then
+        local errors = ns.Skin.errors
+        say(string.format("Skin errors: %d", #errors))
+        for index = 1, math.min(5, #errors) do say(errors[index]) end
+    elseif arg == "" then
+        list(ns.skinChosen(), ns.Skin.Active())
+    elseif not ns.Skin.IsValid(arg) then
+        say(string.format(L("Unknown skin: %s"), arg))
+    else
+        ns.Skin.Set(arg)
+        if arg == ns.Skin.Active() then
+            list(arg, arg)
+        elseif not ns.reloadUI() then
+            say(L("Skin saved. Reload is blocked in combat; type /reload later."))
+        end
+    end
 end
 
 function ns.createSettingsPanel()
@@ -5465,6 +6076,7 @@ function ns.createSettingsPanel()
     titleRule:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", ns.Layout.RIGHT, -43)
     titleRule:SetHeight(1)
     titleRule:SetColorTexture(0.72, 0.55, 0.22, 0.9)
+    ns.skinDivider(titleRule)
     local definitions = {
         { key = "tooltipIDs", text = "IDs in game tooltips", help = "Shows spell IDs for auras and spells, plus item and available effect IDs for items." },
     }
@@ -5489,7 +6101,7 @@ function ns.createSettingsPanel()
     local profileList = {}
     local function profileDropdown(width, choices, onSelect)
         local dropdown = CreateFrame("Frame", nil, settingsPanel, "UIDropDownMenuTemplate")
-        UIDropDownMenu_SetWidth(dropdown, width)
+        ns.Layout.setDropdownWidth(dropdown, width)
         local function initialize(menu, level)
             for _, choice in ipairs(choices) do
                 local selected = choice
@@ -5514,14 +6126,38 @@ function ns.createSettingsPanel()
             UIDropDownMenu_SetText(dropdown, text or L("No profiles"))
             UIDropDownMenu_Initialize(dropdown, initialize)
         end
+        ns.Skin.Register(dropdown, "dropdown")
         return dropdown
     end
+
+    -- Interface skin row (between the display checkboxes and PROFILES).
+    local skinChoices = {}
+    for index, name in ipairs(ns.Skin.Names()) do
+        skinChoices[index] = { value = name, key = ns.SKIN_LABELS[name] or name }
+    end
+    local skinLabel = createLabel(settingsPanel, "Interface skin", "GameFontNormalSmall")
+    local skinStatus = createLabel(settingsPanel, "Skin changes after /reload.", "GameFontHighlightSmall")
+    skinStatus:SetJustifyH("LEFT")
+    skinStatus:SetWordWrap(false)
+    local skinDropdown = profileDropdown(112, skinChoices, function(name) ns.Skin.Set(name) end)
+    local skinReload = CreateFrame("Button", nil, settingsPanel, "UIPanelButtonTemplate")
+    skinReload:SetSize(100, 26)
+    skinReload:SetText(L("Reload UI"))
+    skinReload:SetScript("OnClick", function()
+        if not ns.reloadUI() then setStatus("Reload is blocked in combat.", true) end
+    end)
+    local function refreshSkinChoice()
+        local chosen = ns.skinChosen()
+        skinDropdown.SetProfileValue(chosen, L(ns.SKIN_LABELS[chosen] or chosen))
+    end
+    refreshSkinChoice()
 
     local profileHeading = makeSectionLabel(settingsPanel, "PROFILES", ns.Layout.PAD, -104)
     local profileRule = settingsPanel:CreateTexture(nil, "ARTWORK")
     profileRule:SetTexture("Interface\\Buttons\\WHITE8X8")
     profileRule:SetHeight(1)
     profileRule:SetColorTexture(0.72, 0.55, 0.22, 0.9)
+    ns.skinDivider(profileRule)
     local characterProfileLabel = createLabel(settingsPanel, "Profile", "GameFontNormalSmall")
     characterProfileLabel:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", ns.Layout.PAD, -132)
     local characterProfileDropdown = profileDropdown(330, profileList, function(profileID)
@@ -5587,7 +6223,8 @@ function ns.createSettingsPanel()
         local left = 132
         local rowWidth = math.max(150, settingsPanel:GetWidth() - left - 31)
         local stackedChecks = settingsPanel:GetWidth() < 520
-        local sectionShift = stackedChecks and 37 or 0
+        local skinShift = 40 -- height of the Interface skin row
+        local sectionShift = (stackedChecks and 37 or 0) + skinShift
         for index, check in ipairs(displayChecks) do
             check:ClearAllPoints()
             local x = (index == 1 or stackedChecks) and ns.Layout.ROW_X or 340
@@ -5596,9 +6233,21 @@ function ns.createSettingsPanel()
         end
         -- Absolute y from the top, fixed at the collapsed panel height: a LEFT/RIGHT anchor is
         -- vertically centered and would drift when the diagnostics expander changes the height.
-        local collapsedHeight = math.min((stackedChecks and 272 or (rowWidth >= 446 and 232 or 260)) + 36,
+        local baseHeight = math.min((stackedChecks and 272 or (rowWidth >= 446 and 232 or 260)) + 36,
             math.max(220, UIParent:GetHeight() - 24))
-        local ruleY = -(collapsedHeight / 2 + 95 + sectionShift) + 0.5
+        local collapsedHeight = baseHeight + skinShift
+        local ruleY = -(baseHeight / 2 + 95 + sectionShift) + 0.5
+        local skinY = -96 - (sectionShift - skinShift)
+        skinLabel:ClearAllPoints()
+        skinLabel:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", ns.Layout.PAD, skinY)
+        skinDropdown:ClearAllPoints()
+        skinDropdown:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", left - ns.Layout.EDITBOX_INSET - ns.Layout.DD_INSET_L, skinY + 3)
+        skinReload:ClearAllPoints()
+        skinReload:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", left + 142, skinY)
+        skinStatus:ClearAllPoints()
+        skinStatus:SetPoint("LEFT", skinReload, "RIGHT", 10, 0)
+        skinStatus:SetPoint("RIGHT", settingsPanel, "RIGHT", ns.Layout.RIGHT, 0)
+        skinStatus:SetShown(rowWidth >= 446)
         profileRule:ClearAllPoints()
         profileRule:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", ns.Layout.PAD, ruleY)
         profileRule:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", ns.Layout.RIGHT, ruleY)
@@ -5608,7 +6257,7 @@ function ns.createSettingsPanel()
         characterProfileLabel:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", ns.Layout.PAD, -132 - sectionShift)
         characterProfileDropdown:ClearAllPoints()
         characterProfileDropdown:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", left - ns.Layout.EDITBOX_INSET - ns.Layout.DD_INSET_L, -129 - sectionShift)
-        UIDropDownMenu_SetWidth(characterProfileDropdown, math.min(429, rowWidth - 17))
+        ns.Layout.setDropdownWidth(characterProfileDropdown, math.min(429, rowWidth - 17))
         profileNameLabel:ClearAllPoints()
         profileNameLabel:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", ns.Layout.PAD, -177 - sectionShift)
         copyProfileName:ClearAllPoints()
@@ -5690,6 +6339,7 @@ function ns.createSettingsPanel()
         characterProfileDropdown.SetProfileValue(characterProfileID,
             ns.Profiles.GetProfileName(characterProfileID) or L("No profiles"))
         debugCheck:SetChecked(ns.SkillTracking.debugEnabled == true)
+        refreshSkinChoice()
         refreshDiagnosticsStatus()
     end
     settingsPanel.RefreshProfileControls()
@@ -5697,6 +6347,12 @@ function ns.createSettingsPanel()
     addHelpTooltip(newProfileButton, "New profile", "Create a profile with the three starter rules.")
     addHelpTooltip(copyProfileButton, "Copy profile", "Copy the selected profile for this character.")
     addHelpTooltip(diagnosticsToggle, L("Combat diagnostics"), L("Temporary debug controls. Settings reset on /reload."))
+    addHelpTooltip(skinDropdown, "Interface skin", "Choose the look of the WoWraVox window. The change applies after /reload.")
+    for _, button in ipairs({ skinReload, newProfileButton, copyProfileButton, diagnosticsToggle, testTTSButton, showLogButton }) do
+        ns.Skin.Register(button, "button")
+    end
+    ns.Skin.Register(debugCheck, "checkbox")
+    for _, check in ipairs(displayChecks) do ns.Skin.Register(check, "checkbox") end
     settingsPanel:Hide()
 end
 
@@ -5730,7 +6386,7 @@ end
 
 function ns.createOptions()
     optionsFrame = CreateFrame("Frame", "WoWraVoxOptions", UIParent, "BackdropTemplate")
-    stylePanel(optionsFrame, 0.035, 0.04, 0.05)
+    stylePanel(optionsFrame, 0.035, 0.04, 0.05, false)
     optionsFrame:SetScale(ns.Layout.getWindowScale())
     optionsFrame:SetSize(ns.Layout.maxWidth, ns.Layout.maxHeight)
     optionsFrame:SetPoint("CENTER")
@@ -5763,6 +6419,8 @@ function ns.createOptions()
     headerAccent:SetHeight(1)
     headerAccent:SetTexture("Interface\\Buttons\\WHITE8X8")
     headerAccent:SetColorTexture(0.62, 0.48, 0.22, 1)
+    -- the window art has its own header: hide the addon-made header fills (registered here, once they exist)
+    ns.Skin.Register(optionsFrame, "window", { hide = { headerBackground, headerShade, headerAccent } })
 
     local brandIcon = header:CreateTexture(nil, "ARTWORK")
     brandIcon:SetSize(40, 40)
@@ -5808,6 +6466,7 @@ function ns.createOptions()
         optionsFrame:Hide()
     end)
     addHelpTooltip(closeButton, "Close", "Close the WoWraVox window.")
+    ns.Skin.Register(closeButton, "dangerButton", { marks = { closeMarkA, closeMarkB } })
 
     optionsFrame.settingsButton = CreateFrame("Button", nil, header, "BackdropTemplate")
     optionsFrame.settingsButton:SetSize(36, 36)
@@ -5837,6 +6496,8 @@ function ns.createOptions()
         if settingsPanel:IsShown() then settingsPanel:Hide() else settingsPanel:Show() end
     end)
     addHelpTooltip(optionsFrame.settingsButton, "Display options", "Configure tooltip IDs.")
+    ns.Skin.Register(optionsFrame.settingsButton, "button")
+    if ns.Skin.Data() then optionsFrame.settingsButton:SetBackdrop(nil) end -- the button art replaces the backdrop
 
     listPanel = CreateFrame("Frame", nil, optionsFrame, "BackdropTemplate")
     listPanel:SetPoint("TOPLEFT", optionsFrame, "TOPLEFT", ns.Layout.MARGIN, -64)
@@ -5851,12 +6512,15 @@ function ns.createOptions()
     listSeparator:SetPoint("TOPLEFT", listPanel, "TOPLEFT", 9, -25)
     listSeparator:SetPoint("TOPRIGHT", listPanel, "TOPRIGHT", -25, -25)
     listSeparator:SetHeight(1)
+    ns.skinDivider(listSeparator)
     listScroll = CreateFrame("ScrollFrame", nil, listPanel, "UIPanelScrollFrameTemplate")
     listScroll:SetPoint("TOPLEFT", listPanel, "TOPLEFT", 3, -30)
     listScroll:SetPoint("BOTTOMRIGHT", listPanel, "BOTTOMRIGHT", -25, 38)
     listChild = CreateFrame("Frame", nil, listScroll)
     listChild:SetSize(1, 1)
     listScroll:SetScrollChild(listChild)
+    ns.Skin.Register(listScroll, "scrollTrack")
+    ns.Skin.Register(listScroll, "scrollThumb")
     listEmptyText = createLabel(listPanel, "", "GameFontHighlightSmall")
     listEmptyText:SetPoint("TOPLEFT", listPanel, "TOPLEFT", 14, -47)
     listEmptyText:SetPoint("RIGHT", listPanel, "RIGHT", -30, 0)
@@ -5896,6 +6560,7 @@ function ns.createOptions()
         saveDetails()
         showAddRuleView()
     end)
+    ns.Skin.Register(optionsFrame.addButton, "button")
 
     statusText = createLabel(optionsFrame, "", "GameFontNormalSmall")
     statusText:SetPoint("BOTTOMLEFT", detailPanel, "BOTTOMLEFT", 0, -1)
@@ -5908,6 +6573,7 @@ function ns.createOptions()
         updateDetails()
     end)
     optionsFrame:HookScript("OnHide", function()
+        ns.endScreenAnchor() -- close button, Esc, ToggleOptions: anchor mode ends with the window
         if settingsPanel then settingsPanel:Hide() end
         if searchPopup then searchPopup:Hide() end
         addRuleMode = false
@@ -5919,7 +6585,7 @@ end
 function ns.Profiles.ActivateUI()
     if not initializeDatabase() then return end
     ns.SkillTracking.CancelLearning(L("Profile changed."), true)
-    if ns.screenAnchorTarget then ns.setScreenAnchorUnlocked(ns.screenAnchorTarget, false) end
+    ns.endScreenAnchor()
     for key, frame in pairs(ns.screenFrames) do
         frame.generation = (frame.generation or 0) + 1
         frame.active = false
@@ -6000,6 +6666,8 @@ function ns.onEvent(self, event, ...)
         load.refresh = clock() - stamp
         SLASH_WOWRAVOXPROF1 = "/wvprof"
         SlashCmdList.WOWRAVOXPROF = ns.Prof.Command
+        SLASH_WOWRAVOXSKIN1 = "/wvskin"
+        SlashCmdList.WOWRAVOXSKIN = ns.SkinCommand
         SLASH_WOWRAVOX1 = "/wowravox"
         SLASH_WOWRAVOX2 = "/wvr"
         SlashCmdList.WOWRAVOX = ns.ToggleOptions
@@ -6145,6 +6813,7 @@ function ns.onEvent(self, event, ...)
         ns.NormalizeAllProfiles()
         ns.Profiles.PrepareSavedVariables()
     elseif event == "PLAYER_REGEN_DISABLED" then
+        ns.endScreenAnchor()
         if pickerActive then
             stopItemPicker()
             setStatus("Item selection was stopped when combat started.", true)

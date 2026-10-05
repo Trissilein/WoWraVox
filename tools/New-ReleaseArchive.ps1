@@ -16,8 +16,15 @@ $tocFiles = @(Get-Content -LiteralPath $tocPath | ForEach-Object { $_.Trim() } |
     Where-Object { $_ -and -not $_.StartsWith('#') } | ForEach-Object { $_ -replace '\\', '/' })
 $runtimeFiles = @('WoWraVox.toc') + $tocFiles
 # Only game-loadable assets ship; source PNGs live in docs/branding/.
-$assetFiles = @(Get-ChildItem -LiteralPath (Join-Path $root 'Assets') -File |
+$assetsRoot = Join-Path $root 'Assets'
+$assetFiles = @(Get-ChildItem -LiteralPath $assetsRoot -File |
     Where-Object { $_.Extension -in '.ogg', '.tga' } | ForEach-Object { "Assets/$($_.Name)" })
+# Skin textures: Assets/skin/<skin>/*.tga, subfolders preserved.
+$skinRoot = Join-Path $assetsRoot 'skin'
+if (Test-Path -LiteralPath $skinRoot) {
+    $assetFiles += @(Get-ChildItem -LiteralPath $skinRoot -File -Recurse -Filter '*.tga' |
+        ForEach-Object { 'Assets/skin/' + ($_.FullName.Substring($skinRoot.Length).TrimStart('\', '/') -replace '\\', '/') })
+}
 $expected = @($runtimeFiles + $assetFiles | Sort-Object -Unique)
 
 try {

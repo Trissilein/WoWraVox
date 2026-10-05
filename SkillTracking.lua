@@ -649,9 +649,12 @@ function tracking.HandleDebugCommand(command)
     elseif command == "off" then tracking.SetDebugEnabled(false)
     elseif command == "show" or command == "" then tracking.ShowDebug()
     elseif command == "clear" then tracking.ClearDebug()
+    elseif command == "secrecy" then ns._Aura.printSecrecy()
+    elseif command == "sim" then ns.Simulation.Start()
+    elseif command == "sim stop" then ns.Simulation.Stop()
     else
         if DEFAULT_CHAT_FRAME then
-            DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. text("Use /wvdebug on, off, show, or clear."))
+            DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. text("Use /wvdebug on, off, show, clear, secrecy, or sim."))
         end
     end
 end

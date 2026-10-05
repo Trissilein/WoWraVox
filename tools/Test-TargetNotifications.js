@@ -15,6 +15,14 @@ const source = fs.readFileSync(path.join(root, "WoWraVox.lua"), "utf8").replace(
   /^local addonName, ns = \.\.\.$/m,
   "local addonName, ns = addonName, addonNamespace",
 );
+const simulation = fs.readFileSync(path.join(root, "Simulation.lua"), "utf8").replace(
+  /^local _, ns = ...$/m,
+  "local _, ns = addonName, addonNamespace",
+);
+const defaults = fs.readFileSync(path.join(root, "Defaults.lua"), "utf8").replace(
+  /^local _, ns = ...$/m,
+  "local _, ns = addonName, addonNamespace",
+);
 const harness = fs.readFileSync(path.join(__dirname, "Test-TargetNotifications.lua"), "utf8");
 const prelude = [
   "function wipe(value) for key in pairs(value) do value[key] = nil end end",
@@ -29,7 +37,14 @@ const program = [
   "local addonNamespace = {}",
   prelude,
   "do",
+  defaults,
+  "end",
+  "addonNamespace.RealDefaults = addonNamespace.Defaults",
+  "do",
   source,
+  "end",
+  "do",
+  simulation,
   "end",
   harness,
 ].join("\n");

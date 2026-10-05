@@ -6,6 +6,7 @@ local timers = {}
 local added = {}
 local removed = {}
 local selfBuff = {}
+local neverSecret = {}
 local mediaPaths = { Foo = "media\\foo.ogg", Bar = "media\\bar.ogg" }
 
 local function check(name, condition, detail)
@@ -46,6 +47,7 @@ end
 
 ns._Aura = {
     getSelfBuffStatus = function(spellID) return selfBuff[spellID] and "true" or "false" end,
+    auraSecrecy = function(spellID) return neverSecret[spellID] and "never" or "contextual" end,
 }
 local fallback = ns.AuraSoundFallback
 
@@ -87,6 +89,41 @@ check("category word suppressed for a self-buff aura", registered(200, ADDED) ==
 check("category word is never registered for expiration", registered(100, REMOVED) == nil)
 
 selfBuff = {}
+neverSecret = { [300] = true }
+refresh({ rule({ alertCategory = "defensive", applyEnabled = true, spellIDs = { 101, 300 } }) })
+check("category word suppressed for a never-secret aura (spoken by TTS)",
+    registered(101, ADDED) ~= nil and registered(300, ADDED) == nil)
+refresh({ rule({ alertCategory = "defensive", applyEnabled = true, oneEffect = true, spellIDs = { 102, 300 } }) })
+check("one-effect rule with a readable trigger registers the category word for no trigger",
+    registered(102, ADDED) == nil and registered(300, ADDED) == nil)
+refresh({ rule({ alertCategory = "defensive", applyEnabled = true, oneEffect = true, spellIDs = { 103 } }) })
+check("one-effect rule without a readable trigger keeps the category word", registered(103, ADDED) ~= nil)
+-- The addon only stays silent for a readable aura while its TTS is on; otherwise the word is the fallback.
+refresh({ rule({ alertCategory = "defensive", applyEnabled = false, spellIDs = { 104, 300 } }) })
+check("never-secret aura with application TTS off still gets the category word",
+    registered(300, ADDED) ~= nil and registered(104, ADDED) ~= nil)
+neverSecret[301] = true
+refresh({ rule({ alertCategory = "defensive", applyEnabled = false, oneEffect = true, spellIDs = { 105, 301 } }) })
+check("one-effect rule with application TTS off keeps the category word for every trigger",
+    registered(105, ADDED) ~= nil and registered(301, ADDED) ~= nil)
+
+-- Expiration fallback: the category word on Removed.
+refresh({ rule({ expireCategory = "offensive", spellIDs = { 106, 300 } }) })
+check("expiration fallback registers the word on Removed",
+    registered(106, REMOVED) ~= nil and registered(106, REMOVED).file == fallback.categorySoundFiles.offensive
+    and registered(300, REMOVED) ~= nil)
+refresh({ rule({ expireCategory = "offensive", expireEnabled = true, spellIDs = { 107, 300 } }) })
+check("expiration TTS on: a readable aura is spoken, not announced natively",
+    registered(107, REMOVED) ~= nil and registered(300, REMOVED) == nil)
+refresh({ rule({ expireCategory = "offensive", oneEffect = true, spellIDs = { 108 } }) })
+check("one-effect rules get no expiration word", registered(108, REMOVED) == nil)
+refresh({ rule({ expireCategory = "offensive", expireSoundEnabled = true, expireSoundMediaName = "Foo", spellIDs = { 109 } }) })
+check("the expiration word wins over an expiration media tone",
+    registered(109, REMOVED) ~= nil and registered(109, REMOVED).file == fallback.categorySoundFiles.offensive)
+refresh({ rule({ expireCategory = "none", expireSoundEnabled = true, expireSoundMediaName = "Foo", spellIDs = { 110 } }) })
+check("no expiration word: the media tone stays", registered(110, REMOVED) ~= nil and registered(110, REMOVED).file == mediaPaths.Foo)
+
+neverSecret = {}
 refresh({ rule({ applyEnabled = true, expireEnabled = true }) })
 check("TTS-only rule registers no generic tone", #added == 0)
 

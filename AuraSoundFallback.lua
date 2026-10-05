@@ -117,7 +117,8 @@ function fallback.GetCategorySoundFile(category)
 end
 
 -- Native sounds WoW plays itself (also when the addon cannot read the aura): the category word on Added for
--- auras that are not own self-buffs, and the selected LibSharedMedia tones for Added/Removed.
+-- auras that are neither own self-buffs nor spoken by the addon (readable in combat and TTS on), the category
+-- word on Removed (expireCategory) for rules that are not one-effect, and the selected LibSharedMedia tones.
 local function buildDesired(rules)
     wipe(desired)
     if not available() then return end
@@ -142,11 +143,25 @@ local function buildDesired(rules)
         if rule.enabled and (not ns.Profiles or not ns.Profiles.RuleMatchesCurrentSpecialization
             or ns.Profiles.RuleMatchesCurrentSpecialization(rule)) then
             local categoryConfigured = fallback.GetCategorySoundFile(rule.alertCategory)
+            -- The category word on Removed only for rules whose end is one aura's end: a one-effect rule ends
+            -- with its last trigger, which WoW cannot express natively (the readable debuff speaks it).
+            local expireCategoryConfigured = not rule.oneEffect and fallback.GetCategorySoundFile(rule.expireCategory) or nil
+            -- One-effect rule with a readable trigger: the addon speaks the start itself for every trigger,
+            -- as long as application TTS is on; otherwise the category word is the fallback.
+            local oneEffectReadable = false
+            if rule.oneEffect and rule.applyEnabled and ns._Aura and ns._Aura.auraSecrecy then
+                for _, spellID in ipairs(type(rule.spellIDs) == "table" and rule.spellIDs or {}) do
+                    if ns._Aura.auraSecrecy(spellID) == "never" then oneEffectReadable = true; break end
+                end
+            end
             local applyMediaSound = rule.applySoundEnabled and selectedMediaSound(rule, "apply")
             local expireMediaSound = rule.expireSoundEnabled and selectedMediaSound(rule, "expire")
             for _, spellID in ipairs(type(rule.spellIDs) == "table" and rule.spellIDs or {}) do
                 if type(spellID) == "number" and spellID > 0 and spellID == math.floor(spellID) then
-                    local categorySoundFile = not nativeCategoryBlocked[spellID] and categoryConfigured or nil
+                    -- Never-secret auras stay readable in combat, so the addon speaks them itself (TTS on).
+                    local neverSecret = ns._Aura and ns._Aura.auraSecrecy and ns._Aura.auraSecrecy(spellID) == "never"
+                    local readable = oneEffectReadable or (rule.applyEnabled and neverSecret)
+                    local categorySoundFile = not nativeCategoryBlocked[spellID] and not readable and categoryConfigured or nil
                     local applySound = categorySoundFile or (not categoryConfigured and applyMediaSound) or nil
                     if applySound then
                         local trigger = Enum.UnitAuraSoundTrigger.Added
@@ -161,15 +176,18 @@ local function buildDesired(rules)
                                 signature = applySound .. "|" .. channel }
                         end
                     end
-                    if expireMediaSound then
+                    -- The category word on Removed, unless the addon speaks the end itself (readable aura, TTS on).
+                    local expireCategoryFile = not (rule.expireEnabled and neverSecret) and expireCategoryConfigured or nil
+                    local expireSound = expireCategoryFile or (not expireCategoryConfigured and expireMediaSound) or nil
+                    if expireSound then
                         local trigger = Enum.UnitAuraSoundTrigger.Removed
                         local key = tostring(spellID) .. ":" .. tostring(trigger)
                         local channel = rule.expireSoundEnabled and rule.expireSoundChannel or "Master"
                         local current = desired[key]
-                        if not current or current.soundFile ~= expireMediaSound
+                        if not current or current.soundFile ~= expireSound
                             or (current.channel == "Master" and channel ~= "Master") then
                             desired[key] = { spellID = spellID, trigger = trigger, channel = channel,
-                                soundFile = expireMediaSound, signature = expireMediaSound .. "|" .. channel }
+                                soundFile = expireSound, signature = expireSound .. "|" .. channel }
                         end
                     end
                 end

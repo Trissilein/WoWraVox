@@ -215,16 +215,22 @@ local function getCharacterBinding(root, create)
     local binding = root.characters[key]
     if type(binding) ~= "table" then
         if not create then return nil end
-        local templateID = getProfile(root.defaultProfileID) and root.defaultProfileID or firstProfileID(root)
-        local template = templateID and root.profiles[templateID]
-        if not template then return nil end
+        -- A new character starts like a fresh install (empty starter rules), not as a copy of Default.
+        -- Without the starter data it falls back to a copy so it never starts without a profile.
+        local data = type(ns.CreateStarterDatabase) == "function" and ns.CreateStarterDatabase() or nil
+        if not data then
+            local templateID = getProfile(root.defaultProfileID) and root.defaultProfileID or firstProfileID(root)
+            local template = templateID and root.profiles[templateID]
+            if not template then return nil end
+            data = template.data
+        end
         local name = label
         local suffix = 2
         while profileNameExists(root, name) do
             name = label .. " (" .. tostring(suffix) .. ")"
             suffix = suffix + 1
         end
-        local id = createProfile(root, name, template.data)
+        local id = createProfile(root, name, data)
         if not id then return nil end
         binding = { profileID = id, specializations = {} }
         root.characters[key] = binding
