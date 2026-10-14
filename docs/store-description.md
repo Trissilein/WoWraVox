@@ -14,7 +14,8 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 - **On-screen text:** show your own message with your own font, size, colour and position.
 - **Sounds:** play a short sound or a spoken category word, also for effects the game hides from addons in combat.
 - **Profiles:** keep separate settings per character and per specialization.
-- **Easy setup:** find spells by name or ID, preview what a rule will do, and open the settings from the addon compartment, Titan Panel or any LibDataBroker display.
+- **Aura presets:** choose effects for your class and specialization, or buffs received from other players, under **Add rule → Aura**. Nothing is preselected. You can combine selected effects with your own spell IDs and customize their announcements.
+- **Easy setup:** find spells by name or ID, test sounds, preview on-screen text, and open the settings from the addon compartment, Titan Panel or any LibDataBroker display.
 
 ## How it works
 
@@ -22,7 +23,7 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 2. Add a rule: an aura, an equipped item or a spell cooldown.
 3. Choose what you want to hear and see when it starts, ends or becomes ready.
 
-New profiles start with three disabled examples to copy from.
+New profiles start with a ready-made Bloodlust rule and trinket rules.
 
 ## Good to know
 

@@ -36,6 +36,25 @@ local function newFrame()
     function frame:SetPoint() end
     function frame:SetAlpha() end
     function frame:Show() end
+    function frame:Hide() end
+    function frame:SetFrameStrata() end
+    function frame:SetToplevel() end
+    function frame:SetFrameLevel() end
+    function frame:SetBackdrop() end
+    function frame:SetBackdropColor() end
+    function frame:SetBackdropBorderColor() end
+    function frame:SetMultiLine() end
+    function frame:SetAutoFocus() end
+    function frame:SetFontObject() end
+    function frame:SetWidth() end
+    function frame:SetHeight(value) self.height = value end
+    function frame:SetTextInsets() end
+    function frame:SetText(value) self.value = value end
+    function frame:SetCursorPosition() end
+    function frame:SetFocus() end
+    function frame:HighlightText() end
+    function frame:SetScrollChild() end
+    function frame:CreateFontString() return newFrame() end
     function frame:SetScript(name, callback) self.scripts[name] = callback end
     function frame:SetCooldownFromDurationObject(duration) self.durationObject = duration end
     function frame:SetCooldown() end
@@ -192,3 +211,64 @@ check("independent 0->1 announces own rule", #notices == 1 and notices[1].id == 
 setCharges(2001, 2, 2)
 scan(rules)
 check("independent 1->2 never cross announces", #notices == 1)
+
+-- Copyable diagnostics reuse the existing lazily-created editbox and fail safely if UI creation fails.
+local previousDebugWindow = tracking.debugWindow
+tracking.debugWindow = nil
+local creationsBeforeWindow = frameSerial
+local firstShow = tracking.ShowText("Diagnostic report", "first line\nsecond line")
+local reportWindow = tracking.debugWindow
+local creationsWithWindow = frameSerial
+local secondShow = tracking.ShowText("Diagnostic report", "updated report")
+check("diagnostic report uses selectable reusable text UI",
+    firstShow and secondShow and reportWindow ~= nil and tracking.debugWindow == reportWindow
+    and reportWindow.edit.value == "updated report" and reportWindow.edit.height == 360
+    and creationsWithWindow > creationsBeforeWindow and frameSerial == creationsWithWindow)
+local realCreateFrame = CreateFrame
+tracking.debugWindow = nil
+CreateFrame = function() error("UI unavailable") end
+check("diagnostic report UI creation failure is handled", tracking.ShowText("Diagnostic report", "text") == false)
+CreateFrame = realCreateFrame
+tracking.debugWindow = previousDebugWindow
+
+-- A recycled cooldown frame owns no old rule; the generic callback always reads its current binding.
+reset()
+tracking.ResetAll()
+local oldRule = makeRule("retired", 3001, "chargeGained")
+setCharges(3001, 0, 2)
+scan({ oldRule }, "BASELINE")
+local reused = tracking.durationFrames[oldRule]
+local lateCallback = reused and reused.scripts.OnCooldownDone
+tracking.ResetRule(oldRule)
+if lateCallback then lateCallback(reused) end
+check("reset detaches cooldown frame and stale callback is ignored",
+    reused ~= nil and tracking.durationFrames[oldRule] == nil and reused.rule == nil and #notices == 0)
+
+local newRule = makeRule("current", 3002, "chargeGained")
+setCharges(3002, 0, 2)
+scan({ newRule }, "BASELINE")
+local rebound = tracking.durationFrames[newRule]
+setCharges(3002, 1, 2)
+if lateCallback then lateCallback(rebound) end
+check("rebound cooldown callback reports only the current rule",
+    rebound == reused and reused.rule == newRule and #notices == 1 and notices[1].id == "current")
+
+local allocationsAfterFirstBind = frameSerial
+local cyclesStayedPooled = true
+for index = 1, 100 do
+    tracking.ResetRule(newRule)
+    if lateCallback then lateCallback(reused) end
+    if #notices ~= 1 then cyclesStayedPooled = false end
+    local rule = makeRule("cycle-" .. index, 3100 + index, "chargeGained")
+    setCharges(3100 + index, 0, 2)
+    scan({ rule }, "BASELINE")
+    local frame = tracking.durationFrames[rule]
+    if frame ~= reused or frameSerial ~= allocationsAfterFirstBind then cyclesStayedPooled = false end
+    newRule = rule
+end
+tracking.ResetAll()
+local noticesBeforeStale = #notices
+if lateCallback then lateCallback(reused) end
+check("100 rule resets reuse one frame and stale callbacks stay silent",
+    cyclesStayedPooled and frameSerial == allocationsAfterFirstBind and tracking.durationFrames[newRule] == nil
+    and reused.rule == nil and #notices == noticesBeforeStale)

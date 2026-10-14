@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -18,26 +18,18 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Lua syntax and harness tests
+        shell: bash
+        run: bash ./tools/Run-BuildHarnesses.sh
       - id: toc
         name: Read version from TOC
         shell: bash
         run: |
           version=$(sed -n 's/^## Version: *\([0-9][0-9.]*\).*/\1/p' WoWraVox.toc | head -n1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Lua 5.1 syntax check
-        shell: bash
-        run: |
-          python3 -m pip install --user lupa
-          python3 tools/Test-LuaSyntax.py
-      - name: Harness tests
-        shell: bash
-        run: |
-          npm install --prefix "$RUNNER_TEMP/fg" fengari
-          export WOWRAVOX_FENGARI="$RUNNER_TEMP/fg/node_modules/fengari"
-          for test in tools/Test-*.js; do
-            echo "== $test"
-            node "$test"
-          done
       - name: Release metadata gate
         shell: pwsh
         env:

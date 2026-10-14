@@ -4,17 +4,19 @@ WoWraVox is a World of Warcraft Retail addon for Heroism, Bloodlust, Time Warp, 
 
 ## Version
 
-Current stable version: **0.11.0**.
+Current stable version: **0.12.0**.
+
+Retail compatibility: **12.1.5** (interface **120105**).
 
 ## What it does
 
-- **Aura rules** watch your player buffs, debuffs, and item-effect auras. Self-only buffs such as defensives are announced in combat from your own cast; auras the addon cannot read in combat can play a native category word (Defensive, Offensive, Bloodlust) or a selected sound through the game.
+- **Aura rules** watch your player buffs, debuffs, and item-effect auras. Self-only buffs such as defensives are announced in combat from your own cast; auras the addon cannot read in combat can play a native category word (Defensive, Offensive, Healing, Bloodlust or Somebody loves you) or a selected sound through the game.
 - **Item rules** announce when an equipped item becomes ready after its cooldown. They track a fixed item or, in slot mode, whatever is equipped in a slot (for example Trinket 1).
 - **Skill rules** announce when a Spellbook ability or a returning charge becomes ready.
 - Speaks through WoW Text-to-Speech with a per-rule voice, speed, and volume. Announcements raised in the same frame with the same voice are spoken as one sentence.
 - Shows independent on-screen Apply, Expire, and Ready text with per-text font, size, style, color, and draggable anchor.
 - Searches spell names, including partial names for other classes, with a client-built local index; also accepts comma-separated spell IDs.
-- Offers tooltip IDs, a rule preview, and access from the addon compartment, Titan Panel, or any LibDataBroker display.
+- Offers tooltip IDs, test and preview buttons for each output, and access from the addon compartment, Titan Panel, or any LibDataBroker display.
 - Diagnostics: `/wvdebug on|off|clear|show`, `/wvttstest <rule>`, and `/wvprof` (load times and, after `/wvprof on`, per-event timing).
 
 ## First launch
@@ -22,8 +24,9 @@ Current stable version: **0.11.0**.
 A new profile starts with these rules and nothing else:
 
 1. **Heroism / Bloodlust** is a built-in aura rule (buffs plus the Sated family, which stays readable in combat). It is active, cannot be deleted, and announces the start once and the end once.
-2. **Defensives** is an empty aura rule ready for your spell IDs (off until you fill it).
-3. **Trinket 1** and **Trinket 2** are item rules for the two trinket slots. They follow whichever trinket you wear and announce when it is ready again.
+2. **Trinket 1** and **Trinket 2** are item rules for the two trinket slots. They follow whichever trinket you wear and announce when it is ready again.
+
+Class and specialization presets are available under **Add rule → Aura**.
 
 These rules are created only for a new profile. Existing WoWraVox settings are preserved and never replaced.
 
@@ -31,6 +34,8 @@ These rules are created only for a new profile. Existing WoWraVox settings are p
 
 - `/wowravox` or `/wvr` opens WoWraVox; so does the addon compartment entry or a Titan Panel / LibDataBroker button.
 - Select **Add rule** to create an Aura, Equipped item, or Spell cooldown rule.
+- Under **Add rule → Aura**, choose available preset effects from the icon tiles and add manual spell IDs if needed. Nothing is preselected. **Create aura** builds one new group from the selected effects and manual triggers; each preset keeps its category unless you set an overriding category on the group.
+- Aura messages accept `{spell}` for the effect that triggered the announcement. For effects hidden in combat, native category cues provide a fallback; they cannot speak a custom spell name.
 - An equipped-item rule can hold several items or slots (**Add item**); each announces on its own when its cooldown ends, `{item}` and `{slot}` in the message stand for the one that became ready, and an entry's tag switches between tracking the item and the slot it sits in.
 - Settings are stored in profiles that can be assigned per character and per specialization.
 - On-screen text profiles can be previewed, recolored, and independently anchored.
@@ -68,10 +73,12 @@ In WowUp, open **Get Addons → Install from URL** and paste the repository URL:
 
 Personal game settings live in WoW `SavedVariables` and are intentionally excluded from Git. Validate, deploy only addon files, compare hashes, then test `/reload` and BugSack in the Retail client.
 
+For a bug report, use `/wvdebug report` and copy its diagnostic text. The report describes the active profile using anonymous rule labels; it excludes character identity, custom names/messages, unrelated profiles, and raw debug logs. Review the text before sharing. This command does not reload the UI, and you do not need to share the complete SavedVariables file.
+
 Checks (run from the repository root):
 
 ```
-python tools/Test-LuaSyntax.py                      # Lua 5.1 syntax + locals headroom (pip install lupa)
+bash tools/Run-BuildHarnesses.sh                    # install locked dependencies; Lua 5.1 + all harnesses
 node tools/Test-AuraSoundFallback.js                # one harness per tools/Test-*.js (Fengari)
 node tools/Test-SkillCharges.js
 node tools/Test-TargetNotifications.js
@@ -84,7 +91,7 @@ pwsh tools/New-ListingText.ps1                      # drafts the store descripti
 
 The release gate also checks that no working files (handoffs, backups, local agent notes) are tracked or about to be committed. Wago and CurseForge only accept files and a changelog through their APIs, so their descriptions, screenshots, and logo are updated by hand using the generated checklist.
 
-The Node harnesses load Fengari (`npm install fengari`) from the path in `WOWRAVOX_FENGARI`, which must point at `node_modules/fengari`.
+The shared runner installs hash-checked Lupa 2.8 and Fengari 0.1.5 from `tools/build-dependencies`, then runs the Lua 5.1 compiler and every Node harness. CI uses Python 3.12 on Ubuntu 24.04; the requirements also include the CPython 3.9 Windows wheel hash. On Windows, use Git Bash and set `PYTHON` to your tooling venv interpreter. Individual Node harnesses use `WOWRAVOX_FENGARI`, pointing at `node_modules/fengari`. These dependencies are tooling only and never enter the addon ZIP. Release uploads require the same checks on the tagged commit.
 
 ### Daily release policy
 

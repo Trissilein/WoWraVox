@@ -82,6 +82,74 @@ ns.AuraSoundFallback = {
     Log = function() end,
 }
 
+do
+    local played
+    local oldPlaySoundFile, oldPlaySound = PlaySoundFile, PlaySound
+    PlaySoundFile = function(path, channel)
+        played = { kind = "file", value = path, channel = channel }
+        return true
+    end
+    PlaySound = function(soundKitID, channel)
+        played = { kind = "kit", value = soundKitID, channel = channel }
+        return true
+    end
+    local testRule = {
+        applySoundEnabled = true, applySoundKitID = 2468, applySoundChannel = "Dialog",
+        alertCategory = "defensive",
+    }
+    check("sound test plays selected sound despite configured category",
+        ns.playNotificationSound(testRule, "apply", true)
+            and played.kind == "kit" and played.value == 2468 and played.channel == "Dialog",
+        played and (played.kind .. ":" .. tostring(played.value)))
+    PlaySoundFile, PlaySound = oldPlaySoundFile, oldPlaySound
+end
+
+do
+    local oldFallback = ns.AuraSoundFallback
+    ns.AuraSoundFallback = {
+        GetMediaSoundFile = function() return "selected.ogg" end,
+        GetNativeSignature = function() return "selected.ogg|Master" end,
+        GetRegistrationStatus = function(_, _, signature)
+            return { status = "registered", registered = true, signature = signature }
+        end,
+    }
+    local mediaRule = {
+        enabled = true, readyEnabled = true, message = "Ready",
+        readySoundEnabled = true, readySoundMediaName = "Selected", readySoundChannel = "Master",
+    }
+    local decision = ns.RuleOutput.Decide(mediaRule, "ready", {
+        spellID = 123, values = mediaRule, preview = true, message = "Ready",
+    })
+    check("preview native-registered media remains shown as playing",
+        decision.media.reason == "native-media-registered" and decision.media.native.status == "registered")
+    ns.AuraSoundFallback = oldFallback
+end
+
+do
+    local oldFallback = ns.AuraSoundFallback
+    ns.AuraSoundFallback = {
+        GetCategorySoundFile = function() return "defensive.ogg" end,
+        GetNativeSignature = function() return "defensive.ogg|Master" end,
+        GetRegistrationStatus = function()
+            return {
+                status = "pending", registered = false, actualRegistered = true,
+                actualSignature = "defensive.ogg|SFX", reason = "stale-registration",
+            }
+        end,
+    }
+    local pendingRule = {
+        enabled = true, applyEnabled = true, applyMessage = "Shield",
+        alertCategory = "defensive", spellIDs = { 124 },
+    }
+    local decision = ns.RuleOutput.Decide(pendingRule, "apply", {
+        spellID = 124, values = pendingRule, preview = true, message = "Shield",
+    })
+    check("preview pending native change keeps old registration visible",
+        decision.native.status == "pending" and decision.native.actualRegistered == true
+        and decision.native.actualSignature == "defensive.ogg|SFX")
+    ns.AuraSoundFallback = oldFallback
+end
+
 CreateFrame = function()
     local frame = {}
     function frame:RegisterEvent() end
@@ -154,6 +222,22 @@ castSelf(makeRule("Protected"), true)
 check("cast of a non-self-buff ID stays silent", #ttsMessages == 0)
 selfBuffIDs[204018] = true
 
+-- addonCanSpeak is the single decision "can the addon speak this aura itself?" (WoW calls the ID a self buff).
+-- The cast path (handleCast) and the native-category suppression both use it; no learned-spell or preset mapping.
+do
+    local oldSpellAPI = C_Spell
+    check("addonCanSpeak is true for a self-buff ID", ns._Aura.addonCanSpeak(204018) == true)
+    selfBuffIDs[204018] = nil
+    check("addonCanSpeak is false for a non-self-buff ID", ns._Aura.addonCanSpeak(204018) == false)
+    selfBuffIDs[204018] = true
+    C_Spell = nil
+    check("addonCanSpeak is false without C_Spell.IsSelfBuff", ns._Aura.addonCanSpeak(204018) == false)
+    C_Spell = oldSpellAPI
+    check("addonCanSpeak is false for an invalid ID", ns._Aura.addonCanSpeak(nil) == false
+        and ns._Aura.addonCanSpeak("x") == false)
+    check("the old own-cast-path function is gone", ns._Aura.hasUsableOwnCastPath == nil)
+end
+
 clearOutput()
 local differentID = makeRule("Protected")
 differentID.spellIDs = { 31850 }
@@ -166,11 +250,159 @@ doubled.spellIDs = { 204018, 204018 }
 castSelf(doubled, true)
 check("duplicate aura ID in one rule announces once", #ttsMessages == 1)
 
+-- Bundled cast: a preset rule tracks aura 389539 and knows it is started by cast 31884 (rule.castByAuraID).
+do
+    local function bundledRule()
+        local rule = makeRule("Protected")
+        rule.spellIDs = { 389539 }
+        rule.castByAuraID = { [389539] = 31884 }
+        return rule
+    end
+    local function castID(rule, castSpellID)
+        clearOutput()
+        WoWraVoxDB = { auras = { rule } }
+        C_VoiceChat = { SpeakText = function(_, message) table.insert(ttsMessages, message) end }
+        ns._Aura.handleCast("player", "bundle-guid", castSpellID)
+        runTimers()
+    end
+    selfBuffIDs[31884] = true
+    castID(bundledRule(), 31884)
+    check("cast of the bundled cast ID announces the rule with the aura ID", #ttsMessages == 1 and ttsMessages[1] == "Protected")
+    castID(bundledRule(), 389539)
+    check("cast of the bare aura ID does not announce a bundled rule", #ttsMessages == 0)
+    check("addonCanSpeak follows the cast ID of the bundle", ns._Aura.addonCanSpeak(389539, bundledRule()) == true
+        and ns._Aura.addonCanSpeak(389539) == false)
+    selfBuffIDs[31884] = nil
+    castID(bundledRule(), 31884)
+    check("bundled cast stays silent when WoW does not call the cast ID a self buff", #ttsMessages == 0
+        and ns._Aura.addonCanSpeak(389539, bundledRule()) == false)
+    selfBuffIDs[31884] = true
+    local manual = makeRule("Protected")
+    manual.spellIDs = { 31884 }
+    castID(manual, 31884)
+    check("manual rule without a cast map is unchanged: the cast announces its own ID", #ttsMessages == 1)
+    selfBuffIDs[31884] = nil
+    castID(manual, 31884)
+    check("manual rule without a cast map stays silent for a non-self-buff", #ttsMessages == 0)
+    clearOutput()
+end
+
+-- cueFor: the group cue wins, a group on "none" falls back to the effect's own cue, otherwise "none".
+do
+    check("cueFor: a set group cue wins over the effect map",
+        ns._Aura.cueFor({ alertCategory = "offensive", categoryByAuraID = { [5] = "healing" } }, 5) == "offensive")
+    check("cueFor: group none uses the effect's own cue",
+        ns._Aura.cueFor({ alertCategory = "none", categoryByAuraID = { [5] = "healing" } }, 5) == "healing")
+    check("cueFor: an unlisted effect or a missing map is none",
+        ns._Aura.cueFor({ alertCategory = "none", categoryByAuraID = { [5] = "healing" } }, 6) == "none"
+        and ns._Aura.cueFor({ alertCategory = "none" }, 5) == "none"
+        and ns._Aura.cueFor({ alertCategory = "none", categoryByAuraID = {} }, nil) == "none"
+        and ns._Aura.cueFor(nil, 5) == "none")
+    check("hasApplyCue: group cue or any per-effect cue",
+        ns._Aura.hasApplyCue({ alertCategory = "defensive" }) == true
+        and ns._Aura.hasApplyCue({ alertCategory = "none", categoryByAuraID = { [5] = "healing" } }) == true
+        and ns._Aura.hasApplyCue({ alertCategory = "none" }) == false
+        and ns._Aura.hasApplyCue({ alertCategory = "none", categoryByAuraID = {} }) == false)
+end
+
+-- The decision follows the effect's cue: with the native word registered the TTS is suppressed, otherwise it speaks.
+do
+    local function perEffectRule(group, map)
+        local rule = makeRule("Protected")
+        rule.alertCategory = group
+        rule.categoryByAuraID = map
+        return rule
+    end
+    castSelf(perEffectRule("none", { [204018] = "defensive" }), true)
+    check("per-effect cue, word not registered: the addon speaks", #ttsMessages == 1 and ttsMessages[1] == "Protected")
+    clearOutput()
+    nativeRegistered = true
+    castSelf(perEffectRule("none", { [204018] = "defensive" }), true)
+    check("per-effect cue, word registered: TTS stays silent", #ttsMessages == 0)
+    clearOutput()
+    nativeRegistered = true
+    castSelf(perEffectRule("none", nil), true)
+    check("no group cue and no effect cue: a registered word elsewhere does not mute the addon", #ttsMessages == 1)
+    clearOutput()
+    nativeRegistered = true
+    castSelf(perEffectRule("none", { [999] = "defensive" }), true)
+    check("another effect's cue does not mute this effect", #ttsMessages == 1)
+    clearOutput()
+    nativeRegistered = true
+    castSelf(perEffectRule("defensive", { [204018] = "offensive" }), true)
+    check("a set group cue still decides for every effect (native word is defensive)", #ttsMessages == 0)
+    clearOutput()
+end
+
+-- {spell}: the name of the aura that fired; a placeholder without a name stays as typed.
+do
+    check("format keeps {spell} without a context and fills it from one",
+        ns.formatRuleNotificationMessage({}, "{spell} up") == "{spell} up"
+        and ns.formatRuleNotificationMessage({}, "{Spell} up", { spell = "Sentinel" }) == "Sentinel up"
+        and ns.formatRuleNotificationMessage({}, "{spell} up", {}) == "{spell} up")
+    C_Spell.GetSpellName = function(spellID) return spellID == 204018 and "Aura Mastery" or nil end
+    clearOutput()
+    castSelf((function() local rule = makeRule("{spell} ready"); rule.alertCategory = "none"; return rule end)(), true)
+    check("an aura event speaks {spell} as the aura's name", #ttsMessages == 1 and ttsMessages[1] == "Aura Mastery ready",
+        tostring(ttsMessages[1]))
+    check("spellContext: name, or nil when the name is unreadable",
+        ns._Aura.spellContext(204018).spell == "Aura Mastery" and ns._Aura.spellContext(5) == nil
+        and ns._Aura.spellContext(nil) == nil)
+    check("editor tests resolve {spell} against the first trigger",
+        ns.previewContext({ spellIDs = { 204018 } }).spell == "Aura Mastery" and ns.previewContext({}) == nil)
+    C_Spell.GetSpellName = nil
+    clearOutput()
+    castSelf((function() local rule = makeRule("{spell} ready"); rule.alertCategory = "none"; return rule end)(), true)
+    check("without a spell name the placeholder stays", #ttsMessages == 1 and ttsMessages[1] == "{spell} ready",
+        tostring(ttsMessages[1]))
+    clearOutput()
+end
+
 clearOutput()
 C_Spell = nil
 castSelf(makeRule("Protected"), true)
 check("missing C_Spell.IsSelfBuff stays silent", #ttsMessages == 0)
 C_Spell = { IsSelfBuff = function(spellID) return selfBuffIDs[spellID] == true end }
+
+-- DebugReport is optional: announcing, cast and aura events must work when it is not loaded.
+do
+    local realReport, realHandleEvent = ns.DebugReport, ns.SkillTracking.HandleEvent
+    ns.DebugReport = nil
+    ns.SkillTracking.HandleEvent = function() end
+    clearOutput()
+    local ok, err = pcall(castSelf, makeRule("Protected"), true)
+    check("announcing works without DebugReport", ok and #ttsMessages == 1, tostring(err))
+    WoWraVoxDB = { auras = { makeRule("Protected") } }
+    ok, err = pcall(ns.onEvent, ns.eventFrame, "UNIT_SPELLCAST_SUCCEEDED", "player", "guard-guid", 204018)
+    check("cast event works without DebugReport", ok, tostring(err))
+    runTimers()
+    clearOutput()
+    ns.DebugReport = realReport
+    ns.SkillTracking.HandleEvent = realHandleEvent
+end
+
+-- A report callback that throws must not block spell handling or its announcement.
+do
+    local realReport, realHandleEvent = ns.DebugReport, ns.SkillTracking.HandleEvent
+    local calls = { cast = 0, notify = 0 }
+    ns.DebugReport = {
+        NoteCast = function() calls.cast = calls.cast + 1; error("injected cast diagnostic failure") end,
+        NoteNotify = function() calls.notify = calls.notify + 1; error("injected notification diagnostic failure") end,
+        NoteAura = function() error("injected aura diagnostic failure") end,
+    }
+    ns.SkillTracking.HandleEvent = function() end
+    C_Secrets = { ShouldAurasBeSecret = function() return true end }
+    selfBuffIDs[204018] = true
+    clearOutput()
+    WoWraVoxDB = { auras = { makeRule("Protected") } }
+    local ok, err = pcall(ns.onEvent, ns.eventFrame, "UNIT_SPELLCAST_SUCCEEDED", "player", "throwing-report-guid", 204018)
+    runTimers()
+    check("throwing NoteCast and NoteNotify callbacks cannot block announcements",
+        ok and calls.cast == 1 and calls.notify == 1 and #ttsMessages == 1 and ttsMessages[1] == "Protected", tostring(err))
+    ns.DebugReport = realReport
+    ns.SkillTracking.HandleEvent = realHandleEvent
+    clearOutput()
+end
 
 -- Old combat cast map fields are dropped silently when a rule is normalized.
 local legacyMap = { combatCastByAuraID = { [31850] = 31850 }, defensiveMappingVersion = 1 }
@@ -429,6 +661,7 @@ do
     GetItemInfo = function(id) return itemNames[id] end
     GetInventoryItemTexture = function(_, slot) return equipped[slot] and ("icon" .. equipped[slot]) or nil end
     local screenShown = {}
+    local realShowScreenText = ns.showScreenText
     ns.showScreenText = function(_, eventKey, text) table.insert(screenShown, eventKey .. ":" .. text); return true end
 
     -- Migration of the old one-item/one-slot rule fields.
@@ -599,6 +832,7 @@ do
     local ctx = ns.itemRuleContext(makeGroup())
     check("preview context resolves the first member", ctx.item == "Alpha" and ctx.slot == "Trinket 1")
     check("rules without members have no preview context", ns.previewContext({ spellIDs = {} }) == nil)
+    ns.showScreenText = realShowScreenText
 end
 
 -- Holy Armaments migration: linked pair -> one active chargeGained rule, partner disabled, link fields dropped.
@@ -724,6 +958,101 @@ do
     check("legacy BOTTOM anchor", cx == 0 and cy == -540 + 100 + 40, cx .. "," .. cy)
     cx, cy = ns.screenCenterOffset(nil, 1920, 1080)
     check("missing anchor falls back to the default (0, 120)", cx == 0 and cy == 120)
+end
+
+-- Screen notification frames are pooled by rule object and stale hide callbacks cannot affect a rebound frame.
+do
+    local realCreateFrame, realUIParent = CreateFrame, UIParent
+    local realAfter = C_Timer.After
+    local realGetProfile = ns.getRuleScreenProfile
+    local realApplyStyle, realPosition = ns.applyScreenFrameStyle, ns.positionScreenFrame
+    local realFrames, realPool = ns.screenFrames, ns.screenFramePool
+    local callbacks, created = {}, 0
+    local function newUIObject()
+        local object = { scripts = {} }
+        function object:SetSize() end
+        function object:SetFrameStrata() end
+        function object:SetFrameLevel() end
+        function object:SetClampedToScreen() end
+        function object:RegisterForDrag() end
+        function object:SetAllPoints() end
+        function object:SetBackdrop() end
+        function object:SetBackdropColor() end
+        function object:SetBackdropBorderColor() end
+        function object:SetPoint() end
+        function object:SetJustifyH() end
+        function object:SetJustifyV() end
+        function object:SetWordWrap() end
+        function object:SetScript(name, callback) self.scripts[name] = callback end
+        function object:EnableMouse(value) self.mouseEnabled = value end
+        function object:Hide() self.shown = false end
+        function object:Show() self.shown = true end
+        function object:SetText(value) self.value = value end
+        function object:CreateFontString()
+            local font = newUIObject()
+            return font
+        end
+        return object
+    end
+    CreateFrame = function()
+        created = created + 1
+        return newUIObject()
+    end
+    UIParent = {
+        GetWidth = function() return 1920 end,
+        GetHeight = function() return 1080 end,
+    }
+    C_Timer.After = function(_, callback) callbacks[#callbacks + 1] = callback end
+    ns.screenFrames, ns.screenFramePool = {}, {}
+    ns.getRuleScreenProfile = function(rule, eventKey)
+        rule.screenProfiles = rule.screenProfiles or {}
+        rule.screenProfiles[eventKey] = { enabled = true, text = rule.id }
+        return rule.screenProfiles[eventKey]
+    end
+    ns.applyScreenFrameStyle = function() end
+    ns.positionScreenFrame = function() end
+
+    local first, duplicate = { id = "same" }, { id = "same" }
+    local firstFrame = ns.getScreenFrame(first, "apply")
+    local duplicateFrame = ns.getScreenFrame(duplicate, "apply")
+    check("screen frames: duplicate rule IDs keep distinct frames",
+        firstFrame ~= duplicateFrame and ns.screenFrames[first].apply == firstFrame
+        and ns.screenFrames[duplicate].apply == duplicateFrame)
+    ns.hideScreenFramesForRule(first)
+    check("screen frames: release clears rule and drag references",
+        firstFrame.rule == nil and firstFrame.eventKey == nil and firstFrame.drag == nil
+        and firstFrame.mouseEnabled == false and firstFrame.scripts.OnUpdate == nil
+        and firstFrame.scripts.OnDragStart == nil and firstFrame.scripts.OnDragStop == nil)
+
+    local rebound = { id = "rebound", screenProfiles = { apply = { enabled = true, text = "old" } } }
+    local oldShown = ns.showScreenText(rebound, "apply", "old")
+    local oldHide = callbacks[1]
+    local reboundFrame = ns.screenFrames[rebound] and ns.screenFrames[rebound].apply
+    ns.hideScreenFramesForRule(rebound)
+    local current = { id = "current", screenProfiles = { apply = { enabled = true, text = "new" } } }
+    local newShown = ns.showScreenText(current, "apply", "new")
+    local newHide = callbacks[2]
+    local reusedFrame = ns.screenFrames[current] and ns.screenFrames[current].apply
+    if oldHide then oldHide() end
+    check("screen frames: stale hide callback cannot hide a rebound rule",
+        oldShown and newShown and oldHide ~= nil and reusedFrame ~= nil and reusedFrame == reboundFrame
+        and reusedFrame.rule == current and reusedFrame.text.value == "new"
+        and reusedFrame.active and reusedFrame.shown,
+        table.concat({ tostring(oldShown), tostring(newShown), tostring(oldHide ~= nil), tostring(newHide ~= nil),
+            tostring(reusedFrame ~= nil), tostring(reusedFrame == reboundFrame),
+            tostring(reusedFrame and reusedFrame.rule == current), tostring(reusedFrame and reusedFrame.text.value),
+            tostring(reusedFrame and reusedFrame.active), tostring(reusedFrame and reusedFrame.shown) }, ","))
+    if newHide then newHide() end
+    check("screen frames: current hide callback still hides its own text",
+        newHide ~= nil and reusedFrame ~= nil and not reusedFrame.active and not reusedFrame.shown)
+    check("screen frames: repeated rule/profile cycles allocate no replacement frames",
+        created == 4 and #ns.screenFramePool == 0)
+
+    ns.clearScreenFrames()
+    CreateFrame, UIParent, C_Timer.After = realCreateFrame, realUIParent, realAfter
+    ns.getRuleScreenProfile = realGetProfile
+    ns.applyScreenFrameStyle, ns.positionScreenFrame = realApplyStyle, realPosition
+    ns.screenFrames, ns.screenFramePool = realFrames, realPool
 end
 
 -- Help tooltips: extra lines in order, a font override only where asked, reset by ns.resetTooltipFonts.
@@ -862,12 +1191,20 @@ end
 -- One-effect rules (Bloodlust buffs + Sated debuffs), built-in rules and the /wvdebug sim playback.
 do
     local queue = {}
-    C_Timer = { After = function(delay, callback) table.insert(queue, { at = now + delay, cb = callback }) end }
+    C_Timer = {
+        After = function(delay, callback) table.insert(queue, { at = now + delay, cb = callback }) end,
+        NewTimer = function(delay, callback)
+            local timer = { at = now + delay, cb = callback, isExpiry = true }
+            function timer:Cancel() self.cancelled = true end
+            table.insert(queue, timer)
+            return timer
+        end,
+    }
     local function advance(untilTime)
         while true do
             local bestIndex
             for index, item in ipairs(queue) do
-                if item.at <= untilTime and (not bestIndex or item.at < queue[bestIndex].at) then bestIndex = index end
+                if not item.cancelled and item.at <= untilTime and (not bestIndex or item.at < queue[bestIndex].at) then bestIndex = index end
             end
             if not bestIndex then break end
             local item = table.remove(queue, bestIndex)
@@ -909,9 +1246,17 @@ do
         chat = {}
         ttsMessages = {}
         ns._Aura.sim = nil
+        ns._Aura.clearActiveState()
         WoWraVoxDB = { auras = { rule } }
         ns._Aura.syncAllAuras(true)
         ttsMessages = {}
+    end
+    local function expiryTimers()
+        local timers = {}
+        for _, timer in ipairs(queue) do
+            if timer.isExpiry and not timer.cancelled then timers[#timers + 1] = timer end
+        end
+        return timers
     end
 
     -- ensureBuiltinRules
@@ -930,10 +1275,82 @@ do
     check("builtin trigger lookup", ns.isBuiltinTrigger(old, 57724) and not ns.isBuiltinTrigger(old, 1)
         and not ns.isBuiltinTrigger({ spellIDs = {} }, 57724))
 
-    -- core: one effect, both readable
+    -- Startup selection: keep a live selection, otherwise prefer stable Bloodlust identity and fall back by category.
+    local bloodlust = { presetID = "heroism-bloodlust", builtin = true }
+    local firstAura = { name = "First aura" }
+    local firstItem = { name = "First item" }
+    local firstSkill = { name = "First skill" }
+    WoWraVoxDB = { auras = { bloodlust, firstAura }, items = { firstItem }, skills = { firstSkill } }
+    local category, aura, item, skill = ns.SelectInitialRule()
+    check("startup selects built-in Bloodlust by stable identity",
+        category == "auras" and aura == bloodlust and item == firstItem and skill == firstSkill)
+    local sameCategory, sameAura = ns.SelectInitialRule()
+    check("startup preserves valid aura selection", sameCategory == "auras" and sameAura == bloodlust)
+
+    WoWraVoxDB.auras = { firstAura }
+    local fallbackCategory, fallbackAura = ns.SelectInitialRule()
+    check("startup falls back to first aura when Bloodlust is missing",
+        fallbackCategory == "auras" and fallbackAura == firstAura)
+
+    WoWraVoxDB.auras = {}
+    local itemCategory, _, selectedItem = ns.SelectInitialRule()
+    check("startup falls back to first item when no aura exists",
+        itemCategory == "items" and selectedItem == firstItem)
+
+    WoWraVoxDB.auras = { bloodlust }
+    local keptItemCategory, _, keptItem = ns.SelectInitialRule()
+    check("startup preserves valid item selection when aura list changes",
+        keptItemCategory == "items" and keptItem == firstItem)
+
+    ns.ShowAddRuleView()
+    local profileBloodlust = { presetID = "heroism-bloodlust", builtin = true }
+    local profileItem = { name = "Profile item" }
+    WoWraVoxDB = { auras = { profileBloodlust }, items = { profileItem }, skills = {} }
+    local addCategory, addAura, addItem = ns.SelectInitialRule()
+    check("profile switch repairs stale selection while add view stays open",
+        addCategory == "auras" and addAura == profileBloodlust and addItem == profileItem)
+    ns.CancelAddRuleView()
+    local cancelCategory, cancelAura = ns.SelectInitialRule()
+    check("cancel after add view opens repaired rule", cancelCategory == "auras" and cancelAura == profileBloodlust)
+
     local present = {}
     C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return present[spellID] end }
     C_Secrets.ShouldAurasBeSecret = function() return false end
+
+    -- Expiry scheduling is deduplicated and cancellable when an aura changes or is removed.
+    do
+        reset(bloodlustRule(false))
+        now = 20
+        present[2825] = { spellId = 2825, auraInstanceID = 50, expirationTime = 50 }
+        ns._Aura.processAura(2825, true, "BASELINE_SYNC")
+        local original = expiryTimers()[1]
+        ns._Aura.processAura(2825, true, "BASELINE_SYNC")
+        check("aura expiry: unchanged instance and expiration reuse one timer",
+            original ~= nil and #expiryTimers() == 1 and original.cancelled ~= true)
+
+        present[2825].expirationTime = 51
+        ns._Aura.processAura(2825, true, "BASELINE_SYNC")
+        local replacement = expiryTimers()[1]
+        check("aura expiry: changed expiration cancels and replaces its timer",
+            original.cancelled == true and replacement ~= original and #expiryTimers() == 1)
+
+        present[2825] = nil
+        ns._Aura.processAura(2825, true, "BASELINE_SYNC")
+        check("aura expiry: removal cancels its timer", replacement.cancelled == true and #expiryTimers() == 0)
+
+        present[2825] = { spellId = 2825, auraInstanceID = 51, expirationTime = 70 }
+        ns._Aura.processAura(2825, true, "BASELINE_SYNC")
+        local beforeRefresh = expiryTimers()[1]
+        ns.RefreshRuleActivationState()
+        local afterRefresh = expiryTimers()[1]
+        check("aura expiry: spec activation cancels stale timer and schedules one current timer",
+            beforeRefresh and beforeRefresh.cancelled == true and afterRefresh ~= beforeRefresh and #expiryTimers() == 1)
+        present[2825] = nil
+        ns._Aura.processAura(2825, true, "BASELINE_SYNC")
+    end
+
+    -- core: one effect, both readable
+    now = 0
     reset(bloodlustRule(true))
     present[2825] = { spellId = 2825, auraInstanceID = 1, expirationTime = 40 }
     present[57724] = { spellId = 57724, auraInstanceID = 2, expirationTime = 600 }
@@ -1034,17 +1451,16 @@ do
     check("picking one exact item keeps the item's name", exactPick.name == "Astral Antenna")
 end
 
--- Shipped starter set: Bloodlust, an empty defensives rule, one rule per trinket slot, nothing else.
+-- Shipped starter set: Bloodlust, one rule per trinket slot, nothing else.
 do
     ns.Defaults = ns.RealDefaults
     local db = ns.CreateStarterDatabase()
-    check("starter: exactly two aura rules (Bloodlust, defensives)", #db.auras == 2)
-    local bl, def = db.auras[1], db.auras[2]
+    check("starter: exactly one aura rule (Bloodlust)", #db.auras == 1)
+    local bl = db.auras[1]
     check("starter: Bloodlust is built in, one effect, with buffs and Sated debuffs",
         bl.presetID == "heroism-bloodlust" and bl.builtin and bl.oneEffect and bl.enabled and #bl.spellIDs == 13)
-    check("starter: defensives rule is empty and off", def.presetID == "defensives" and #def.spellIDs == 0 and not def.enabled)
-    check("starter: fallback categories are on and the defensives rule is called Defensives",
-        bl.alertCategory == "bloodlust" and def.alertCategory == "defensive" and def.name == "Defensives")
+    check("starter: fallback category is on and no empty defensives rule remains",
+        bl.alertCategory == "bloodlust")
     check("starter: no skill rules", #db.skills == 0)
     check("starter: exactly two item rules, one per trinket slot", #db.items == 2
         and db.items[1].members[1].slotID == 13 and db.items[2].members[1].slotID == 14
@@ -1081,4 +1497,185 @@ do
     old.alertCategory = "none" -- the user switched it off on purpose
     ns.ensureBuiltinRules(list)
     check("the user's later choice is kept", old.alertCategory == "none")
+end
+
+-- /wvdebug report: bounded copy text contains useful public facts while omitting identity and custom data.
+do
+    local names = { [264735] = "Survival of the Fittest", [281195] = "Survival of the Fittest", [186265] = "Aspect of the Turtle" }
+    C_Spell = {
+        IsSelfBuff = function(spellID) return spellID == 264735 or spellID == 186265 end,
+        GetSpellName = function(spellID) return names[spellID] end,
+        GetSpellInfo = function(spellID) return { name = names[spellID] or ("Spell " .. spellID), iconID = 1 } end,
+    }
+    C_Secrets = { ShouldAurasBeSecret = function() return true end, GetSpellAuraSecrecy = function() return 2 end }
+    InCombatLockdown = function() return true end
+    GetBuildInfo = function() return "12.0.5", "99999" end
+    UnitClass = function() return "Hunter", "HUNTER" end
+    UnitName = function() return "Tester" end
+    GetSpecialization = function() return 1 end
+    GetSpecializationInfo = function() return 253, "Beast Mastery" end
+    IsPlayerSpell = function(spellID) return spellID == 264735 end
+    C_UnitAuras = { GetAuraDataByIndex = function() return nil end }
+    ns.AuraSoundFallback.IsRegistered = function() return false end
+    ns.AuraSoundFallback.GetStatus = function() return { wanted = 2, registered = 1 } end
+    ns.AuraSoundFallback.GetLogLines = function() return { "private debug entry" } end
+    WoWraVoxDB = { auras = { { name = "Defensives", enabled = true, applyEnabled = true, expireEnabled = false,
+        alertCategory = "defensive", spellIDs = { 281195, 186265 } } } }
+    WoWraVoxProfilesDB = { privateProfileMarker = "other profile custom message" }
+
+    ns.DebugReport.NoteCast("player", 264735)
+    ns.DebugReport.NoteCast("player", 186265)
+    ns.DebugReport.NoteCast("target", 777)
+    ns.DebugReport.NoteAura(281195)
+    ns.DebugReport.NoteNotify(WoWraVoxDB.auras[1], "apply", "custom SecretMessage", 281195,
+        "UNIT_SPELLCAST_SUCCEEDED", "apply")
+    local text = table.concat(ns.DebugReport.Build(), "\n")
+    local lineCount = 1
+    for _ in text:gmatch("\n") do lineCount = lineCount + 1 end
+    check("report keeps useful aura facts with a pseudonymous rule label",
+        text:find("rule%-%d+ · active=true") ~= nil
+        and text:find("281195 Survival of the Fittest · secrecy=contextual · selfbuff=false · castable=false", 1, true) ~= nil, text)
+    check("a cast with a different ID but the same name is found by name",
+        text:find("264735 Survival of the Fittest · selfbuff=true", 1, true) ~= nil
+        and text:find("byName=%[rule%-%d+:281195%]") ~= nil)
+    check("a cast with the rule's own ID is found by ID", text:find("186265 Aspect of the Turtle · selfbuff=true", 1, true) ~= nil
+        and text:find("byID=%[rule%-%d+%]") ~= nil)
+    check("casts of other units are not recorded", text:find("777 ", 1, true) == nil)
+    table.insert(WoWraVoxDB.auras, { name = "Bundled", enabled = true, spellIDs = { 389539 },
+        castByAuraID = { [389539] = 31884 } })
+    ns.DebugReport.NoteCast("player", 31884)
+    local bundledText = table.concat(ns.DebugReport.Build(), "\n")
+    check("a cast of a bundled cast ID is found by ID through the rule's cast map",
+        bundledText:find("31884 ? · selfbuff=false · combat=true · secret=true · byID=[rule-", 1, true) ~= nil, bundledText)
+    table.remove(WoWraVoxDB.auras)
+    check("report anonymizes identity and omits names, messages, profiles, and raw log", text:find("PRIVACY:", 1, true) ~= nil
+        and text:find("Tester", 1, true) == nil and text:find("Defensives", 1, true) == nil
+        and text:find("SecretMessage", 1, true) == nil and text:find("other profile custom message", 1, true) == nil
+        and text:find("private debug entry", 1, true) == nil and text:find("WoWraVox.lua", 1, true) == nil)
+    check("report content is bounded", #text <= 14000 and lineCount <= 240, #text .. " chars / " .. lineCount .. " lines")
+    local reloaded = false
+    ReloadUI = function() reloaded = true end
+    local profileDB = WoWraVoxProfilesDB
+    local showCalls, realShowText = {}, ns.SkillTracking.ShowText
+    ns.SkillTracking.ShowText = function(title, contents)
+        showCalls[#showCalls + 1] = { title = title, contents = contents }
+        return true
+    end
+    check("in combat report opens the copy window without saving profiles", ns.DebugReport.Run() == true
+        and #showCalls == 1 and showCalls[1].title == "Diagnostic report" and not reloaded
+        and WoWraVoxProfilesDB == profileDB and WoWraVoxProfilesDB.privateProfileMarker == "other profile custom message"
+        and WoWraVoxProfilesDB.debugReport == nil)
+    InCombatLockdown = function() return false end
+    check("out of combat report also opens the copy window without reload or profile write", ns.DebugReport.Run() == true
+        and #showCalls == 2 and not reloaded and WoWraVoxProfilesDB == profileDB and WoWraVoxProfilesDB.debugReport == nil)
+    ns.SkillTracking.ShowText = function() error("UI unavailable") end
+    check("report UI failure is contained", ns.DebugReport.Run() == false and not reloaded)
+    ns.SkillTracking.ShowText = nil
+    check("missing report UI is contained", ns.DebugReport.Run() == false and not reloaded)
+    ns.SkillTracking.ShowText = realShowText
+    ReloadUI = nil
+end
+
+-- report: announcements and hidden aura events are recorded too.
+do
+    local rule = { name = "Defensives" }
+    ns.DebugReport.NoteNotify(rule, "apply", "Protected", 5384, "UNIT_SPELLCAST_SUCCEEDED", "apply")
+    ns.DebugReport.NoteAura(nil, "payload hidden")
+    ns.DebugReport.NoteAura(nil, "payload hidden")
+    local text = table.concat(ns.DebugReport.Build(), "\n")
+    check("report lists notification cause without custom rule names or messages",
+        text:find("rule=rule%-%d+ event=apply spell=5384 source=UNIT_SPELLCAST_SUCCEEDED via=apply") ~= nil
+        and text:find("Defensives", 1, true) == nil and text:find("Protected", 1, true) == nil)
+    check("hidden aura events are listed once per burst",
+        select(2, text:gsub("%(payload hidden%)", "")) == 1)
+end
+
+-- UNIT_AURA also works when DebugReport is not loaded.
+do
+    local realReport, realHandleEvent = ns.DebugReport, ns.SkillTracking.HandleEvent
+    ns.DebugReport = nil
+    ns.SkillTracking.HandleEvent = function() end
+    local ok, err
+    ok, err = pcall(ns.onEvent, ns.eventFrame, "UNIT_AURA", "player", { isFullUpdate = true })
+    check("aura event works without DebugReport", ok, tostring(err))
+    ok, err = pcall(ns.onEvent, ns.eventFrame, "UNIT_AURA", "player", { isFullUpdate = false, addedAuras = { { spellId = 204018 } },
+        updatedAuraInstanceIDs = {}, removedAuraInstanceIDs = {} })
+    check("aura delta event works without DebugReport", ok, tostring(err))
+    runTimers()
+    ns.DebugReport = realReport
+    ns.SkillTracking.HandleEvent = realHandleEvent
+end
+
+-- An aura applied in combat (hidden: the query answers nil) must not be announced as new once it becomes
+-- readable after combat; a genuinely new application later still is.
+do
+    C_Secrets = { ShouldAurasBeSecret = function() return true end, GetSpellAuraSecrecy = function() return 2 end }
+    InCombatLockdown = function() return true end
+    C_Spell = { IsSelfBuff = function() return false end,
+        GetSpellInfo = function(spellID) return { name = "Spell " .. spellID, iconID = 1 } end }
+    C_VoiceChat = { SpeakText = function(_, message) table.insert(ttsMessages, message) end }
+    C_Timer = { After = function(_, callback) table.insert(timerCallbacks, callback) end }
+    local live = {}
+    C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return live[spellID] end }
+    local sotf = { name = "Defensives", id = "d", enabled = true, applyEnabled = true, applyMessage = "Def CD",
+        expireEnabled = false, spellIDs = { 264735 }, alertCategory = "defensive", voiceID = 8, volume = 100,
+        speechSpeed = 100, applySoundEnabled = false, expireSoundEnabled = false, applySoundChannel = "Master",
+        expireSoundChannel = "Master", screenProfiles = {} }
+    clearOutput()
+    local spoken = {}
+    local realNotify = ns.DebugReport.NoteNotify
+    ns.DebugReport.NoteNotify = function(_, _, message, _, source) table.insert(spoken, message .. "@" .. tostring(source)) end
+    WoWraVoxDB = { auras = { sotf } }
+    ns._Aura.syncAllAuras(true)
+    ttsMessages = {}
+    now = 100
+    -- cast in combat: the aura exists but the query answers nil
+    ns._Aura.processAura(264735, false, "FULL_SYNC")
+    -- combat ends while the aura is still active and becomes readable
+    InCombatLockdown = function() return false end
+    C_Secrets.ShouldAurasBeSecret = function() return false end
+    live[264735] = { spellId = 264735, auraInstanceID = 7, expirationTime = now + 4 }
+    ns._Aura.processAura(264735, false, "FULL_SYNC")
+    runTimers(); runTimers(); runTimers()
+    check("an aura applied in combat is not announced late when it turns readable", #spoken == 0, tostring(spoken[1]))
+    -- it ends, then a new application is announced normally
+    live[264735] = nil
+    now = 105
+    ns._Aura.processAura(264735, false, "AURA_TIMER")
+    live[264735] = { spellId = 264735, auraInstanceID = 8, expirationTime = now + 6 }
+    now = 120
+    ns._Aura.processAura(264735, false, "UNIT_AURA")
+    runTimers(); runTimers(); runTimers()
+    check("a new application out of combat is announced", #spoken == 1 and spoken[1] == "Def CD@UNIT_AURA", tostring(spoken[1]))
+    ns.DebugReport.NoteNotify = realNotify
+end
+
+-- WoW's native category word is the announcement: no TTS on top of it (it would come later and confuse).
+do
+    local spokenTTS = {}
+    local realQueue = ns._Aura.queueTTS
+    ns._Aura.queueTTS = function(_, message) table.insert(spokenTTS, message); return true, "queued" end
+    local rule = { name = "Defensives", id = "d2", enabled = true, applyEnabled = true, applyMessage = "Def CD",
+        expireEnabled = true, expireMessage = "Def over", spellIDs = { 264735 }, alertCategory = "defensive",
+        expireCategory = "none", voiceID = 8, volume = 100, speechSpeed = 100, applySoundEnabled = false,
+        expireSoundEnabled = false, applySoundChannel = "Master", expireSoundChannel = "Master", screenProfiles = {} }
+    local registeredNative = { apply = true, expire = false }
+    ns.AuraSoundFallback.IsRegistered = function(_, eventKey) return registeredNative[eventKey] == true end
+    ns.AuraSoundFallback.GetCategorySoundFile = function(category) return category ~= "none" and "word.ogg" or nil end
+    WoWraVoxDB = { auras = { rule } }
+    ns._Aura.syncAllAuras(true)
+    -- drive the apply through the real path: an aura appears while auras are readable
+    C_Secrets = { ShouldAurasBeSecret = function() return false end, GetSpellAuraSecrecy = function() return 2 end }
+    local live = { [264735] = { spellId = 264735, auraInstanceID = 31, expirationTime = 0 } }
+    C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return live[spellID] end }
+    ns._Aura.processAura(264735, false, "UNIT_AURA")
+    check("the native category word announces the application, no TTS on top", #spokenTTS == 0, tostring(spokenTTS[1]))
+    registeredNative.apply = false
+    live[264735] = nil
+    ns._Aura.processAura(264735, false, "UNIT_AURA")
+    live[264735] = { spellId = 264735, auraInstanceID = 32, expirationTime = 0 }
+    now = now + 10
+    ns._Aura.processAura(264735, false, "UNIT_AURA")
+    check("without a registered native word the application is spoken", #spokenTTS == 1 and spokenTTS[1] == "Def CD", tostring(spokenTTS[1]))
+    ns._Aura.queueTTS = realQueue
 end

@@ -15,6 +15,10 @@ const module_ = fs.readFileSync(path.join(root, "AuraSoundFallback.lua"), "utf8"
   /^local _, ns = \.\.\.$/m,
   "local _, ns = addonName, addonNamespace",
 );
+const ruleOutput = fs.readFileSync(path.join(root, "RuleOutput.lua"), "utf8").replace(
+  /^local _, ns = \.\.\.$/m,
+  "local _, ns = addonName, addonNamespace",
+);
 // The harness is split at the marker: mocks must exist before the module runs, the checks after.
 const [mocks, checks] = fs.readFileSync(path.join(__dirname, "Test-AuraSoundFallback.lua"), "utf8")
   .split("-- ==== MODULE ====");
@@ -24,6 +28,7 @@ const program = [
   "local ns = addonNamespace",
   mocks,
   module_,
+  "do", ruleOutput, "end",
   checks,
 ].join("\n");
 

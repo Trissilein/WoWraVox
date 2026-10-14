@@ -1,5 +1,34 @@
 # WoWraVox
 
+## 0.12.0
+
+### Retail compatibility
+
+- Updated the Retail interface metadata for 12.1.5 (120105).
+
+### Aura presets and setup
+
+- Add rule → Aura offers class and specialization presets, external cooldowns, and Augmentation support. Effects appear as icon tiles in category cards, with real spell tooltips, availability details, and English and German interface text. Nothing is preselected; unavailable or unverified effects cannot be selected.
+- Create aura combines manually entered triggers and selected preset effects in one new group. The group overview shows what will be created. Existing rules are preserved.
+- Preset effects retain their own Offensive, Defensive, or Healing category. External offensive and defensive cues also say “Somebody loves you”. Setting a category on the group overrides these per-effect cues.
+- Aura messages accept `{spell}` for the name of the effect that triggered the announcement. New preset groups use the effect name in their spoken message.
+- Presets keep cast IDs and aura IDs separate, so an own cast can announce the effect in combat while its aura remains hidden. Talent changes refresh the chooser without losing manual selections.
+- New profiles no longer contain the empty Defensives placeholder. Migration removes only that unchanged default group and preserves customized groups.
+
+### Notifications and interface fixes
+
+- Failed native sound removals retain their registration handles and are retried before a replacement can be registered, preventing duplicate fallback sounds.
+- Aura expiry timers are reused when their deadline is unchanged and cancelled when their state is retired. Cooldown and on-screen text frames are recycled without retaining removed rules.
+- The addon's text-to-speech takes priority when it can announce an aura. Native category sounds remain the fallback and no longer cause a second announcement. An own cast already announced in combat is not announced again when its hidden aura becomes readable after combat.
+- The notification sound Test button plays the selected sound even when a category is configured. Category cues have matching loudness, and Healing has its own bundled cue.
+- Fixed the blank Add Aura screen and an invalid text alignment error. Removed the verbose Rule Preview panel to give the editor more space.
+- `/wvdebug report` opens a bounded, copyable diagnostic report for the active profile. Character identity, custom rule names and messages, unrelated profiles, and the raw debug log are omitted. It does not reload the UI or require sharing a SavedVariables file. Missing or failing diagnostics no longer prevent announcements.
+
+### Release safeguards
+
+- Build and test dependencies are version-locked and integrity-checked. The release workflow runs the candidate's harnesses before any platform upload.
+- Resuming a GitHub upload preserves an already published ZIP. Local archive creation validates version and staging paths before file operations.
+
 ## 0.11.0
 
 ### Profiles

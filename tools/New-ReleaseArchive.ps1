@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
+    [ValidatePattern('\A[0-9]+\.[0-9]+\.[0-9]+\z')]
     [string]$Version
 )
 
@@ -57,5 +58,13 @@ try {
     Write-Output $archive
 }
 finally {
-    if (Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force }
+    if (Test-Path -LiteralPath $stagingRoot) {
+        $resolvedStaging = [System.IO.Path]::GetFullPath($stagingRoot)
+        $resolvedTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
+        if ((Split-Path -Parent $resolvedStaging) -ne $resolvedTemp -or
+            (Split-Path -Leaf $resolvedStaging) -notmatch '^wowravox-release-[0-9a-f]{32}$') {
+            throw "Refusing cleanup outside the release staging directory: $resolvedStaging"
+        }
+        Remove-Item -LiteralPath $resolvedStaging -Recurse -Force
+    }
 }

@@ -8,6 +8,7 @@ tracking.debugLog = tracking.debugLog or {}
 tracking.debugDedupe = tracking.debugDedupe or {}
 tracking.inactiveRules = tracking.inactiveRules or {}
 tracking.durationFrames = tracking.durationFrames or {}
+tracking.durationFramePool = tracking.durationFramePool or {}
 tracking.debugEnabled = false
 tracking.maxDebugLines = 180
 tracking.maxLearningResults = 40
@@ -61,16 +62,25 @@ function tracking.ResetRule(rule)
     if state then state.durationGeneration = (state.durationGeneration or 0) + 1 end
     local frame = tracking.durationFrames[rule]
     if frame then
+        tracking.durationFrames[rule] = nil
         frame.watchState = nil
         frame.watchGeneration = nil
+        frame.rule = nil
+        frame:SetScript("OnCooldownDone", nil)
         pcall(frame.SetCooldown, frame, 0, 0)
+        frame:Hide()
+        table.insert(tracking.durationFramePool, frame)
     end
     tracking.states[rule] = nil
     tracking.inactiveRules[rule] = nil
 end
 
 function tracking.ResetAll()
-    for rule in pairs(tracking.durationFrames) do tracking.ResetRule(rule) end
+    while true do
+        local rule = next(tracking.durationFrames)
+        if not rule then break end
+        tracking.ResetRule(rule)
+    end
     wipe(tracking.states)
     wipe(tracking.inactiveRules)
 end
@@ -220,86 +230,94 @@ local function clearDurationWatch(rule, state)
     end
 end
 
-local function getDurationFrame(rule)
-    local frame = tracking.durationFrames[rule]
-    if frame or not (CreateFrame and UIParent) then return frame end
-    local ok, created = pcall(CreateFrame, "Cooldown", nil, UIParent)
-    if not ok or not created then return nil end
-    frame = created
-    frame:SetSize(1, 1)
-    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    frame:SetAlpha(0)
-    frame:Show()
-    frame:SetScript("OnCooldownDone", function(self)
-        local state = self.watchState
-        if not state or tracking.states[rule] ~= state or state.durationGeneration ~= self.watchGeneration then
-            addDebug(rule, "OnCooldownDone", "stale-duration-callback-ignored")
-            return
-        end
-        self.watchState = nil
-        self.watchGeneration = nil
-        local cooldown, cooldownOK = readCooldown(rule.spellID)
-        local charges, chargesOK = readCharges(rule.spellID)
-        if isActiveRule(rule) and rule.triggerType == "chargeGained" then
-            if chargesOK and charges and charges.available then
-                -- Readable: fires only on a real increase, so a parallel SPELL_UPDATE_CHARGES cannot double it.
-                processChargeSnapshot(rule, "OnCooldownDone", state, charges, cooldown, cooldownOK)
-            else
-                -- Hidden count: the finished recharge itself is the evidence. Forget the stale count so the
-                -- next readable snapshot re-baselines silently instead of announcing the same gain again.
-                state.charges = nil
-                fire(rule, "OnCooldownDone", "chargeGained", cooldown, nil)
-            end
-            refreshDurationWatch(rule, state, "OnCooldownDone", cooldown, cooldownOK, charges, chargesOK)
-            return
-        end
-        if not isActiveRule(rule) or rule.triggerType ~= "offCooldown" then
-            addDebug(rule, "OnCooldownDone", "duration-callback-rule-inactive", cooldown, charges)
-            return
-        end
-        if cooldownOK and cooldown.isEnabled == false then
-            addDebug(rule, "OnCooldownDone", "cooldown-held", cooldown, charges)
-            return
-        end
-        local chargeRule = state.chargeTracking == true or (chargesOK and charges and charges.available)
+function tracking.OnDurationCooldownDone(self)
+    local rule = self.rule
+    if not rule then return end
+    local state = self.watchState
+    if not state or tracking.states[rule] ~= state or state.durationGeneration ~= self.watchGeneration then
+        addDebug(rule, "OnCooldownDone", "stale-duration-callback-ignored")
+        return
+    end
+    self.watchState = nil
+    self.watchGeneration = nil
+    local cooldown, cooldownOK = readCooldown(rule.spellID)
+    local charges, chargesOK = readCharges(rule.spellID)
+    if isActiveRule(rule) and rule.triggerType == "chargeGained" then
         if chargesOK and charges and charges.available then
+            -- Readable: fires only on a real increase, so a parallel SPELL_UPDATE_CHARGES cannot double it.
             processChargeSnapshot(rule, "OnCooldownDone", state, charges, cooldown, cooldownOK)
+        else
+            -- Hidden count: the finished recharge itself is the evidence. Forget the stale count so the
+            -- next readable snapshot re-baselines silently instead of announcing the same gain again.
+            state.charges = nil
+            fire(rule, "OnCooldownDone", "chargeGained", cooldown, nil)
         end
-        if cooldownOK and matchesGlobalCooldown(cooldown, "SPELL_UPDATE_COOLDOWN") then
-            addDebug(rule, "OnCooldownDone", "global-cooldown-ignored", cooldown, charges)
-            return
-        end
-        if cooldownOK and isActiveCooldown(cooldown, GetTime()) then
-            state.cooldownActive = true
-            state.cooldownEnd = cooldown.startTime + cooldown.duration
-            if shouldScheduleReady(rule, state) then scheduleReady(rule, state) end
-            refreshDurationWatch(rule, state, "OnCooldownDone", cooldown, cooldownOK, charges, chargesOK)
-            addDebug(rule, "OnCooldownDone", "duration-callback-cooldown-still-active", cooldown, charges)
-            return
-        end
-        if chargeRule then
-            state.cooldownActive = false
-            state.cooldownEnd = nil
-            invalidateReadyTimer(state)
-            if not chargesOK or not (charges and charges.available) then
-                addDebug(rule, "OnCooldownDone", "duration-callback-charges-unavailable", cooldown, charges)
-            elseif charges.current == 0 then
-                addDebug(rule, "OnCooldownDone", "duration-callback-charge-still-empty", cooldown, charges)
-            elseif not state.notified then
-                addDebug(rule, "OnCooldownDone", "duration-callback-ready-unconfirmed", cooldown, charges)
-            end
-            return
-        end
+        refreshDurationWatch(rule, state, "OnCooldownDone", cooldown, cooldownOK, charges, chargesOK)
+        return
+    end
+    if not isActiveRule(rule) or rule.triggerType ~= "offCooldown" then
+        addDebug(rule, "OnCooldownDone", "duration-callback-rule-inactive", cooldown, charges)
+        return
+    end
+    if cooldownOK and cooldown.isEnabled == false then
+        addDebug(rule, "OnCooldownDone", "cooldown-held", cooldown, charges)
+        return
+    end
+    local chargeRule = state.chargeTracking == true or (chargesOK and charges and charges.available)
+    if chargesOK and charges and charges.available then
+        processChargeSnapshot(rule, "OnCooldownDone", state, charges, cooldown, cooldownOK)
+    end
+    if cooldownOK and matchesGlobalCooldown(cooldown, "SPELL_UPDATE_COOLDOWN") then
+        addDebug(rule, "OnCooldownDone", "global-cooldown-ignored", cooldown, charges)
+        return
+    end
+    if cooldownOK and isActiveCooldown(cooldown, GetTime()) then
+        state.cooldownActive = true
+        state.cooldownEnd = cooldown.startTime + cooldown.duration
+        if shouldScheduleReady(rule, state) then scheduleReady(rule, state) end
+        refreshDurationWatch(rule, state, "OnCooldownDone", cooldown, cooldownOK, charges, chargesOK)
+        addDebug(rule, "OnCooldownDone", "duration-callback-cooldown-still-active", cooldown, charges)
+        return
+    end
+    if chargeRule then
         state.cooldownActive = false
         state.cooldownEnd = nil
         invalidateReadyTimer(state)
-        if not state.notified then
-            state.notified = true
-            fire(rule, "OnCooldownDone", "offCooldown", cooldown, chargesOK and charges or nil)
-        else
-            addDebug(rule, "OnCooldownDone", "duplicate-ready-callback-ignored", cooldown, charges)
+        if not chargesOK or not (charges and charges.available) then
+            addDebug(rule, "OnCooldownDone", "duration-callback-charges-unavailable", cooldown, charges)
+        elseif charges.current == 0 then
+            addDebug(rule, "OnCooldownDone", "duration-callback-charge-still-empty", cooldown, charges)
+        elseif not state.notified then
+            addDebug(rule, "OnCooldownDone", "duration-callback-ready-unconfirmed", cooldown, charges)
         end
-    end)
+        return
+    end
+    state.cooldownActive = false
+    state.cooldownEnd = nil
+    invalidateReadyTimer(state)
+    if not state.notified then
+        state.notified = true
+        fire(rule, "OnCooldownDone", "offCooldown", cooldown, chargesOK and charges or nil)
+    else
+        addDebug(rule, "OnCooldownDone", "duplicate-ready-callback-ignored", cooldown, charges)
+    end
+end
+
+local function getDurationFrame(rule)
+    local frame = tracking.durationFrames[rule]
+    if frame or not (CreateFrame and UIParent) then return frame end
+    frame = table.remove(tracking.durationFramePool)
+    if not frame then
+        local ok, created = pcall(CreateFrame, "Cooldown", nil, UIParent)
+        if not ok or not created then return nil end
+        frame = created
+        frame:SetSize(1, 1)
+        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        frame:SetAlpha(0)
+    end
+    frame.rule = rule
+    frame:SetScript("OnCooldownDone", tracking.OnDurationCooldownDone)
+    frame:Show()
     tracking.durationFrames[rule] = frame
     return frame
 end
@@ -602,14 +620,14 @@ function tracking.CreateDebugWindow()
     frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 2 })
     frame:SetBackdropColor(0.025, 0.03, 0.04, 0.98)
     frame:SetBackdropBorderColor(0.7, 0.55, 0.2, 1)
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -14)
-    title:SetText(text("Combat debug log"))
+    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    frame.title:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -14)
+    frame.title:SetText(text("Combat debug log"))
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -4)
-    local hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
-    hint:SetText(text("Click Select all, then press Ctrl+C to copy."))
+    frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.hint:SetPoint("TOPLEFT", frame.title, "BOTTOMLEFT", 0, -8)
+    frame.hint:SetText(text("Click Select all, then press Ctrl+C to copy."))
     local scroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -58)
     scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -32, 48)
@@ -636,11 +654,28 @@ end
 
 function tracking.ShowDebug()
     local frame = tracking.CreateDebugWindow()
+    frame.title:SetText(text("Combat debug log"))
+    frame.hint:SetText(text("Click Select all, then press Ctrl+C to copy."))
     local lines = ns.AuraSoundFallback and ns.AuraSoundFallback.GetLogLines() or tracking.debugLog
     frame.edit:SetText(#lines > 0 and table.concat(lines, "\n") or text("No combat debug entries yet. Enable logging, then reproduce the issue."))
     frame.edit:SetHeight(math.max(360, #lines * 16))
     frame.edit:SetCursorPosition(0)
     frame:Show()
+end
+
+function tracking.ShowText(title, content)
+    local ok, frame = pcall(tracking.CreateDebugWindow)
+    if not ok or not frame then return false end
+    local shown = pcall(function()
+        content = type(content) == "string" and content or ""
+        frame.title:SetText(title or text("Diagnostic report"))
+        frame.hint:SetText(text("Click Select all, then press Ctrl+C to copy."))
+        frame.edit:SetText(content)
+        frame.edit:SetHeight(math.max(360, (select(2, content:gsub("\n", "")) + 1) * 16))
+        frame.edit:SetCursorPosition(0)
+        frame:Show()
+    end)
+    return shown
 end
 
 function tracking.HandleDebugCommand(command)
@@ -650,11 +685,15 @@ function tracking.HandleDebugCommand(command)
     elseif command == "show" or command == "" then tracking.ShowDebug()
     elseif command == "clear" then tracking.ClearDebug()
     elseif command == "secrecy" then ns._Aura.printSecrecy()
+    elseif command == "report" then
+        if not ns.tryDebugReport("Run") and DEFAULT_CHAT_FRAME then
+            DEFAULT_CHAT_FRAME:AddMessage(text("Diagnostic report unavailable."))
+        end
     elseif command == "sim" then ns.Simulation.Start()
     elseif command == "sim stop" then ns.Simulation.Stop()
     else
         if DEFAULT_CHAT_FRAME then
-            DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. text("Use /wvdebug on, off, show, clear, secrecy, or sim."))
+            DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. text("Use /wvdebug report, on, off, show, clear, secrecy, or sim."))
         end
     end
 end

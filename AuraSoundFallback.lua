@@ -8,6 +8,10 @@ fallback.categorySoundFiles = {
     defensive = "Interface\\AddOns\\WoWraVox\\Assets\\Defensive.ogg",
     offensive = "Interface\\AddOns\\WoWraVox\\Assets\\Offensive.ogg",
     bloodlust = "Interface\\AddOns\\WoWraVox\\Assets\\Bloodlust.ogg",
+    healing = "Interface\\AddOns\\WoWraVox\\Assets\\Healing.ogg",
+    ["somebody-loves-you"] = "Interface\\AddOns\\WoWraVox\\Assets\\Love.ogg",
+    ["offensive-external"] = "Interface\\AddOns\\WoWraVox\\Assets\\OffensiveExternal.ogg",
+    ["defensive-external"] = "Interface\\AddOns\\WoWraVox\\Assets\\DefensiveExternal.ogg",
 }
 fallback.debugEnabled = false
 fallback.log = fallback.log or {}
@@ -23,7 +27,7 @@ local scheduledForce = false
 local retryCount = 0
 local retryScheduled = false
 local statusCallback
-local lastStatus = { available = false, registered = 0, wanted = 0, refused = 0, queued = false }
+local lastStatus = { available = false, registered = 0, wanted = 0, refused = 0, removeFailed = 0, queued = false }
 
 local function fetchSharedMediaSound(name)
     if type(name) ~= "string" or name == "" or not (type(LibStub) == "function" or type(LibStub) == "table") then return nil end
@@ -99,21 +103,134 @@ function fallback.GetStatus()
     return lastStatus
 end
 
-function fallback.IsRegistered(spellID, eventKey)
-    local event
-    if eventKey == "apply" then event = "Added"
-    elseif eventKey == "expire" then event = "Removed"
-    else return false end
-    local trigger = Enum and Enum.UnitAuraSoundTrigger and Enum.UnitAuraSoundTrigger[event]
+local CATEGORY_ALIASES = {
+    ["Defensive cooldown"] = "defensive",
+    ["Offensive cooldown"] = "offensive",
+    ["Bloodlust"] = "bloodlust",
+    ["Healing"] = "healing",
+    ["Healing cooldown"] = "healing",
+    ["Somebody loves you"] = "somebody-loves-you",
+    ["Offensive · Somebody loves you"] = "offensive-external",
+    ["Defensive · Somebody loves you"] = "defensive-external",
+    defensive = "defensive", offensive = "offensive", bloodlust = "bloodlust", healing = "healing",
+    ["somebody-loves-you"] = "somebody-loves-you",
+    ["offensive-external"] = "offensive-external", ["defensive-external"] = "defensive-external",
+}
+
+local function eventTrigger(eventKey)
+    local name = eventKey == "apply" and "Added" or eventKey == "expire" and "Removed"
+    return name and Enum and Enum.UnitAuraSoundTrigger and Enum.UnitAuraSoundTrigger[name]
+end
+
+local function validSpellID(spellID)
+    if type(spellID) ~= "number" then return false end
+    if type(issecretvalue) == "function" then
+        local ok, secret = pcall(issecretvalue, spellID)
+        if not ok or secret then return false end
+    end
+    return spellID > 0 and spellID == math.floor(spellID)
+end
+
+local function eventPrefix(eventKey)
+    if eventKey == "apply" or eventKey == "expire" or eventKey == "ready" then return eventKey end
+end
+
+local function ruleSoundChannel(rule, eventKey, values)
+    local prefix = eventPrefix(eventKey)
+    local source = values and prefix and values[prefix .. "SoundEnabled"] ~= nil and values or rule
+    local channel = source and prefix and source[prefix .. "SoundEnabled"] and source[prefix .. "SoundChannel"] or "Master"
+    return type(channel) == "string" and channel ~= "" and channel or "Master"
+end
+
+local function normalizeCategory(category)
+    if type(category) ~= "string" then return nil end
+    return CATEGORY_ALIASES[category] or category
+end
+
+-- The same decision the cast path uses (WoWraVox.lua handleCast): can the addon speak this aura itself?
+local function addonCanSpeak(spellID, rule)
+    local callback = ns._Aura and ns._Aura.addonCanSpeak
+    if type(callback) ~= "function" then return false end
+    local ok, usable = pcall(callback, spellID, rule)
+    return ok and usable == true
+end
+
+-- The application cue of one trigger: the group's cue, else the effect's own (rule.categoryByAuraID). One
+-- resolution (ns._Aura.cueFor) for registration here and for the decision in RuleOutput.
+local function applyCue(rule, spellID)
+    local callback = ns._Aura and ns._Aura.cueFor
+    if type(callback) == "function" then
+        local ok, cue = pcall(callback, rule, spellID)
+        if ok and type(cue) == "string" then return cue end
+    end
+    return rule and rule.alertCategory
+end
+
+function fallback.IsRegistered(spellID, eventKey, signature)
+    local trigger = eventTrigger(eventKey)
     if not trigger then return false end
-    return registered[tostring(spellID) .. ":" .. tostring(trigger)] ~= nil
+    local entry = registered[tostring(spellID) .. ":" .. tostring(trigger)]
+    return entry ~= nil and (signature == nil or entry.signature == signature)
 end
 
 function fallback.GetCategorySoundFile(category)
-    if category == "Defensive cooldown" then category = "defensive"
-    elseif category == "Offensive cooldown" then category = "offensive"
-    elseif category == "Bloodlust" then category = "bloodlust" end
-    return fallback.categorySoundFiles[category]
+    return fallback.categorySoundFiles[normalizeCategory(category)]
+end
+
+function fallback.GetMediaSoundFile(name)
+    return fetchSharedMediaSound(name)
+end
+
+function fallback.GetNativeSignature(rule, eventKey, soundFile, values, spellID)
+    soundFile = soundFile or fallback.GetCategorySoundFile(rule and (eventKey == "expire" and rule.expireCategory or applyCue(rule, spellID)))
+    if type(soundFile) ~= "string" or soundFile == "" then return nil end
+    return soundFile .. "|" .. ruleSoundChannel(rule, eventKey, values)
+end
+
+local function registrationStatus(status, reason, signature, entry)
+    return {
+        status = status,
+        registered = status == "registered",
+        pending = status == "pending",
+        failed = status == "failed",
+        signature = signature,
+        actualSignature = entry and entry.signature or nil,
+        actualRegistered = entry ~= nil,
+        reason = reason,
+        id = entry and entry.id or nil,
+    }
+end
+
+function fallback.GetRegistrationStatus(spellID, eventKey, signature)
+    local trigger = eventTrigger(eventKey)
+    if not trigger or not validSpellID(spellID) or type(signature) ~= "string" or signature == "" then
+        return registrationStatus("suppressed", "invalid-request", signature)
+    end
+    if not available() then return registrationStatus("unavailable", "api-unavailable", signature) end
+
+    local key = tostring(spellID) .. ":" .. tostring(trigger)
+    local current = registered[key]
+    local wanted = desired[key]
+    if current and current.removeFailed then
+        return registrationStatus("failed", "removal-failed", signature, current)
+    end
+    if failed[key] == signature then return registrationStatus("failed", "registration-failed", signature, current) end
+    if current and wanted and current.signature == signature and wanted.signature == signature then
+        return registrationStatus("registered", "signature-match", signature, current)
+    end
+    if current and current.signature ~= signature then
+        if queued or scheduled or (wanted and wanted.signature == signature) then
+            return registrationStatus("pending", "stale-registration", signature, current)
+        end
+        return registrationStatus("failed", "stale-registration", signature, current)
+    end
+    if current and current.signature == signature then
+        return registrationStatus("failed", "stale-registration", signature, current)
+    end
+    if wanted and wanted.signature == signature then
+        return registrationStatus("pending", queued and "combat-queued" or "registration-pending", signature)
+    end
+    return registrationStatus("suppressed", "not-desired", signature)
 end
 
 -- Native sounds WoW plays itself (also when the addon cannot read the aura): the category word on Added for
@@ -126,14 +243,12 @@ local function buildDesired(rules)
     for _, rule in ipairs(type(rules) == "table" and rules or {}) do
         if rule.enabled and rule.applyEnabled
             and (not ns.Profiles or not ns.Profiles.RuleMatchesCurrentSpecialization
-            or ns.Profiles.RuleMatchesCurrentSpecialization(rule))
-            and fallback.GetCategorySoundFile(rule.alertCategory) then
+            or ns.Profiles.RuleMatchesCurrentSpecialization(rule)) then
             for _, spellID in ipairs(type(rule.spellIDs) == "table" and rule.spellIDs or {}) do
                 if type(spellID) == "number" and spellID > 0 and spellID == math.floor(spellID)
-                    and ns._Aura and ns._Aura.getSelfBuffStatus
-                    and ns._Aura.getSelfBuffStatus(spellID) == "true" then
-                    -- Guaranteed self-cast: the cast path speaks the TTS even in combat, so the category word
-                    -- is only a fallback for auras without such a path (e.g. Blessing of Protection).
+                    and fallback.GetCategorySoundFile(applyCue(rule, spellID)) and addonCanSpeak(spellID, rule) then
+                    -- The cast path speaks the TTS even in combat, so the category word is only a fallback
+                    -- for auras without such a path (e.g. Blessing of Protection).
                     nativeCategoryBlocked[spellID] = true
                 end
             end
@@ -142,7 +257,6 @@ local function buildDesired(rules)
     for _, rule in ipairs(type(rules) == "table" and rules or {}) do
         if rule.enabled and (not ns.Profiles or not ns.Profiles.RuleMatchesCurrentSpecialization
             or ns.Profiles.RuleMatchesCurrentSpecialization(rule)) then
-            local categoryConfigured = fallback.GetCategorySoundFile(rule.alertCategory)
             -- The category word on Removed only for rules whose end is one aura's end: a one-effect rule ends
             -- with its last trigger, which WoW cannot express natively (the readable debuff speaks it).
             local expireCategoryConfigured = not rule.oneEffect and fallback.GetCategorySoundFile(rule.expireCategory) or nil
@@ -161,12 +275,14 @@ local function buildDesired(rules)
                     -- Never-secret auras stay readable in combat, so the addon speaks them itself (TTS on).
                     local neverSecret = ns._Aura and ns._Aura.auraSecrecy and ns._Aura.auraSecrecy(spellID) == "never"
                     local readable = oneEffectReadable or (rule.applyEnabled and neverSecret)
+                    -- The category word of this effect: the group's, or its own when the group has none.
+                    local categoryConfigured = fallback.GetCategorySoundFile(applyCue(rule, spellID))
                     local categorySoundFile = not nativeCategoryBlocked[spellID] and not readable and categoryConfigured or nil
                     local applySound = categorySoundFile or (not categoryConfigured and applyMediaSound) or nil
                     if applySound then
                         local trigger = Enum.UnitAuraSoundTrigger.Added
                         local key = tostring(spellID) .. ":" .. tostring(trigger)
-                        local channel = rule.applySoundEnabled and rule.applySoundChannel or "Master"
+                        local channel = ruleSoundChannel(rule, "apply")
                         local current = desired[key]
                         if not current or (categorySoundFile and not current.category)
                             or (applyMediaSound and not current.category and current.soundFile ~= applyMediaSound)
@@ -182,7 +298,7 @@ local function buildDesired(rules)
                     if expireSound then
                         local trigger = Enum.UnitAuraSoundTrigger.Removed
                         local key = tostring(spellID) .. ":" .. tostring(trigger)
-                        local channel = rule.expireSoundEnabled and rule.expireSoundChannel or "Master"
+                        local channel = ruleSoundChannel(rule, "expire")
                         local current = desired[key]
                         if not current or current.soundFile ~= expireSound
                             or (current.channel == "Master" and channel ~= "Master") then
@@ -213,8 +329,13 @@ local function reconcile(force)
             local nextEntry = desired[key]
             if not nextEntry or nextEntry.signature ~= entry.signature then
                 local ok = pcall(C_UnitAuras.RemoveAuraSound, entry.id)
-                if not ok then appendLog("NATIVE", "remove-failed key=" .. key) end
-                registered[key] = nil
+                if ok then
+                    registered[key] = nil
+                else
+                    entry.removeFailed = true
+                    refused = refused + 1
+                    appendLog("NATIVE", "remove-failed key=" .. key)
+                end
             end
         end
 
@@ -222,7 +343,11 @@ local function reconcile(force)
             wantedCount = wantedCount + 1
             local current = registered[key]
             if current and current.signature == entry.signature then
+                current.removeFailed = nil
                 failed[key] = nil
+            elseif current then
+                -- Keep the old handle and retry removal before adding a replacement for this key.
+                if not current.removeFailed then refused = refused + 1 end
             elseif force or failed[key] ~= entry.signature then
                 local ok, soundID = pcall(C_UnitAuras.AddAuraSound, entry.trigger, {
                     unitToken = "player",
@@ -243,17 +368,19 @@ local function reconcile(force)
                 refused = refused + 1
             end
         end
-    else
-        for key in pairs(registered) do registered[key] = nil end
     end
 
-    local registeredCount = 0
-    for _ in pairs(registered) do registeredCount = registeredCount + 1 end
+    local registeredCount, removeFailed = 0, 0
+    for _, entry in pairs(registered) do
+        registeredCount = registeredCount + 1
+        if entry.removeFailed then removeFailed = removeFailed + 1 end
+    end
     lastStatus = {
         available = apiAvailable,
         registered = registeredCount,
         wanted = wantedCount,
         refused = refused,
+        removeFailed = removeFailed,
         queued = false,
     }
     updateStatus()
@@ -288,13 +415,13 @@ end
 
 function fallback.Refresh(rules, force)
     if type(rules) == "table" then lastRules = rules end
+    buildDesired(lastRules)
     if InCombatLockdown and InCombatLockdown() then
         queued = true
         lastStatus.queued = true
         updateStatus()
         return
     end
-    buildDesired(lastRules)
     scheduleReconcile(force == true)
 end
 
