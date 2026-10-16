@@ -314,6 +314,7 @@ local NOTIFICATION_CUE_LABELS = {
     ["offensive-external"] = "Offensive · Somebody loves you",
     ["defensive-external"] = "Defensive · Somebody loves you",
 }
+ns.NOTIFICATION_CUE_LABELS = NOTIFICATION_CUE_LABELS
 local NOTIFICATION_SOUND_CHANNELS = {
     { key = "Master", value = "Master" },
     { key = "Sound effects", value = "SFX" },
@@ -322,6 +323,7 @@ local NOTIFICATION_SOUND_CHANNELS = {
     { key = "Ambience", value = "Ambience" },
 }
 local NOTIFICATION_SOUND_CHANNEL_SET = { Master = true, SFX = true, Dialog = true, Music = true, Ambience = true }
+ns.NOTIFICATION_SOUND_CHANNEL_SET = NOTIFICATION_SOUND_CHANNEL_SET
 local DEFAULT_NOTIFICATION_SOUND_KIT = SOUNDKIT and SOUNDKIT.RAID_WARNING or 8959
 
 function ns.refreshScreenFontChoices()
@@ -586,6 +588,7 @@ local function newAuraRule()
         speechSpeed = 100,
     }
 end
+ns.newAuraRule = newAuraRule
 
 local function newItemRule(itemID, name, icon, slotID)
     return {
@@ -752,14 +755,29 @@ end
 -- seen item } (whatever sits in that slot). Older saves kept one itemID/slotID pair on the rule itself;
 -- it becomes the first member and the rule fields are dropped, so loading twice changes nothing more.
 -- The unfilled starter trinket rule keeps an empty list until the picker fills it.
+-- Key strings are cached per slot and per item ID: a scan asks for them several times per member, and the
+-- concatenation would allocate each time. The cache only ever holds the same strings the concatenation gave.
+ns.slotKeys, ns.itemKeys = {}, {}
 function ns.memberKey(member)
-    if member.slotID then return "s" .. member.slotID end
-    return "i" .. tostring(member.itemID)
+    local slotID = member.slotID
+    if slotID then
+        local key = ns.slotKeys[slotID]
+        if not key then key = "s" .. slotID; ns.slotKeys[slotID] = key end
+        return key
+    end
+    local itemID = member.itemID
+    if itemID == nil then return "i" .. tostring(itemID) end
+    local key = ns.itemKeys[itemID]
+    if not key then key = "i" .. tostring(itemID); ns.itemKeys[itemID] = key end
+    return key
 end
 
+-- Shared empty list for rules without a members table. Read only: every writer (addItemMember, normalize)
+-- creates rule.members first, and removeItemMember returns before touching the list when it is missing.
+ns.noMembers = {}
 function ns.itemMembers(rule)
     if type(rule.members) == "table" then return rule.members end
-    return {}
+    return ns.noMembers
 end
 
 function ns.firstItemID(rule)
@@ -1973,8 +1991,13 @@ function ns.playNotificationSound(rule, eventKey)
         if ok and played ~= false then return true end
     end
     local soundKitID = tonumber(rule[prefix .. "SoundKitID"])
-    if not soundKitID or soundKitID <= 0 or type(PlaySound) ~= "function" then return false end
-    local ok, played = pcall(PlaySound, soundKitID, channel, true)
+    if soundKitID and soundKitID > 0 and type(PlaySound) == "function" then
+        local ok, played = pcall(PlaySound, soundKitID, channel, true)
+        if ok and played ~= false then return true end
+    end
+    -- Media and rule sound ID both unplayable (missing library, unknown ID): play the default kit instead of silence.
+    if type(PlaySound) ~= "function" then return false end
+    local ok, played = pcall(PlaySound, DEFAULT_NOTIFICATION_SOUND_KIT, channel, true)
     return ok and played ~= false
 end
 
@@ -2335,6 +2358,41 @@ function ns._Aura.addonCanSpeak(spellID, rule)
     return ns._Aura.getSelfBuffStatus(ns._Aura.castIDFor(rule, spellID)) == "true"
 end
 
+function ns._Aura.combatInfo(spellID, rule)
+    local secrecy = ns._Aura.auraSecrecy(spellID)
+    if secrecy == "never" then
+        return "spoken", L("Combat: custom text possible"), L("WoW exposes this effect in combat. Custom text requires TTS to be enabled.")
+    elseif ns._Aura.addonCanSpeak(spellID, rule) then
+        return "cast", L("Combat: own cast"), L("Your own cast can use custom text. Receiving this effect from another player may require the configured category sound.")
+    elseif secrecy == "unknown" then
+        return "unknown", L("Combat: availability unknown"), L("Combat detection cannot currently be determined. A configured category sound may announce this effect.")
+    end
+    return "sound", L("Combat: category may be needed"), L("WoW may hide this effect in combat. Custom text may be unavailable; the configured category sound can announce it instead.")
+end
+
+function ns._Aura.addCombatTooltip(spellID, rule)
+    local state, label, explanation = ns._Aura.combatInfo(spellID, rule)
+    GameTooltip:AddLine(label, 0.88, 0.75, 0.4, true)
+    GameTooltip:AddLine(explanation, 0.8, 0.8, 0.8, true)
+    if not rule then return end
+    local decision = ns.RuleOutput.Decide(rule, "apply", { spellID = spellID })
+    if decision.native.selected then
+        local category = decision.native.category
+        for _, choice in ipairs(NOTIFICATION_CUE_CHOICES) do
+            if choice.value == category then category = L(choice.label); break end
+        end
+        GameTooltip:AddLine(string.format(L("Application category: %s"), category), 0.9, 0.82, 0.5, true)
+        local status = decision.native.status
+        local text = status == "registered" and "Category sound registered: it plays instead of custom text, without a duplicate announcement."
+            or status == "pending" and "Category sound registration pending. It is not ready yet."
+            or status == "failed" and "Category sound registration failed. This effect may remain silent in combat."
+            or "Category sound is not currently registered."
+        GameTooltip:AddLine(L(text), 0.8, 0.8, 0.8, true)
+    elseif state ~= "spoken" and state ~= "cast" and decision.media.native.status ~= "registered" then
+        GameTooltip:AddLine(L("No category sound configured. This effect may remain silent in combat."), 0.95, 0.65, 0.3, true)
+    end
+end
+
 function ns._Aura.handleCast(unit, castGUID, castSpellID)
     if unit ~= "player" or not isPublicNumber(castSpellID) then return end
     if not ns._Aura.aurasAreSecret() then return end
@@ -2538,14 +2596,45 @@ local function onUnitAuraUpdate(unit, updateInfo)
     if profiling then ns.Prof.add("processAura(UNIT_AURA)", ns.Prof.clock() - started) end
 end
 
-function ns.getEquippedItemID(slotID)
+-- Direct read of one slot: one GetInventoryItemID call.
+function ns.readEquippedItemID(slotID)
     if not GetInventoryItemID then return nil end
     local ok, itemID = pcall(GetInventoryItemID, "player", slotID)
     if ok and isPublicNumber(itemID) then return itemID end
     return nil
 end
 
+-- Scan-scoped equipment snapshot, slots 1..19, read once per ns.scanItemRules (19 reads however many members).
+-- equipBySlot[slot] = itemID (nil = empty); equipSlotByItem[itemID] = lowest slot holding it, as the linear
+-- search returned before. Both tables are reused (wiped, never reallocated). Only valid while
+-- equipSnapshotActive is true: set by ns.readEquipSnapshot, cleared by ns.scanItemRules.
+ns.equipBySlot = {}
+ns.equipSlotByItem = {}
+ns.equipSnapshotActive = false
+
+function ns.readEquipSnapshot()
+    local bySlot, slotByItem = ns.equipBySlot, ns.equipSlotByItem
+    ns.equipSnapshotActive = false
+    for key in pairs(bySlot) do bySlot[key] = nil end
+    for key in pairs(slotByItem) do slotByItem[key] = nil end
+    for slotID = 1, 19 do
+        local itemID = ns.readEquippedItemID(slotID)
+        bySlot[slotID] = itemID
+        if itemID ~= nil and slotByItem[itemID] == nil then slotByItem[itemID] = slotID end
+    end
+    ns.equipSnapshotActive = true
+end
+
+-- Inside a scan: from the snapshot. Outside (timers, picker, UI): direct read, as before.
+function ns.getEquippedItemID(slotID)
+    if ns.equipSnapshotActive and type(slotID) == "number" and slotID >= 1 and slotID <= 19 and slotID % 1 == 0 then
+        return ns.equipBySlot[slotID]
+    end
+    return ns.readEquippedItemID(slotID)
+end
+
 function ns.findEquippedItemSlot(itemID)
+    if ns.equipSnapshotActive and itemID ~= nil then return ns.equipSlotByItem[itemID] end
     for slotID = 1, 19 do
         if ns.getEquippedItemID(slotID) == itemID then return slotID end
     end
@@ -2581,28 +2670,30 @@ function ns.readableCooldownNumber(value)
         and value ~= math.huge and value ~= -math.huge
 end
 
-function ns.readItemCooldownSource(source, callback)
-    local ok, startTime, duration, enabled = pcall(callback)
+-- One reused result table: the only caller (checkItemMember) reads it inside the same check and copies
+-- the values it keeps (cycle start/end, source string), so no reading table outlives a check.
+ns.itemReading = {}
+
+function ns.readItemCooldownSource(source, callback, arg1, arg2)
+    local ok, startTime, duration, enabled = pcall(callback, arg1, arg2)
     if not ok then return nil, "call-error" end
     if (issecretvalue and (issecretvalue(startTime) or issecretvalue(duration) or issecretvalue(enabled)))
         or not ns.readableCooldownNumber(startTime) or not ns.readableCooldownNumber(duration)
         or (type(enabled) ~= "boolean" and not ns.readableCooldownNumber(enabled)) then
         return nil, "unreadable"
     end
-    return {
-        source = source,
-        startTime = startTime,
-        duration = duration,
-        enabled = enabled,
-    }, nil
+    local reading = ns.itemReading
+    reading.source = source
+    reading.startTime = startTime
+    reading.duration = duration
+    reading.enabled = enabled
+    return reading, nil
 end
 
 function ns.readEquippedItemCooldown(slotID, itemID)
     local reason
     if GetInventoryItemCooldown then
-        local reading, readReason = ns.readItemCooldownSource("inventory", function()
-            return GetInventoryItemCooldown("player", slotID)
-        end)
+        local reading, readReason = ns.readItemCooldownSource("inventory", GetInventoryItemCooldown, "player", slotID)
         if reading then return reading end
         reason = readReason
     else
@@ -2610,9 +2701,7 @@ function ns.readEquippedItemCooldown(slotID, itemID)
     end
 
     if C_Item and C_Item.GetItemCooldown then
-        local reading, readReason = ns.readItemCooldownSource("item", function()
-            return C_Item.GetItemCooldown(itemID)
-        end)
+        local reading, readReason = ns.readItemCooldownSource("item", C_Item.GetItemCooldown, itemID)
         if reading then return reading end
         reason = readReason or reason
     end
@@ -2698,7 +2787,10 @@ function ns.checkItemMember(rule, member)
     local reading, readReason = ns.readEquippedItemCooldown(slotID, itemID)
     local state = ns.itemState(rule, key)
     if not reading then
-        ns.logItemDecision(rule, "check", "unreadable-" .. tostring(readReason), slotID, nil, member)
+        -- Guarded: the concatenation would allocate on every scan while the cooldown is unreadable.
+        if ns.AuraSoundFallback and ns.AuraSoundFallback.debugEnabled == true then
+            ns.logItemDecision(rule, "check", "unreadable-" .. tostring(readReason), slotID, nil, member)
+        end
         return
     end
 
@@ -2751,7 +2843,8 @@ function ns.checkItemMember(rule, member)
 end
 
 ns.checkItemRule = function(rule)
-    if not rule.enabled or not ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
+    -- ns.itemScanSpecID is set only during ns.scanItemRules; nil (timer path, or spec unknown) makes the rule read it.
+    if not rule.enabled or not ns.Profiles.RuleMatchesCurrentSpecialization(rule, ns.itemScanSpecID) then
         if itemCooldownStates[rule] then ns.logItemDecision(rule, "check", "inactive") end
         itemCooldownStates[rule] = nil
         return
@@ -2759,24 +2852,47 @@ ns.checkItemRule = function(rule)
     for _, member in ipairs(ns.itemMembers(rule)) do ns.checkItemMember(rule, member) end
 end
 
-function ns.scanItemRules()
-    itemScanPending = false
-    local profiling = ns.Prof.on
-    local started = profiling and ns.Prof.clock()
-    -- Once per loaded profile, when item names can be resolved: slot rules are named after their slot.
-    if ns.slotNamesChecked ~= WoWraVoxDB then
-        ns.slotNamesChecked = WoWraVoxDB
-        for _, rule in ipairs(WoWraVoxDB.items) do ns.nameSlotRule(rule) end
-        if optionsFrame and optionsFrame:IsShown() then refreshList() end
+function ns.scanItemRuleList()
+    -- Empty item list: nothing to name or check.
+    if #WoWraVoxDB.items > 0 then
+        -- Once per loaded profile, when item names can be resolved: slot rules are named after their slot.
+        if ns.slotNamesChecked ~= WoWraVoxDB then
+            ns.slotNamesChecked = WoWraVoxDB
+            for _, rule in ipairs(WoWraVoxDB.items) do ns.nameSlotRule(rule) end
+            if optionsFrame and optionsFrame:IsShown() then refreshList() end
+        end
+        -- One spec read per scan instead of one per spec-bound rule. Nil (spec unknown) keeps the per-rule read.
+        ns.itemScanSpecID = ns.Profiles and ns.Profiles.GetCurrentSpecialization and ns.Profiles.GetCurrentSpecialization()
+        ns.readEquipSnapshot()
+        for _, rule in ipairs(WoWraVoxDB.items) do ns.checkItemRule(rule) end
     end
-    for _, rule in ipairs(WoWraVoxDB.items) do ns.checkItemRule(rule) end
-    if profiling then ns.Prof.add("scanItemRules", ns.Prof.clock() - started) end
 end
 
+function ns.scanItemRules()
+    itemScanPending = false
+    ns.itemScanLast = GetTime()
+    local profiling = ns.Prof.on
+    local started = profiling and ns.Prof.clock()
+    -- pcall: the snapshot flag and the spec snapshot are cleared even when a rule throws; the error is then re-raised unchanged.
+    local ok, err = pcall(ns.scanItemRuleList)
+    ns.equipSnapshotActive = false
+    ns.itemScanSpecID = nil
+    if profiling then ns.Prof.add("scanItemRules", ns.Prof.clock() - started) end
+    if not ok then error(err, 0) end
+end
+
+-- Event-driven scans run at most once per 0.3 s. A request inside that window waits for the window to
+-- end (trailing), so the last request always gets a scan after it. Timers (scheduleItemReady) call
+-- ns.checkItemRule directly and never pass through here.
+ns.ITEM_SCAN_MIN_INTERVAL = 0.3
 function ns.queueItemScan(delay)
     if itemScanPending then return end
     itemScanPending = true
-    C_Timer.After(delay or 0.1, ns.scanItemRules)
+    local wait = delay or 0.1
+    if ns.itemScanLast then
+        wait = math.max(wait, ns.itemScanLast + ns.ITEM_SCAN_MIN_INTERVAL - GetTime())
+    end
+    C_Timer.After(wait, ns.scanItemRules)
 end
 
 local function scanSkillRules(event)
@@ -3506,11 +3622,22 @@ function refreshList()
             row.remove = CreateFrame("Button", nil, row, "UIPanelCloseButton")
             row.remove:SetSize(24, 24)
             row.remove:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -5, 6)
-            addHelpTooltip(row, "Edit rule", "Select this rule and show its settings.")
+            -- Extra tooltip lines for this row; the list loop sets row.tipLines[1] per row (hint or nil).
+            row.tipLines = {}
+            addHelpTooltip(row, "Edit rule", "Select this rule and show its settings.", row.tipLines)
             addHelpTooltip(row.toggle, "Enable or disable rule", "Toggle this rule without deleting it.")
             addHelpTooltip(row.remove, "Remove rule", "Delete this rule. Built-in rules can be switched off but not deleted.")
             -- Scripts read self.rule/self.category, so they are set once per row frame.
             row:SetScript("OnClick", function(self)
+                -- Ctrl-click posts the aura group as a link into the chat box instead of selecting it.
+                if IsControlKeyDown() and self.category == "auras" then
+                    if self.rule.builtin then
+                        setStatus(L("Built-in rules cannot be shared."), true)
+                        return
+                    end
+                    ns.ShareUI.postToChat(self.rule)
+                    return
+                end
                 selectRule(self.rule, self.category)
                 if self.category == "items" and ns.isEmptyStarter(self.rule) and ns.BeginItemPicker then
                     ns.BeginItemPicker()
@@ -3548,6 +3675,7 @@ function refreshList()
         end
 
         row.rule, row.category = rule, category
+        row.tipLines[1] = (category == "auras" and not rule.builtin) and { text = "Ctrl-click to post in chat." } or nil
         row:SetWidth(width)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", listChild, "TOPLEFT", 6, -position)
@@ -3747,7 +3875,8 @@ local function layoutNotificationPanel(panel, y)
     local cols = ns.Layout.getColumns(frameWidth)
     local screenChecked = panel.screen.enabled:GetChecked()
     local screenEnabled = screenChecked == true or screenChecked == 1
-    local screenY = -112
+    local combatOffset = panel.combatHint and 32 or 0
+    local screenY = -112 - combatOffset
     frame:ClearAllPoints()
     frame:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 0, y)
     frame:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", 0, y)
@@ -3779,21 +3908,27 @@ local function layoutNotificationPanel(panel, y)
     panel.ttsTest:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT, -42)
     panel.ttsTest:SetSize(ns.Layout.BUTTON_W, 30)
     panel.soundEnabled:ClearAllPoints()
-    panel.soundEnabled:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.ROW_X, -78)
+    panel.soundEnabled:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.ROW_X, -78 - combatOffset)
     panel.soundLabel:ClearAllPoints()
     panel.soundLabel:SetPoint("LEFT", panel.soundEnabled, "RIGHT", 6, 0)
     panel.soundTest:ClearAllPoints()
-    panel.soundTest:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT, -77)
+    panel.soundTest:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT, -77 - combatOffset)
     panel.soundTest:SetSize(ns.Layout.BUTTON_W, 30)
     layoutScreenRow(panel.screen, frame, screenY)
     panel.ttsMessage:ClearAllPoints()
     panel.ttsMessage:SetHeight(30)
     panel.ttsMessage:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.FIELD_X, -42)
     panel.ttsMessage:SetPoint("RIGHT", panel.ttsTest, "LEFT", -8, 0)
+    if panel.combatHint then
+        panel.combatHint:ClearAllPoints()
+        panel.combatHint:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.FIELD_X, -75)
+        panel.combatHint:SetPoint("RIGHT", frame, "RIGHT", ns.Layout.RIGHT, 0)
+        panel.combatHint:SetHeight(28)
+    end
     -- Sound row shares the dropdown columns of the screen row below (col1 = Font, col2 = Size); the last
     -- box (channel) ends at the right edge of the text boxes.
-    ns.Layout.placeDropdown(panel.soundChoice, frame, cols.col1, -77, cols.col1Width)
-    ns.Layout.placeDropdown(panel.soundChannel, frame, cols.col2, -77, cols.col2Width)
+    ns.Layout.placeDropdown(panel.soundChoice, frame, cols.col1, -77 - combatOffset, cols.col1Width)
+    ns.Layout.placeDropdown(panel.soundChannel, frame, cols.col2, -77 - combatOffset, cols.col2Width)
 end
 
 function ns.setNotificationPanelShown(panel, shown)
@@ -3809,6 +3944,7 @@ function ns.setNotificationPanelShown(panel, shown)
     local ttsDetails = shown and expanded and (ttsChecked == true or ttsChecked == 1)
     panel.ttsEnabled:SetShown(shown and expanded)
     panel.ttsLabel:SetShown(shown and expanded)
+    if panel.combatHint then panel.combatHint:SetShown(shown and expanded) end
     panel.ttsMessage:SetShown(ttsDetails)
     local choosingStarterItem = panel.eventKey == "ready" and selectedCategory == "items"
         and selectedItemRule and ns.isEmptyStarter(selectedItemRule)
@@ -4089,6 +4225,7 @@ ns.AuraPresetUI.model = function(specID)
                 strong = catalog.IsStrong and catalog.IsStrong(entry) == true or false,
                 sourceCount = entry.sourceCount or 0,
                 canSpeak = ns._Aura.addonCanSpeak(entry.auraID, castMap) == true,
+                combatText = select(3, ns._Aura.combatInfo(entry.auraID, castMap)),
             }
             item.selected = item.available and ui.selected[entry.id] == true
             if item.available then
@@ -4143,8 +4280,7 @@ ns.AuraPresetUI.describe = function(item)
     end
     return {
         name = item.name, meta = table.concat(parts, " · "), hint = "",
-        output = item.canSpeak and L("The addon speaks this aura.")
-            or L("WoW plays the category word (the addon cannot read this aura in combat)."),
+        output = item.combatText,
     }
 end
 
@@ -4220,6 +4356,12 @@ ns.AuraPresetUI.makeTile = function()
             -- Real spell tooltip; plain name only when the spell cannot be resolved.
             local shown = spellID and pcall(GameTooltip.SetSpellByID, GameTooltip, spellID)
             if not shown then GameTooltip:SetText(item.name) end
+            if spellID then
+                local castRule = { castByAuraID = { [spellID] = entry.castID or spellID } }
+                local _, label, explanation = ns._Aura.combatInfo(spellID, castRule)
+                GameTooltip:AddLine(label, 0.88, 0.75, 0.4, true)
+                GameTooltip:AddLine(explanation, 0.8, 0.8, 0.8, true)
+            end
             if not item.available and item.reason then
                 GameTooltip:AddLine(item.reason, 0.9, 0.35, 0.3, true)
             end
@@ -4757,13 +4899,7 @@ local function updateSelectedTriggers()
                 local ok = pcall(GameTooltip.SetSpellByID, GameTooltip, self.spellID)
                 if not ok then GameTooltip:SetText(self.spellName or L("Unknown ID")) end
                 GameTooltip:AddLine("ID: " .. self.spellID, 0.72, 0.78, 0.86)
-                if self.combat == "spoken" then
-                    GameTooltip:AddLine(L("Blizzard marks this aura as readable in combat: text-to-speech works."), 0.44, 0.81, 0.5, true)
-                elseif self.combat == "cast" then
-                    GameTooltip:AddLine(L("Hidden in combat, but your own cast of it is spoken. Buffs from other players only play the category sound."), 0.44, 0.81, 0.5, true)
-                elseif self.combat == "sound" then
-                    GameTooltip:AddLine(L("This aura can be hidden in combat: only the category sound can play there. Use a matching readable aura (for Bloodlust: Sated / Exhaustion) for spoken text."), 0.88, 0.63, 0.25, true)
-                end
+                ns._Aura.addCombatTooltip(self.spellID, self.rule)
                 GameTooltip:Show()
             end)
             row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -4778,18 +4914,10 @@ local function updateSelectedTriggers()
         row.remove:SetEnabled(not ns.isBuiltinTrigger(rule, spellID))
         row.spellName = info and info.name or (state == "pending" and L("Loading…") or L("Unknown ID"))
         row.icon:SetTexture(info and info.iconID or "Interface\\Icons\\INV_Misc_QuestionMark")
-        local secrecy = ns._Aura.auraSecrecy(spellID)
-        if secrecy == "never" then row.combat = "spoken"
-        elseif ns._Aura.getSelfBuffStatus(spellID) == "true" then row.combat = "cast"
-        elseif secrecy == "unknown" then row.combat = "unknown"
-        else row.combat = "sound" end
-        local note = state == "pending" and L("loading") or state ~= "valid" and L("invalid") or nil
-        if not note then
-            if row.combat == "spoken" then note = "|cff6fcf7f" .. L("combat: spoken") .. "|r|cff8c929a"
-            elseif row.combat == "cast" then note = "|cff6fcf7f" .. L("combat: own casts") .. "|r|cff8c929a"
-            elseif row.combat == "unknown" then note = L("combat: ?")
-            else note = "|cffe0a040" .. L("combat: sound only") .. "|r|cff8c929a" end
-        end
+        row.rule = rule
+        local combatState, combatLabel = ns._Aura.combatInfo(spellID, rule)
+        row.combat = combatState
+        local note = state == "pending" and L("loading") or state ~= "valid" and L("invalid") or combatLabel
         row.title:SetText(ns.memberRowText(row.spellName, spellID, note))
         row.title:SetTextColor(state == "valid" and 0.93 or 1, state == "valid" and 0.93 or 0.65, state == "valid" and 0.96 or 0.38)
         row:ClearAllPoints()
@@ -5455,6 +5583,7 @@ function updateDetails()
     editorLoading = true
     ruleNameBox:SetText(rule.name or "")
     ruleEnabledCheck:SetChecked(rule.enabled)
+    auraEditor.exportButton:SetShown(auraRule ~= nil and not auraRule.builtin)
     if auraRule then
         local firstID = auraRule.spellIDs[1]
         local info = firstID and getSpellInfo(firstID)
@@ -5591,6 +5720,7 @@ local function resetSkillCreationSearch()
         creationView.auraButton:Show()
         creationView.itemButton:Show()
         creationView.skillButton:Show()
+        creationView.importButton:Show()
     end
 end
 
@@ -5670,6 +5800,7 @@ ns.AuraPresetUI.beginCreation = function()
     creationView.auraButton:Hide()
     creationView.itemButton:Hide()
     creationView.skillButton:Hide()
+    creationView.importButton:Hide()
     skillSearchBox:Hide()
     skillSearchStatus:Hide()
     creationView.manualPanel:ClearAllPoints()
@@ -5744,6 +5875,7 @@ ns.AuraPresetUI.finishCreation = function(restoreSelection)
     creationView.auraButton:Show()
     creationView.itemButton:Show()
     creationView.skillButton:Show()
+    creationView.importButton:Show()
     local previous = ui.previousSelection
     ui.previousSelection = nil
     if restoreSelection and previous then
@@ -5830,6 +5962,17 @@ ruleEnabledCheck:SetPoint("TOPLEFT", auraEditor.rulePanel, "TOPLEFT", 550, -48)
 ruleEnabledCheck:SetSize(30, 30)
 auraEditor.enabledLabel = createLabel(auraEditor.rulePanel, "Active", "GameFontNormalSmall")
 auraEditor.enabledLabel:SetPoint("LEFT", ruleEnabledCheck, "RIGHT", 4, 0)
+-- Aura groups only; updateDetails shows it for user groups and hides it for built-in ones.
+auraEditor.exportButton = CreateFrame("Button", nil, auraEditor.rulePanel, "UIPanelButtonTemplate")
+auraEditor.exportButton:SetSize(90, 24)
+auraEditor.exportButton:SetPoint("LEFT", auraEditor.enabledLabel, "RIGHT", 18, 0)
+auraEditor.exportButton:SetText(L("Export"))
+auraEditor.exportButton:SetScript("OnClick", function()
+    local rule = selectedAura()
+    if rule then ns.ShareUI.openExport(rule) end
+end)
+ns.Skin.Register(auraEditor.exportButton, "button")
+auraEditor.exportButton:Hide()
 
 -- Aura rules only: all triggers count as one effect (announce the first start and the last end).
 auraEditor.oneEffectCheck = CreateFrame("CheckButton", nil, auraEditor.rulePanel, "UICheckButtonTemplate")
@@ -5922,7 +6065,7 @@ local function buildTriggerControls()
     triggerInputBox.searchIcon:SetSize(14, 14)
     triggerInputBox.searchIcon:SetTexture("Interface\\Common\\UI-Searchbox-Icon")
     triggerInputBox:SetMaxLetters(180)
-    triggerPlaceholder = createLabel(triggerPanel, "Search name or paste spell IDs", "GameFontDisableSmall")
+    triggerPlaceholder = createLabel(triggerPanel, "Spell ID recommended; name search may be incomplete", "GameFontDisableSmall")
     triggerPlaceholder:SetPoint("LEFT", triggerInputBox, "LEFT", 23, 0)
     triggerPlaceholder:SetPoint("RIGHT", triggerInputBox, "RIGHT", -8, 0)
  triggerPlaceholder:SetJustifyH("LEFT")
@@ -6265,7 +6408,11 @@ local function buildAuraNotificationPanel(eventKey, title)
     ns.Skin.Register(panel.ttsTest, "button")
     ns.Skin.Register(panel.soundTest, "button")
     if eventKey == "apply" or eventKey == "expire" then
-        panel.categoryLabel = createLabel(panel.frame, eventKey == "apply" and "Application-Fallback" or "Expiration-Fallback", "GameFontNormalSmall")
+        panel.combatHint = createLabel(panel.frame, "Combat: hidden effects may use the configured category instead of your text.", "GameFontHighlightSmall")
+        panel.combatHint:SetJustifyH("LEFT")
+        panel.combatHint:SetTextColor(0.72, 0.72, 0.72)
+        panel.combatHint:SetWordWrap(true)
+        panel.categoryLabel = createLabel(panel.frame, eventKey == "apply" and "Application category" or "Expiration category", "GameFontNormalSmall")
         panel.categoryChoice = createScreenChoiceDropdown(panel.frame, 142, NOTIFICATION_CUE_CHOICES,
             function(choice) return choice.value end,
             function(choice)
@@ -6279,9 +6426,9 @@ local function buildAuraNotificationPanel(eventKey, title)
                 syncAllAuras(true)
             end)
         if eventKey == "apply" then
-            addHelpTooltip(panel.categoryChoice, "Application-Fallback", "WoW plays the category word itself when the aura is applied, for auras that are not your own self-cast buffs. Where it plays, the addon does not speak on top; it stays silent for auras the addon speaks itself. A group made from presets that has no category cue of its own shows Per effect: every effect then plays its own word.")
+            addHelpTooltip(panel.categoryChoice, "Application category", "Choose a category sound for this effect. It can announce effects hidden in combat, when custom text is unavailable. A registered category sound replaces custom text without a duplicate announcement. Per effect uses each preset effect's own category.")
         else
-            addHelpTooltip(panel.categoryChoice, "Expiration-Fallback", "WoW plays the category word itself when the aura ends, also in combat when the addon cannot read it. It is the same word as on application. Not used by rules that treat their triggers as one effect.")
+            addHelpTooltip(panel.categoryChoice, "Expiration category", "Choose the category sound for expiration independently of application. Native category sounds require successful registration. Not used by rules that treat their triggers as one effect.")
         end
     end
     if eventKey == "apply" or eventKey == "expire" then
@@ -6475,6 +6622,9 @@ local function styleCreationOption(button, iconPath, title, description, y)
     styleCreationOption(creationView.auraButton, "Interface\\Icons\\Spell_Nature_Rejuvenation", "Aura", "Track buff, debuff, or item-effect auras.", -64)
     styleCreationOption(creationView.itemButton, "Interface\\Icons\\INV_Misc_Bag_10", "Equipped item", "Announce when this item's cooldown is ready.", -150)
     styleCreationOption(creationView.skillButton, "Interface\\Icons\\Spell_Holy_MindVision", "Spell cooldown", "Announce when this spell's cooldown is ready.", -236)
+    creationView.importButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
+    styleCreationOption(creationView.importButton, "Interface\\Icons\\INV_Misc_Note_01", "Import", "Paste a group someone shared with you.", -322)
+    creationView.importButton:SetScript("OnClick", function() ns.ShareUI.openImport() end)
 
     skillSearchBox = createEditBox(creationView, 330, 24)
     skillSearchBox:SetPoint("TOP", creationView, "TOP", 0, -60)
@@ -6547,6 +6697,7 @@ local function styleCreationOption(button, iconPath, title, description, y)
         creationView.auraButton:Hide()
         creationView.itemButton:Hide()
         creationView.skillButton:Hide()
+        creationView.importButton:Hide()
         skillSearchBox:Show()
         skillSearchStatus:Show()
         skillSearchBox:SetFocus()
@@ -6582,6 +6733,309 @@ end)
 creationView:Hide()
 
 end
+
+-- Export and import windows for aura groups. The rules live in ShareGroups.lua; this part only draws them.
+-- Wrapped in an immediately called function: its helpers are not top-level locals of this chunk (200 limit).
+(function()
+ns.ShareUI = ns.ShareUI or {}
+local shareUI = ns.ShareUI
+local IMPORT_ROWS = 12
+local TEXT_LINES = 8 -- spoken, screen, sound and category cue for application and expiration
+local TEXT_AREA_HEIGHT = 128
+local UNKNOWN_SPELL_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
+
+local function shareWindow(name, title, width, height)
+    local frame = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
+    frame:SetSize(width, height)
+    frame:SetPoint("CENTER")
+    frame:SetFrameStrata("DIALOG")
+    frame:SetToplevel(true)
+    frame:SetFrameLevel(50)
+    frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 2 })
+    frame:SetBackdropColor(0.025, 0.03, 0.04, 0.98)
+    frame:SetBackdropBorderColor(0.7, 0.55, 0.2, 1)
+    frame:Hide()
+    if type(UISpecialFrames) == "table" then table.insert(UISpecialFrames, name) end
+    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    frame.title:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -14)
+    frame.title:SetText(title)
+    local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -4)
+    return frame
+end
+
+local function scrollEditBox(parent, width, height)
+    local scroll = CreateFrame("ScrollFrame", nil, parent, "UIPanelScrollFrameTemplate")
+    local edit = CreateFrame("EditBox", nil, scroll)
+    edit:SetMultiLine(true)
+    edit:SetAutoFocus(false)
+    edit:SetFontObject(GameFontHighlightSmall)
+    edit:SetWidth(width)
+    edit:SetHeight(height)
+    edit:SetTextInsets(4, 4, 4, 4)
+    edit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    scroll:SetScrollChild(edit)
+    return scroll, edit
+end
+
+local function buildExportFrame()
+    local frame = shareWindow("WoWraVoxExportWindow", L("EXPORT GROUP"), 560, 330)
+    frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.hint:SetPoint("TOPLEFT", frame.title, "BOTTOMLEFT", 0, -8)
+    frame.hint:SetText(L("Copy this text (Ctrl+C) and send it to a friend."))
+    local scroll, edit = scrollEditBox(frame, 500, 200)
+    scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -58)
+    scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -32, 48)
+    frame.edit = edit
+    local selectAll = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    selectAll:SetSize(110, 26)
+    selectAll:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, 12)
+    selectAll:SetText(L("Select all"))
+    selectAll:SetScript("OnClick", function()
+        edit:SetFocus()
+        edit:HighlightText()
+    end)
+    ns.Skin.Register(selectAll, "button")
+    shareUI.exportFrame = frame
+    return frame
+end
+
+function shareUI.openExport(rule)
+    local ok, text = ns.ShareGroups.Export(rule)
+    if not ok then
+        setStatus(text, true)
+        return
+    end
+    local frame = shareUI.exportFrame or buildExportFrame()
+    frame.edit:SetText(text)
+    frame.edit:SetHeight(math.max(200, math.ceil(#text / 60) * 14))
+    frame.edit:SetCursorPosition(0)
+    frame:Show()
+    frame.edit:SetFocus()
+    frame.edit:HighlightText()
+end
+
+-- Ctrl-click on an aura group row. The export text stays in memory; only the short marker goes into the chat box.
+function shareUI.postToChat(rule)
+    local ok, text = ns.ShareGroups.Export(rule)
+    if not ok then
+        setStatus(text, true)
+        return
+    end
+    if not ns.ShareChat then return end
+    ns.ShareChat.SendToChat(text, rule.name)
+end
+
+local function importRow(parent, index)
+    local row = CreateFrame("Frame", nil, parent)
+    row:SetSize(520, 18)
+    row:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -((index - 1) * 18))
+    row.icon = row:CreateTexture(nil, "ARTWORK")
+    row.icon:SetSize(16, 16)
+    row.icon:SetPoint("LEFT", row, "LEFT", 0, 0)
+    row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.text:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+    row:Hide()
+    return row
+end
+
+local function clearPreview(frame)
+    frame.summary:SetText("")
+    frame.effects:SetText("")
+    for _, line in ipairs(frame.notes) do line:SetText("") end
+    for _, row in ipairs(frame.rows) do row:Hide() end
+    frame.more:SetText("")
+    for _, line in ipairs(frame.textLines) do line:SetText("") end
+end
+
+-- Texts the group speaks or shows. Label grey, text white; "||" is stored and shown as one "|" by the font.
+-- Each text wraps to the window width. The scroll area keeps the window layout fixed and shows long texts in full.
+local function showTexts(frame, texts)
+    local total = 0
+    for index, line in ipairs(frame.textLines) do
+        local entry = texts[index]
+        if entry then
+            line:SetText("|cff9a9a9a" .. entry.label .. ":|r |cffffffff" .. entry.text .. "|r")
+            total = total + line:GetStringHeight() + (index > 1 and 4 or 0)
+        else
+            line:SetText("")
+        end
+    end
+    frame.textChild:SetHeight(math.max(TEXT_AREA_HEIGHT, total + 4))
+end
+
+local function showPreview(frame, preview)
+    frame.summary:SetText(L("Name") .. ": " .. (preview.name ~= "" and preview.name or L("New aura group")))
+    frame.effects:SetText(string.format(L("%d effects"), preview.effects))
+    for index, line in ipairs(frame.notes) do line:SetText(preview.notes[index] or "") end
+    for index, row in ipairs(frame.rows) do
+        local data = preview.rows[index]
+        if data then
+            row.icon:SetTexture(data.icon or UNKNOWN_SPELL_ICON)
+            if data.known then
+                row.text:SetText(string.format("%s · %d", data.name, data.spellID))
+                row.text:SetTextColor(0.9, 0.9, 0.9)
+            else
+                row.text:SetText(string.format("%s · %s", string.format(L("Spell ID %d"), data.spellID), L("Unknown spell")))
+                row.text:SetTextColor(1, 0.35, 0.25)
+            end
+            row:Show()
+        else
+            row:Hide()
+        end
+    end
+    local hidden = #preview.rows - IMPORT_ROWS
+    frame.more:SetText(hidden > 0 and string.format(L("+ %d more"), hidden) or "")
+    showTexts(frame, preview.texts or {})
+end
+
+local function refreshImportButtons(frame)
+    frame.importButton:SetEnabled(ns.ShareGroups.CanImport(frame.preview, frame.edit:GetText()))
+end
+
+local function runCheck(frame)
+    local preview, errorKey = ns.ShareGroups.Check(frame.edit:GetText())
+    frame.preview = preview
+    if preview then
+        frame.error:SetText(L("Check passed. Click Import to add the group."))
+        frame.error:SetTextColor(0.55, 0.86, 0.62)
+        showPreview(frame, preview)
+    else
+        frame.error:SetText(L(errorKey))
+        frame.error:SetTextColor(1, 0.35, 0.25)
+        clearPreview(frame)
+    end
+    refreshImportButtons(frame)
+end
+
+local function runImport(frame)
+    local preview = frame.preview
+    if not ns.ShareGroups.CanImport(preview, frame.edit:GetText()) then
+        refreshImportButtons(frame)
+        return
+    end
+    local rule = ns.ShareGroups.ToRule(preview.group, preview.meta)
+    if ns.AuraPresetUI and ns.AuraPresetUI.creationActive then ns.AuraPresetUI.finishCreation(true) end
+    ns.registerNewRule(rule, "auras")
+    table.insert(WoWraVoxDB.auras, rule)
+    frame:Hide()
+    rebuildAuraWatches()
+    syncAllAuras(true)
+    selectRule(rule, "auras")
+    setStatus("Group imported.")
+end
+
+local function buildImportFrame()
+    local frame = shareWindow("WoWraVoxImportWindow", L("IMPORT GROUP"), 560, 702)
+    frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.hint:SetPoint("TOPLEFT", frame.title, "BOTTOMLEFT", 0, -8)
+    frame.hint:SetText(L("Paste a group text here, then click Check. Import always creates a new group."))
+    local scroll, edit = scrollEditBox(frame, 500, 90)
+    scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -58)
+    scroll:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -58)
+    scroll:SetHeight(90)
+    frame.edit = edit
+    frame.error = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.error:SetPoint("TOPLEFT", scroll, "BOTTOMLEFT", 2, -6)
+    frame.error:SetPoint("RIGHT", frame, "RIGHT", -16, 0)
+    frame.error:SetJustifyH("LEFT")
+    frame.summary = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.summary:SetPoint("TOPLEFT", frame.error, "BOTTOMLEFT", 0, -14)
+    frame.effects = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.effects:SetPoint("TOPLEFT", frame.summary, "BOTTOMLEFT", 0, -4)
+    frame.notes = {}
+    local anchor = frame.effects
+    for index = 1, 3 do
+        local line = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        line:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -3)
+        line:SetTextColor(1, 0.35, 0.25)
+        frame.notes[index] = line
+        anchor = line
+    end
+    local rowsHolder = CreateFrame("Frame", nil, frame)
+    rowsHolder:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -8)
+    rowsHolder:SetSize(520, IMPORT_ROWS * 18)
+    frame.rows = {}
+    for index = 1, IMPORT_ROWS do frame.rows[index] = importRow(rowsHolder, index) end
+    frame.more = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.more:SetPoint("TOPLEFT", rowsHolder, "BOTTOMLEFT", 0, -4)
+    frame.textScroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
+    frame.textScroll:SetPoint("TOPLEFT", frame.more, "BOTTOMLEFT", 0, -6)
+    frame.textScroll:SetSize(500, TEXT_AREA_HEIGHT)
+    frame.textChild = CreateFrame("Frame", nil, frame.textScroll)
+    frame.textChild:SetSize(500, TEXT_AREA_HEIGHT)
+    frame.textScroll:SetScrollChild(frame.textChild)
+    frame.textLines = {}
+    for index = 1, TEXT_LINES do
+        local line = frame.textChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        line:SetWidth(480)
+        line:SetWordWrap(true)
+        line:SetJustifyH("LEFT")
+        if index == 1 then
+            line:SetPoint("TOPLEFT", frame.textChild, "TOPLEFT", 2, 0)
+        else
+            line:SetPoint("TOPLEFT", frame.textLines[index - 1], "BOTTOMLEFT", 0, -4)
+        end
+        frame.textLines[index] = line
+    end
+    frame.checkButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.checkButton:SetSize(110, 26)
+    frame.checkButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, 12)
+    frame.checkButton:SetText(L("Check"))
+    frame.checkButton:SetScript("OnClick", function() runCheck(frame) end)
+    frame.importButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.importButton:SetSize(110, 26)
+    frame.importButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -14, 12)
+    frame.importButton:SetText(L("Import"))
+    frame.importButton:SetScript("OnClick", function() runImport(frame) end)
+    frame.importButton:Disable()
+    ns.Skin.Register(frame.checkButton, "button")
+    ns.Skin.Register(frame.importButton, "button")
+    edit:SetScript("OnTextChanged", function(self)
+        if frame.preview and frame.preview.text ~= self:GetText() then
+            frame.preview = nil
+            clearPreview(frame)
+            frame.error:SetText(L("Text changed. Check it again before importing."))
+            frame.error:SetTextColor(1, 0.82, 0.2)
+        end
+        refreshImportButtons(frame)
+    end)
+    shareUI.importFrame = frame
+    return frame
+end
+
+-- text (optional): a group text received by chat link. It is put in the box and checked at once; Import stays manual.
+-- An open window with the user's own text is never overwritten by a received text: it only says so.
+function shareUI.openImport(text)
+    local frame = shareUI.importFrame or buildImportFrame()
+    local received = type(text) == "string" and text ~= ""
+    local wasShown = frame:IsShown()
+    local ownText = frame.edit:GetText()
+    if received and wasShown and ownText ~= "" and ownText ~= text then
+        setStatus("Import window already has text. Clear it first.", true)
+        if not frame.preview then
+            frame.error:SetText(L("Import window already has text. Clear it first."))
+            frame.error:SetTextColor(1, 0.82, 0.2)
+        end
+        return
+    end
+    frame.edit:SetText("")
+    frame.preview = nil
+    clearPreview(frame)
+    frame.error:SetText(L("Paste a group text, then click Check."))
+    frame.error:SetTextColor(0.72, 0.78, 0.86)
+    refreshImportButtons(frame)
+    frame:Show()
+    if not wasShown then frame.edit:SetFocus() end
+    if received then
+        frame.edit:SetText(text)
+        frame.edit:SetCursorPosition(0)
+        runCheck(frame)
+    end
+end
+
+end)()
 
 local function wireScreenRow(row, helpText)
     row.text:HookScript("OnTextChanged", updatePreviewButtons)
@@ -6723,7 +7177,8 @@ testItemButton:SetScript("OnClick", ns.TestCurrentReady)
 addHelpTooltip(ruleNameBox, "Rule name", "Display name for this rule.")
 addHelpTooltip(ruleEnabledCheck, "Active", "Enable or disable this rule.")
 addHelpTooltip(triggerInputBox, "Triggers", "Search by spell name or enter one or more comma-separated spell IDs.")
-addHelpTooltip(triggerAddButton, "Add triggers", "Add IDs, or search a full spell name and review the result before adding.")
+addHelpTooltip(triggerAddButton, "Add triggers", "Spell IDs are the most reliable lookup. Name search depends on names available to the client and may be incomplete. Review the effect before adding.")
+addHelpTooltip(triggerInputBox, "Spell lookup", "Spell IDs are the most reliable lookup. Name search depends on names available to the client and may be incomplete. Review the effect before adding.")
 addHelpTooltip(applyEnabledCheck, "TTS", "Speak a message when this aura event occurs.")
 addHelpTooltip(applyMessageBox, "Notification message", "Message spoken when the aura appears.")
 addHelpTooltip(testApplyButton, "Test notification", "Preview this message with the selected voice and volume.")
@@ -7171,7 +7626,7 @@ function ns.createSettingsPanel()
         if not status.available then
             diagnosticsStatus:SetText(L("Native aura sound API unavailable."))
         elseif status.queued then
-            diagnosticsStatus:SetText(L("Sound changes pending until combat ends."))
+            diagnosticsStatus:SetText(L("Sound changes pending until WoW restrictions end."))
         else
             diagnosticsStatus:SetText(string.format(L("Aura sounds: %d/%d registered, %d refused."),
                 tonumber(status.registered) or 0, tonumber(status.wanted) or 0, tonumber(status.refused) or 0))
@@ -7629,6 +8084,8 @@ function ns.onEvent(self, event, ...)
         SLASH_WOWRAVOXDEBUG1 = "/wvdebug"
         SLASH_WOWRAVOXDEBUG2 = "/wvrdebug"
         SlashCmdList.WOWRAVOXDEBUG = ns.SkillTracking.HandleDebugCommand
+        SLASH_WOWRAVOXIMPORT1 = "/wvimport"
+        SlashCmdList.WOWRAVOXIMPORT = function() ns.ShareUI.openImport() end
         SLASH_WOWRAVOXTTS1 = "/wvttstest"
         SlashCmdList.WOWRAVOXTTS = function(message)
             local requestedID = trim(message)

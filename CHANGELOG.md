@@ -1,5 +1,21 @@
 # WoWraVox
 
+## 0.12.1
+
+- Chat sharing is rate-limited and robust against spam, double clicks and look-alike senders. Large groups arrive reliably (the transfer timeout extends while data keeps coming) and the maximum size of a shared group is 8 KB.
+- The import preview also lists the sounds and category cues a group would play. Specializations that do not belong to your class are not imported. Names and texts are trimmed and cut safely, and a shared text no longer doubles its `|` characters each time it is passed on.
+
+- Native category sound changes wait for encounter, Mythic+, PvP and map restrictions as well as combat, then resume on restriction-state changes. Existing registrations are preserved while waiting.
+
+- Consistent Application category / Expiration category labels, visible combat guidance, and effect tooltips explaining readable effects, own casts, unknown detection, and native category registration.
+- Spell-ID-first search hint stays gray and separate from actual input; name lookup is explicitly described as potentially incomplete.
+- Aura groups can be exported with the Export button in the group header. The Import card in the add-rule window and /wvimport take a copied group text, show a preview with its effects and texts, and always create a new group. Personal settings such as voice are not shared.
+- Ctrl-click an aura group in the list to put a short link in your chat box; press Enter to send it in the channel you are already in. Other WoWraVox users click the link and the import window opens with your group. The data travels by addon whisper, so you must stay online until they click (the offer lasts 10 minutes). Sharing is blocked during encounters, Mythic+ and PvP.
+- An imported group whose name is already taken is renamed ("Defense (2)"). The preview warns when you already track some of its effects, since both groups would announce them. Ctrl-click on the built-in Bloodlust rule says it cannot be shared.
+- Item cooldown checks do less work: scans triggered by cooldown events run at most every 0.3 s, equipment and specialization are read once per scan, and the scan no longer creates temporary tables for every tracked item.
+- Imported groups use the receiver's default text-to-speech voice. If a rule's sound is not available on your system (missing sound library or unknown sound ID), the default notification sound plays instead of silence.
+- Texts in an imported group are checked: they are length-limited, and links or colour codes in them are shown as plain text.
+
 ## 0.12.0
 
 ### Retail compatibility

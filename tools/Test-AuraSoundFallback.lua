@@ -26,14 +26,24 @@ end
 function date() return "00:00:00" end
 function GetTime() return 0 end
 function InCombatLockdown() return inCombat end
+local restrictionFrame
 function CreateFrame()
     local frame = {}
+    restrictionFrame = frame
     function frame:RegisterEvent() end
-    function frame:SetScript() end
+    function frame:SetScript(_, callback) self.onEvent = callback end
     return frame
 end
 C_Timer = { After = function(_, callback) table.insert(timers, callback) end }
-Enum = { UnitAuraSoundTrigger = { Added = 1, Removed = 2 } }
+Enum = { UnitAuraSoundTrigger = { Added = 1, Removed = 2 },
+    AddOnRestrictionType = { Combat = 0, Encounter = 1, ChallengeMode = 2, PvPMatch = 3, Map = 4, Chat = 5 },
+    AddOnRestrictionState = { Inactive = 0, Activating = 1, Active = 2 } }
+local restrictionStates = {}
+local restrictionQueryError = false
+C_RestrictedActions = { GetAddOnRestrictionState = function(kind)
+    if restrictionQueryError then error("restriction query unavailable") end
+    return restrictionStates[kind] or Enum.AddOnRestrictionState.Inactive
+end }
 local nextSoundID = 0
 C_UnitAuras = {
     AddAuraSound = function(trigger, info)
@@ -386,3 +396,44 @@ check("missing native API reports unavailable",
 C_UnitAuras = savedAuraSoundAPI
 check("undesired native signature reports suppressed",
     fallback.GetRegistrationStatus(999, "apply", rightSignature).status == "suppressed")
+
+-- An active restriction blocks native changes even with InCombatLockdown()==false.
+refresh({})
+inCombat = false
+local restrictedRule = rule({ alertCategory = "defensive", applyEnabled = true, spellIDs = { 999950 } })
+local restrictedTypes = Enum.AddOnRestrictionType
+for _, name in ipairs({ "Combat", "Encounter", "ChallengeMode", "PvPMatch", "Map" }) do
+    restrictionStates[restrictedTypes[name]] = Enum.AddOnRestrictionState.Active
+    refresh({ restrictedRule })
+    check(name .. " restriction queues without native calls out of combat",
+        #added == 0 and #removed == 0 and fallback.GetStatus().queued)
+    restrictionStates[restrictedTypes[name]] = nil
+end
+restrictionStates[restrictedTypes.Encounter] = Enum.AddOnRestrictionState.Activating
+refresh({ restrictedRule })
+check("activating restriction is already queued", #added == 0 and fallback.GetStatus().queued)
+restrictionStates[restrictedTypes.Encounter] = nil
+restrictionFrame.onEvent(restrictionFrame, "ADDON_RESTRICTION_STATE_CHANGED", restrictedTypes.Encounter, 0)
+while #timers > 0 do table.remove(timers, 1)() end
+check("restriction end resumes pending registration", registered(999950, ADDED) ~= nil and not fallback.GetStatus().queued)
+
+-- A restriction starting between Refresh and its timer preserves the old registration.
+local oldRestrictedID = registered(999950, ADDED).id
+added, removed, timers = {}, {}, {}
+fallback.Refresh({}, true)
+restrictionStates[restrictedTypes.ChallengeMode] = Enum.AddOnRestrictionState.Active
+table.remove(timers, 1)()
+check("timer rechecks restriction and preserves registered handles",
+    #removed == 0 and liveSounds[oldRestrictedID] ~= nil and fallback.GetStatus().queued)
+restrictionStates[restrictedTypes.ChallengeMode] = nil
+restrictionFrame.onEvent(restrictionFrame, "ADDON_RESTRICTION_STATE_CHANGED", restrictedTypes.ChallengeMode, 0)
+while #timers > 0 do table.remove(timers, 1)() end
+check("deferred removal resumes safely", liveSounds[oldRestrictedID] == nil)
+restrictionQueryError = true
+refresh({ restrictedRule })
+check("failed restriction query does not risk protected calls", #added == 0 and fallback.GetStatus().queued)
+restrictionQueryError = false
+restrictionStates[restrictedTypes.Chat] = Enum.AddOnRestrictionState.Active
+refresh({ restrictedRule })
+check("chat-only restriction does not block aura sound registration", registered(999950, ADDED) ~= nil)
+restrictionStates[restrictedTypes.Chat] = nil

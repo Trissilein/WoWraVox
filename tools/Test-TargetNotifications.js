@@ -31,6 +31,11 @@ const debugReport = fs.readFileSync(path.join(root, "DebugReport.lua"), "utf8").
   /^local _, ns = ...$/m,
   "local _, ns = addonName, addonNamespace",
 );
+// Real Profiles.lua: only the spec-read tests use it; the harness swaps in its mock for everything else.
+const profilesModule = fs.readFileSync(path.join(root, "Profiles.lua"), "utf8").replace(
+  /^local _, ns = \.\.\.$/m,
+  "local _, ns = addonName, addonNamespace",
+);
 const harness = fs.readFileSync(path.join(__dirname, "Test-TargetNotifications.lua"), "utf8");
 const prelude = [
   "function wipe(value) for key in pairs(value) do value[key] = nil end end",
@@ -53,6 +58,9 @@ ruleOutput,
 "end",
 "do",
 source,
+  "end",
+  "do",
+  profilesModule,
   "end",
   "do",
   simulation,

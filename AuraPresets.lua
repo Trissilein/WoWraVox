@@ -533,6 +533,9 @@ addEntry(catalog.externals, "blessing-of-protection", "Blessing of Protection", 
 addEntry(catalog.externals, "blessing-of-spellwarding", "Blessing of Spellwarding", verified(externalFields(
     "defensive", 204018, 204018, "received-aura", { sourceKey = "external:blessing-of-spellwarding" }),
     "external:blessing-of-spellwarding", "direct-aura"))
+addEntry(catalog.externals, "blessing-of-freedom", "Blessing of Freedom", verifiedFrom(externalFields(
+    "defensive", 1044, 1044, "received-aura", { sourceKey = "external:blessing-of-freedom" }),
+    "external:blessing-of-freedom", { "wowhead", "method" }, "direct-aura"))
 addEntry(catalog.externals, "time-dilation", "Time Dilation", verified(externalFields(
     "defensive", 357170, 357170, "received-aura", { sourceKey = "external:time-dilation" }),
     "external:time-dilation", "direct-aura"))

@@ -71,6 +71,7 @@ Enum = {
 
 ns = addonNamespace
 ns.Locales = { enUS = {} }
+local realProfiles = ns.Profiles  -- real Profiles.lua (loaded by the JS runner); only the spec-read tests use it
 ns.Profiles = {
     RuleMatchesCurrentSpecialization = function() return true end,
 }
@@ -102,6 +103,85 @@ do
             and played.kind == "kit" and played.value == 2468 and played.channel == "Dialog",
         played and (played.kind .. ":" .. tostring(played.value)))
     PlaySoundFile, PlaySound = oldPlaySoundFile, oldPlaySound
+end
+
+-- Sound fallback: shared media -> the rule's sound ID -> default kit. SOUNDKIT is undefined in this harness, so the default is 8959.
+do
+    local DEFAULT_KIT = 8959
+    local played, failFile, failKit = nil, false, {}
+    local oldPlaySoundFile, oldPlaySound, oldLibStub = PlaySoundFile, PlaySound, LibStub
+    PlaySoundFile = function(path, channel)
+        if failFile then return false end
+        played = { kind = "file", value = path, channel = channel }
+        return true
+    end
+    PlaySound = function(soundKitID, channel)
+        if failKit[soundKitID] == "error" then error("PlaySound rejected the kit") end
+        if failKit[soundKitID] then return false end
+        played = { kind = "kit", value = soundKitID, channel = channel }
+        return true
+    end
+    -- Library present; Fetch returns fetchedPath (nil = the sound is not shared with this client).
+    local function sharedMedia(fetchedPath)
+        LibStub = function() return { Fetch = function() return fetchedPath end } end
+    end
+    local function soundRule(fields)
+        local rule = { applySoundEnabled = true, applySoundChannel = "Dialog" }
+        for key, value in pairs(fields) do rule[key] = value end
+        return rule
+    end
+    local function play(rule)
+        played = nil
+        local result = ns.playNotificationSound(rule, "apply")
+        return result, played
+    end
+    local function isKit(sound, value)
+        return sound ~= nil and sound.kind == "kit" and sound.value == value and sound.channel == "Dialog"
+    end
+
+    -- (a) media name missing (library gone, or the sound is not shared): the rule's valid ID plays.
+    LibStub = nil
+    local ok, sound = play(soundRule({ applySoundMediaName = "Gone", applySoundKitID = 2468 }))
+    check("sound fallback (a): no library, valid ID plays the ID", ok == true and isKit(sound, 2468), tostring(sound and sound.kind))
+    sharedMedia(nil)
+    ok, sound = play(soundRule({ applySoundMediaName = "Gone", applySoundKitID = 2468 }))
+    check("sound fallback (a): library without the sound plays the ID", ok == true and isKit(sound, 2468))
+    sharedMedia("shared.ogg")
+    failFile = true
+    ok, sound = play(soundRule({ applySoundMediaName = "Gone", applySoundKitID = 2468 }))
+    failFile = false
+    check("sound fallback (a): unplayable media file falls through to the ID", ok == true and isKit(sound, 2468))
+
+    -- (b) no media and no usable ID: the default kit plays instead of silence.
+    LibStub = nil
+    for _, id in ipairs({ 0, -5, "abc" }) do
+        ok, sound = play(soundRule({ applySoundKitID = id }))
+        check("sound fallback (b): ID " .. tostring(id) .. " plays the default kit", ok == true and isKit(sound, DEFAULT_KIT))
+    end
+    ok, sound = play(soundRule({ applySoundMediaName = "Gone" }))
+    check("sound fallback (b): missing media and no ID plays the default kit", ok == true and isKit(sound, DEFAULT_KIT))
+
+    -- (c) PlaySound refuses the rule's ID (false or an error): the default kit plays; if that is refused too, nothing plays.
+    failKit[2468] = true
+    ok, sound = play(soundRule({ applySoundKitID = 2468 }))
+    check("sound fallback (c): refused ID falls back to the default kit", ok == true and isKit(sound, DEFAULT_KIT))
+    failKit[2468] = "error"
+    ok, sound = play(soundRule({ applySoundKitID = 2468 }))
+    check("sound fallback (c): ID that throws falls back to the default kit", ok == true and isKit(sound, DEFAULT_KIT))
+    failKit[2468], failKit[DEFAULT_KIT] = true, true
+    ok, sound = play(soundRule({ applySoundKitID = 2468 }))
+    check("sound fallback (c): nothing playable returns false", ok == false and sound == nil)
+    failKit[DEFAULT_KIT] = nil
+
+    -- (d) sound switched off: nothing plays, even with a broken media name or ID.
+    ok, sound = play(soundRule({ applySoundEnabled = false, applySoundMediaName = "Gone", applySoundKitID = 2468 }))
+    check("sound fallback (d): sound off plays nothing", ok == false and sound == nil)
+
+    PlaySound = nil
+    ok, sound = play(soundRule({ applySoundKitID = 2468 }))
+    check("sound fallback: no PlaySound API returns false", ok == false and sound == nil)
+
+    PlaySoundFile, PlaySound, LibStub = oldPlaySoundFile, oldPlaySound, oldLibStub
 end
 
 do
@@ -833,6 +913,351 @@ do
     check("preview context resolves the first member", ctx.item == "Alpha" and ctx.slot == "Trinket 1")
     check("rules without members have no preview context", ns.previewContext({ spellIDs = {} }) == nil)
     ns.showScreenText = realShowScreenText
+end
+
+-- Item scan throttle (queueItemScan: one scan per 0.3 s, trailing), timers stay unthrottled, and the reused
+-- cooldown reading table. The harness runTimers above ignores delays, so this block uses its own queue that
+-- honours them and walks the clock forward with runDue().
+do
+    local realDB, realScan, realAfter, realLast, realNow = WoWraVoxDB, ns.scanItemRules, C_Timer.After, ns.itemScanLast, now
+    local queue, scanTimes = {}, {}
+    local function runDue(to)
+        while true do
+            local pick
+            for index, item in ipairs(queue) do
+                -- 1e-9: 349.8 + 0.1 is 349.90000000000003 in doubles; a timer due at 349.9 must still run first.
+                if item.at <= to + 1e-9 and (not pick or item.at < queue[pick].at) then pick = index end
+            end
+            if not pick then break end
+            local item = table.remove(queue, pick)
+            now = item.at
+            item.fn()
+        end
+        now = to
+    end
+    C_Timer.After = function(delay, callback) table.insert(queue, { at = now + (delay or 0), fn = callback }) end
+    WoWraVoxDB = { items = {}, auras = {}, skills = {} }
+    ns.scanItemRules = function() table.insert(scanTimes, now); return realScan() end
+    realScan()  -- clears an itemScanPending left over by earlier tests
+    ns.itemScanLast = nil
+    scanTimes = {}
+
+    -- (a) A burst inside 0.1 s gives one scan; a request inside the 0.3 s window waits for the window end.
+    now = 200
+    ns.queueItemScan(0.05)
+    now = 200.02; ns.queueItemScan(0.1)
+    now = 200.04; ns.queueItemScan(0.05)
+    runDue(200.06)
+    check("throttle: a burst inside 0.1 s gives one scan at the first request's delay",
+        #scanTimes == 1 and math.abs(scanTimes[1] - 200.05) < 1e-9, table.concat(scanTimes, ","))
+    now = 200.07; ns.queueItemScan(0.1)
+    now = 200.08; ns.queueItemScan(0.05)
+    runDue(201)
+    check("throttle: the last request inside the window runs at the window end (0.3 s after the last scan)",
+        #scanTimes == 2 and math.abs(scanTimes[2] - 200.35) < 1e-9, table.concat(scanTimes, ","))
+    now = 205; ns.queueItemScan(0.1)
+    runDue(206)
+    check("throttle: a request after the window keeps its own delay", #scanTimes == 3 and math.abs(scanTimes[3] - 205.1) < 1e-9,
+        table.concat(scanTimes, ","))
+
+    -- (b) A cooldown-end timer is not delayed by a scan that was just throttled.
+    slotSetup()
+    local rb = makeItemRule()
+    WoWraVoxDB.items = { rb }
+    scanTimes = {}
+    now = 300
+    itemCooldown[13] = { 320, 30 }
+    ns.checkItemRule(rb)  -- cycle 320..350, ready timer due at 350.1
+    now = 349.8; ns.queueItemScan(0.1)     -- scan at 349.9
+    runDue(349.9)
+    now = 349.95; ns.queueItemScan(0.05)   -- throttled: scan would wait until 350.2
+    runDue(350.15)
+    check("timer: cooldown-end Ready fires at 350.1 although a scan is throttled to 350.2",
+        #ttsCalls == 1 and ttsCalls[1].text == "Alpha ready" and #scanTimes == 1, table.concat(scanTimes, ",") .. " tts=" .. #ttsCalls)
+    runDue(351)
+    check("timer: the throttled scan still runs afterwards at 350.2", #scanTimes == 2 and math.abs(scanTimes[2] - 350.2) < 1e-9,
+        table.concat(scanTimes, ",") .. " queued=" .. #queue)
+
+    -- (c) A cooldown storm (BAG_UPDATE_COOLDOWN every 0.05 s for 40 s): one cycle start, exactly one Ready.
+    slotSetup()
+    local rc = makeItemRule()
+    WoWraVoxDB.items = { rc }
+    local key = ns.memberKey(rc.members[1])
+    itemCooldown[13] = { 400, 30 }
+    scanTimes = {}
+    local firstState, midState
+    for i = 0, 800 do
+        local t = 400 + i * 0.05
+        runDue(t)
+        now = t
+        ns.queueItemScan(0.05)
+        if i == 4 then firstState = ns.itemState(rc, key) end
+        if i == 400 then midState = ns.itemState(rc, key) end
+    end
+    runDue(445)
+    check("storm: exactly one Ready for the cooldown", #ttsCalls == 1 and ttsCalls[1].text == "Alpha ready",
+        tostring(#ttsCalls))
+    check("storm: the cycle starts once (same state object mid-cooldown, 400..430)",
+        firstState ~= nil and midState == firstState and firstState.cycleStart == 400 and firstState.cooldownEnd == 430)
+    check("storm: the cycle is cleared after Ready", ns.itemState(rc, key) == nil)
+    local spacedOut = true
+    for k = 2, #scanTimes do
+        if scanTimes[k] - scanTimes[k - 1] < 0.3 - 1e-9 then spacedOut = false end
+    end
+    check("storm: scans are at least 0.3 s apart", spacedOut and #scanTimes >= 130 and #scanTimes <= 136,
+        "scans=" .. #scanTimes)
+
+    -- (d) The reused reading table: two consecutive reads, and per-member state for two trinkets.
+    slotSetup()
+    itemCooldown[13], itemCooldown[14] = { 90, 30 }, { 95, 60 }
+    now = 100
+    local r13 = ns.readEquippedItemCooldown(13, 111)
+    local v13 = { r13.startTime, r13.duration, r13.source }
+    local r14 = ns.readEquippedItemCooldown(14, 222)
+    check("reading reuse: trinket 1 values copied before the next read are intact, trinket 2 reads its own",
+        v13[1] == 90 and v13[2] == 30 and v13[3] == "inventory" and r14.startTime == 95 and r14.duration == 60
+        and r14.source == "inventory")
+    local realGetCooldown = GetInventoryItemCooldown
+    GetInventoryItemCooldown = function() return nil end
+    local unreadable = ns.readEquippedItemCooldown(13, 111)
+    GetInventoryItemCooldown = realGetCooldown
+    check("reading reuse: an unreadable read returns nil, not the previous values", unreadable == nil)
+    local trinkets = makeItemRule()
+    trinkets.members = { { itemID = 111, slotID = 13 }, { itemID = 222, slotID = 14 } }
+    ns.checkItemRule(trinkets)
+    local s13, s14 = ns.itemState(trinkets, "s13"), ns.itemState(trinkets, "s14")
+    check("reading reuse: each trinket keeps its own cycle",
+        s13 and s14 and s13.cycleStart == 90 and s13.cooldownEnd == 120 and s14.cycleStart == 95 and s14.cooldownEnd == 155)
+
+    -- (e) Early exit: an empty item list checks nothing.
+    local checked, realCheck = 0, ns.checkItemRule
+    ns.checkItemRule = function() checked = checked + 1 end
+    WoWraVoxDB.items = {}
+    ns.scanItemRules()
+    local emptyChecks = checked
+    WoWraVoxDB.items = { rb }
+    ns.scanItemRules()
+    ns.checkItemRule = realCheck
+    check("empty item list: scan checks nothing; one rule: scan checks it once", emptyChecks == 0 and checked == 1,
+        emptyChecks .. "/" .. checked)
+
+    -- (f) One rule with 16 members (a fixed item plus 15 slots): a scan raises no error, each member keeps its
+    -- own cycle, and the member keys are the same strings as before the key cache.
+    runDue(170)  -- drain the trinket timers of (d) first
+    slotSetup()
+    local realGetID, realGetCooldown = GetInventoryItemID, GetInventoryItemCooldown
+    local slotItems, slotCooldown = {}, {}
+    GetInventoryItemID = function(_, slot) return slotItems[slot] end
+    GetInventoryItemCooldown = function(_, slot)
+        local c = slotCooldown[slot]
+        if c then return c[1], c[2], 1 end
+        return 0, 0, 1
+    end
+    local big = makeItemRule()
+    big.members = { { itemID = 9001 } }  -- fixed item that is not equipped: silent
+    for slot = 1, 15 do
+        slotItems[slot] = 5000 + slot
+        slotCooldown[slot] = { 400 + slot, 20 + slot }  -- cycle 400+slot .. 420+2*slot
+        table.insert(big.members, { slotID = slot, itemID = 5000 + slot })
+    end
+    WoWraVoxDB.items = { big }
+    now = 410
+    local scanned, scanError = pcall(ns.scanItemRules)
+    check("16 members: a scan raises no error", scanned, tostring(scanError))
+    local cyclesOk = true
+    for slot = 1, 15 do
+        local state = ns.itemState(big, ns.memberKey(big.members[slot + 1]))
+        if not (state and state.cycleStart == 400 + slot and state.cooldownEnd == 420 + 2 * slot) then cyclesOk = false end
+    end
+    check("16 members: every slot member keeps its own cycle", cyclesOk)
+    check("16 members: the fixed unequipped member has no cycle", ns.itemState(big, ns.memberKey(big.members[1])) == nil)
+    check("member keys: same strings as before the cache",
+        ns.memberKey({ slotID = 3 }) == "s3" and ns.memberKey({ slotID = 12, itemID = 5 }) == "s12"
+        and ns.memberKey({ itemID = 9001 }) == "i9001" and ns.memberKey({ itemID = "7" }) == "i7"
+        and ns.memberKey({ itemID = 9001 }) == ns.memberKey({ itemID = 9001 }) and ns.memberKey({}) == "inil")
+    useRecordingTTS()
+    runDue(460)
+    check("16 members: each slot announces its Ready once", #ttsCalls == 15, tostring(#ttsCalls))
+    GetInventoryItemID, GetInventoryItemCooldown = realGetID, realGetCooldown
+
+    -- Restore: drain the queue (a pending scan would block every later queueItemScan), then put back the globals.
+    runDue(now + 1000)
+    WoWraVoxDB, ns.scanItemRules, C_Timer.After = realDB, realScan, realAfter
+    ns.itemScanLast, now = realLast, realNow
+    clearOutput()
+    useRecordingTTS()
+end
+
+-- Equipment snapshot per scan: a scan reads slots 1..19 once, whatever the member count; the timer path (outside a
+-- scan) reads the API directly; a throwing rule cannot leave the snapshot switched on.
+do
+    local realDB, realGetID, realCooldown, realCheck = WoWraVoxDB, GetInventoryItemID, GetInventoryItemCooldown, ns.checkItemRule
+    local worn, cooldownBy, reads = {}, {}, 0
+    GetInventoryItemID = function(_, slot) reads = reads + 1; return worn[slot] end
+    GetInventoryItemCooldown = function(_, slot)
+        local c = cooldownBy[slot]
+        if c then return c[1], c[2], 1 end
+        return 0, 0, 1
+    end
+    clearOutput()
+    useRecordingTTS()
+    for slot = 1, 16 do
+        worn[slot] = 7000 + slot
+        if slot % 2 == 0 then cooldownBy[slot] = { 100, 30 } end  -- even members: cooldown running at t=110
+    end
+    local big = makeItemRule()
+    big.members = {}
+    for slot = 1, 16 do table.insert(big.members, { itemID = 7000 + slot }) end  -- 16 fixed-item members
+    WoWraVoxDB = { items = { big }, auras = {}, skills = {} }
+
+    -- (a) One scan: 19 equipment reads for 16 members, same cycles as the per-member search gave.
+    now = 110
+    reads = 0
+    ns.scanItemRules()
+    check("16 fixed members: one scan reads the equipment 19 times", reads == 19, tostring(reads))
+    local cyclesOk = true
+    for slot = 1, 16 do
+        local state = ns.itemState(big, "i" .. (7000 + slot))
+        if slot % 2 == 0 then
+            if not (state and state.slotID == slot and state.cycleStart == 100 and state.cooldownEnd == 130) then cyclesOk = false end
+        elseif state ~= nil then
+            cyclesOk = false
+        end
+    end
+    check("16 fixed members: same cycles as before (even members cycle in their slot, odd ones none)", cyclesOk)
+
+    -- (b) Equipment changes between two scans: item 7002 moves from slot 2 to slot 17; the second scan reads again.
+    worn[2], worn[17] = nil, 7002
+    reads = 0
+    now = 111
+    ns.scanItemRules()
+    check("second scan re-reads the equipment (19 reads)", reads == 19, tostring(reads))
+    check("second scan sees the moved item: its old cycle in slot 2 is dropped", ns.itemState(big, "i7002") == nil)
+
+    -- (c) Timer path: outside a scan the flag is off and the slot is read live.
+    check("outside a scan the snapshot is off", ns.equipSnapshotActive == false)
+    local timerRule = makeItemRule()
+    timerRule.members = { { slotID = 3, itemID = 7003 } }
+    worn[3] = 8888
+    reads = 0
+    ns.checkItemRule(timerRule)
+    check("timer path reads the slot directly and follows the new item",
+        reads == 1 and timerRule.members[1].itemID == 8888, tostring(reads) .. " " .. tostring(timerRule.members[1].itemID))
+    check("timer path leaves the snapshot off", ns.equipSnapshotActive == false)
+
+    -- (d) A throwing rule: the error reaches the caller unchanged and the snapshot is switched off again.
+    ns.checkItemRule = function() error("scan boom", 0) end
+    local scanOk, scanErr = pcall(ns.scanItemRules)
+    ns.checkItemRule = realCheck
+    check("a throwing rule ends the scan with its own error", not scanOk and tostring(scanErr):find("scan boom", 1, true) ~= nil,
+        tostring(scanErr))
+    check("a throwing rule cannot leave the snapshot switched on", ns.equipSnapshotActive == false)
+    reads = 0
+    ns.getEquippedItemID(3)
+    check("after the failed scan a lookup reads the API directly", reads == 1, tostring(reads))
+
+    GetInventoryItemID, GetInventoryItemCooldown = realGetID, realCooldown
+    WoWraVoxDB = realDB
+    clearOutput()
+    useRecordingTTS()
+end
+
+-- Spec snapshot per scan: one spec read per scan for all spec-bound rules; the timer path reads live; an unknown
+-- spec keeps the per-rule read; a throwing rule clears the snapshot. Real Profiles.lua; the mocked API counts calls.
+do
+    local realDB, realCheckMember, realCheck, realGetID = WoWraVoxDB, ns.checkItemMember, ns.checkItemRule, GetInventoryItemID
+    local realSpec, realSpecInfo, mockProfiles = GetSpecialization, GetSpecializationInfo, ns.Profiles
+    local specIndex, specIDByIndex = 1, { 262, 263 }
+    local specReads, infoReads, memberChecks, specInScan = 0, 0, 0, {}
+    GetSpecialization = function() specReads = specReads + 1; return specIndex end
+    GetSpecializationInfo = function(index) infoReads = infoReads + 1; return specIDByIndex[index], "Spec" .. index end
+    GetInventoryItemID = function() return nil end
+    ns.Profiles = realProfiles
+    ns.checkItemMember = function()
+        memberChecks = memberChecks + 1
+        table.insert(specInScan, ns.itemScanSpecID)
+    end
+    local function specRule(specID)
+        local rule = makeItemRule()
+        rule.members = { { itemID = 9001 } }
+        rule.specializationIDs = specID and { specID } or nil
+        return rule
+    end
+    local function resetCounts()
+        specReads, infoReads, memberChecks = 0, 0, 0
+        specInScan = {}
+    end
+
+    -- (a) 16 spec-bound rules, one scan: GetSpecialization and GetSpecializationInfo run exactly once.
+    WoWraVoxDB = { items = {}, auras = {}, skills = {} }
+    for _ = 1, 16 do table.insert(WoWraVoxDB.items, specRule(262)) end
+    now = 200
+    resetCounts()
+    ns.scanItemRules()
+    check("16 spec-bound rules: one scan reads the spec once (GetSpecialization and GetSpecializationInfo)",
+        specReads == 1 and infoReads == 1, specReads .. "/" .. infoReads)
+    check("16 spec-bound rules: every rule matches the scanned spec and is checked", memberChecks == 16, tostring(memberChecks))
+    check("the spec is published to the rules during the scan", #specInScan == 16 and specInScan[1] == 262
+        and specInScan[16] == 262)
+    check("after a scan the spec snapshot is cleared", ns.itemScanSpecID == nil)
+
+    -- (b) Spec change between two scans: the second scan sees Spec 263 and matches only the 263 rule.
+    table.insert(WoWraVoxDB.items, specRule(263))
+    specIndex = 2
+    now = 201
+    resetCounts()
+    ns.scanItemRules()
+    check("spec change between scans is seen: second scan re-reads and checks only the 263 rule",
+        specReads == 1 and memberChecks == 1 and specInScan[1] == 263, specReads .. "/" .. memberChecks)
+
+    -- (c) Timer path (outside a scan): every call reads the spec live.
+    resetCounts()
+    specIndex = 1
+    ns.checkItemRule(specRule(262))
+    check("timer path reads the spec live and checks a matching rule",
+        specReads == 1 and memberChecks == 1, specReads .. "/" .. memberChecks)
+    specIndex = 2
+    ns.checkItemRule(specRule(262))
+    check("timer path follows a spec change: the 262 rule is skipped under 263",
+        specReads == 2 and memberChecks == 1, specReads .. "/" .. memberChecks)
+    check("the timer path leaves no spec snapshot behind", ns.itemScanSpecID == nil)
+
+    -- (d) Spec unknown: the scan read gets nil, so every spec-bound rule reads itself (old behavior, no cache);
+    -- an unrestricted rule still runs.
+    GetSpecialization = function() specReads = specReads + 1; return nil end
+    WoWraVoxDB.items = {}
+    for _ = 1, 16 do table.insert(WoWraVoxDB.items, specRule(262)) end
+    table.insert(WoWraVoxDB.items, specRule(nil))
+    now = 202
+    resetCounts()
+    ns.scanItemRules()
+    check("spec unknown: the scan read plus 16 per-rule reads (17), only the unrestricted rule is checked",
+        specReads == 17 and infoReads == 0 and memberChecks == 1, specReads .. "/" .. infoReads .. "/" .. memberChecks)
+    GetSpecialization = function() specReads = specReads + 1; return specIndex end
+
+    -- (e) A throwing rule inside a scan: the error reaches the caller and the spec snapshot is cleared.
+    ns.checkItemMember = function() error("scan boom", 0) end
+    specIndex = 1
+    now = 203
+    local scanOk, scanErr = pcall(ns.scanItemRules)
+    check("a throwing rule ends the scan with its own error", not scanOk and tostring(scanErr):find("scan boom", 1, true) ~= nil,
+        tostring(scanErr))
+    check("a throwing rule cannot leave the spec snapshot set", ns.itemScanSpecID == nil)
+    ns.checkItemMember = function()
+        memberChecks = memberChecks + 1
+        table.insert(specInScan, ns.itemScanSpecID)
+    end
+    resetCounts()
+    ns.checkItemRule(specRule(262))
+    check("after the failed scan the timer path reads the spec live again", specReads == 1, tostring(specReads))
+
+    GetSpecialization, GetSpecializationInfo = realSpec, realSpecInfo
+    GetInventoryItemID = realGetID
+    ns.checkItemMember, ns.checkItemRule = realCheckMember, realCheck
+    ns.Profiles = mockProfiles
+    WoWraVoxDB = realDB
+    clearOutput()
+    useRecordingTTS()
 end
 
 -- Holy Armaments migration: linked pair -> one active chargeGained rule, partner disabled, link fields dropped.
@@ -1678,4 +2103,44 @@ do
     ns._Aura.processAura(264735, false, "UNIT_AURA")
     check("without a registered native word the application is spoken", #spokenTTS == 1 and spokenTTS[1] == "Def CD", tostring(spokenTTS[1]))
     ns._Aura.queueTTS = realQueue
+end
+
+-- Detection evidence and native output are separate in player-facing combat information.
+do
+    local oldSecrecy, oldSpeak = ns._Aura.auraSecrecy, ns._Aura.addonCanSpeak
+    local oldTooltip, oldOutput = GameTooltip, ns.RuleOutput.Decide
+    local secrecy, own = "never", false
+    ns._Aura.auraSecrecy = function() return secrecy end
+    ns._Aura.addonCanSpeak = function(_, rule) return own and rule and rule.castByAuraID[42] == 7 end
+    local rule = { castByAuraID = { [42] = 7 } }
+    check("combat information identifies readable effects", ns._Aura.combatInfo(42, rule) == "spoken")
+    secrecy, own = "contextual", true
+    check("combat information uses rule cast mapping", ns._Aura.combatInfo(42, rule) == "cast")
+    own = false
+    check("combat information identifies restricted effects", ns._Aura.combatInfo(42, rule) == "sound")
+    secrecy = "unknown"
+    check("combat information does not promise unknown effects", ns._Aura.combatInfo(42, rule) == "unknown")
+    local lines, status, selected, mediaRegistered = {}, "pending", true, false
+    GameTooltip = { AddLine = function(_, text) lines[#lines + 1] = text end }
+    ns.RuleOutput.Decide = function(_, _, options)
+        check("tooltip output uses the exact effect ID", options.spellID == 42)
+        return { native = { selected = selected, category = "defensive", status = status },
+            media = { native = { status = mediaRegistered and "registered" or "suppressed" } } }
+    end
+    ns._Aura.addCombatTooltip(42, rule)
+    check("tooltip reports pending category without claiming playback", table.concat(lines):find("registration pending", 1, true) ~= nil)
+    lines, status = {}, "failed"
+    ns._Aura.addCombatTooltip(42, rule)
+    check("tooltip reports failed category registration", table.concat(lines):find("registration failed", 1, true) ~= nil)
+    lines, status = {}, "registered"
+    ns._Aura.addCombatTooltip(42, rule)
+    check("tooltip explains registered category priority", table.concat(lines):find("instead of custom text", 1, true) ~= nil)
+    lines, selected = {}, false
+    ns._Aura.addCombatTooltip(42, rule)
+    check("tooltip warns about missing combat category", table.concat(lines):find("may remain silent", 1, true) ~= nil)
+    lines, mediaRegistered = {}, true
+    ns._Aura.addCombatTooltip(42, rule)
+    check("registered native media prevents a false no-output warning", table.concat(lines):find("may remain silent", 1, true) == nil)
+    GameTooltip, ns.RuleOutput.Decide = oldTooltip, oldOutput
+    ns._Aura.auraSecrecy, ns._Aura.addonCanSpeak = oldSecrecy, oldSpeak
 end

@@ -228,7 +228,7 @@ function fallback.GetRegistrationStatus(spellID, eventKey, signature)
         return registrationStatus("failed", "stale-registration", signature, current)
     end
     if wanted and wanted.signature == signature then
-        return registrationStatus("pending", queued and "combat-queued" or "registration-pending", signature)
+        return registrationStatus("pending", queued and "restriction-queued" or "registration-pending", signature)
     end
     return registrationStatus("suppressed", "not-desired", signature)
 end
@@ -312,9 +312,28 @@ local function buildDesired(rules)
     end
 end
 
+-- Registration is restricted throughout encounters/keys/PvP as well as direct combat.
+-- Query the state (including Activating), not IsAddOnRestrictionActive: that predicate
+-- deliberately returns false while ADDON_RESTRICTION_STATE_CHANGED is being dispatched.
+function fallback.IsRegistrationRestricted()
+    if InCombatLockdown and InCombatLockdown() then return true end
+    local api = C_RestrictedActions
+    local types = Enum and Enum.AddOnRestrictionType
+    if not (api and type(api.GetAddOnRestrictionState) == "function" and types) then return false end
+    local inactive = Enum.AddOnRestrictionState and Enum.AddOnRestrictionState.Inactive or 0
+    for _, name in ipairs({ "Combat", "Encounter", "ChallengeMode", "PvPMatch", "Map" }) do
+        if types[name] ~= nil then
+            local ok, state = pcall(api.GetAddOnRestrictionState, types[name])
+            if not ok or type(state) ~= "number" or (issecretvalue and issecretvalue(state)) then return true end
+            if state ~= inactive then return true end
+        end
+    end
+    return false
+end
+
 local function reconcile(force)
     scheduled = false
-    if InCombatLockdown and InCombatLockdown() then
+    if fallback.IsRegistrationRestricted() then
         queued = true
         lastStatus.queued = true
         updateStatus()
@@ -389,7 +408,7 @@ local function reconcile(force)
         retryScheduled = true
         C_Timer.After(3, function()
             retryScheduled = false
-            if InCombatLockdown and InCombatLockdown() then
+            if fallback.IsRegistrationRestricted() then
                 queued = true
                 lastStatus.queued = true
                 updateStatus()
@@ -416,7 +435,7 @@ end
 function fallback.Refresh(rules, force)
     if type(rules) == "table" then lastRules = rules end
     buildDesired(lastRules)
-    if InCombatLockdown and InCombatLockdown() then
+    if fallback.IsRegistrationRestricted() then
         queued = true
         lastStatus.queued = true
         updateStatus()
@@ -427,6 +446,9 @@ end
 
 local regenFrame = CreateFrame("Frame")
 regenFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+if C_RestrictedActions and type(C_RestrictedActions.GetAddOnRestrictionState) == "function" then
+    regenFrame:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED")
+end
 regenFrame:SetScript("OnEvent", function()
     if queued then
         wipe(failed)

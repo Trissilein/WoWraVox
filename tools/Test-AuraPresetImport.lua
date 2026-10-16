@@ -243,13 +243,13 @@ end
 do
     selfBuffs = { [findEntry("power-infusion").castID] = true }
     local speaks = ui.describe(ui.model(66).items["power-infusion"])
-    check("detail bar says the addon speaks the aura", speaks.output == "The addon speaks this aura."
+    check("detail bar says the addon speaks the aura", speaks.output == "Your own cast can use custom text. Receiving this effect from another player may require the configured category sound."
         and speaks.name == "Spell 10060" and speaks.meta:find("Offensive", 1, true) == 1
         and speaks.meta:find("No talent needed", 1, true) ~= nil, speaks.meta)
     selfBuffs = {}
     local silent = ui.describe(ui.model(66).items["power-infusion"])
-    check("detail bar says WoW plays the category word", silent.output
-        == "WoW plays the category word (the addon cannot read this aura in combat).")
+    check("detail bar leaves unknown combat availability explicit", silent.output
+        == "Combat detection cannot currently be determined. A configured category sound may announce this effect.")
     local unlearned = ui.describe(ui.model(66).items["paladin-class-divine-shield"])
     check("detail bar shows why an effect is unavailable", unlearned.meta:find(
         ui.model(66).items["paladin-class-divine-shield"].reason, 1, true) ~= nil, unlearned.meta)
@@ -371,7 +371,7 @@ do
         and calls[1][3] == sentinelTile and calls[1][4] == "ANCHOR_RIGHT")
     check("tooltip shows the spell for the aura ID", #callsNamed("SetSpellByID") == 1
         and callsNamed("SetSpellByID")[1][3] == sentinelAura, tostring(sentinelAura))
-    check("available tile adds no reason line", #callsNamed("AddLine") == 0 and #callsNamed("SetText") == 0)
+    check("available tile explains combat without an unavailable reason", #callsNamed("AddLine") == 2 and #callsNamed("SetText") == 0)
     check("tooltip is shown on hover", #callsNamed("Show") == 1)
     sentinelTile.scripts.OnLeave(sentinelTile)
     check("leaving hides the tooltip", #callsNamed("Hide") == 1)
@@ -379,8 +379,8 @@ do
     calls = {}
     shieldTile.scripts.OnEnter(shieldTile)
     local reasonLines = callsNamed("AddLine")
-    check("unavailable tile adds the localized reason line", #reasonLines == 1
-        and shieldTile.item.reason ~= nil and reasonLines[1][3] == shieldTile.item.reason)
+    check("unavailable tile adds the localized reason line", #reasonLines == 3
+        and shieldTile.item.reason ~= nil and reasonLines[3][3] == shieldTile.item.reason)
     shieldTile.scripts.OnLeave(shieldTile)
 
     calls, failSpell = {}, true
