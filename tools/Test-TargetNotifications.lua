@@ -639,7 +639,7 @@ check("starter fill sets itemID, message and clears starter",
 local function makeSlotRule(message)
     local rule = makeItemRule()
     rule.members = { { itemID = 111, slotID = 13 } }
-    rule.message = message or "Trinket 1 ready"
+    rule.message = message or "{slot} ready"
     return rule
 end
 local function slotSetup()
@@ -671,7 +671,7 @@ step(slotRule, 110, { 0, 0 }, 333)
 step(slotRule, 125, { 0, 0 })
 check("swap mid-cooldown: no Ready for the new item", #ttsCalls == 0, ttsCalls[1] and ttsCalls[1].text)
 check("swap updates the last seen item", slotRule.members[1].itemID == 333 and slotRule.members[1].slotID == 13)
-check("slot swap keeps a custom or slot-default message", slotRule.message == "Trinket 1 ready")
+check("slot swap keeps a custom or slot-default message", slotRule.message == "{slot} ready")
 
 slotSetup()
 slotRule = makeSlotRule()
@@ -729,7 +729,7 @@ check("slot names for the trinket slots", ns.slotName(13) == "Trinket 1" and ns.
 local toSlot = makeItemRule()
 ns.retargetItemRule(toSlot, 1, 222, "Beta", "icon", 14)
 check("retarget into slot mode switches the generated message to the slot default",
-    toSlot.members[1].slotID == 14 and toSlot.message == "Trinket 2 ready" and toSlot.members[1].itemID == 222)
+    toSlot.members[1].slotID == 14 and toSlot.message == "{slot} ready" and toSlot.members[1].itemID == 222)
 ns.retargetItemRule(toSlot, 1, 111, "Alpha", "icon", nil)
 check("retarget out of slot mode restores the item default",
     toSlot.members[1].slotID == nil and toSlot.message == "Alpha ready")
@@ -868,9 +868,9 @@ do
     -- Add / duplicate / default text.
     local solo = makeItemRule()
     solo.members = { { itemID = 111, slotID = 13 } }
-    solo.message = "Trinket 1 ready"
+    solo.message = "{slot} ready"
     check("adding a duplicate slot is refused", ns.addItemMember(solo, { slotID = 13, itemID = 999 }) == false
-        and #solo.members == 1 and solo.message == "Trinket 1 ready")
+        and #solo.members == 1 and solo.message == "{slot} ready")
     check("adding a second member switches the generated default to {item} ready",
         ns.addItemMember(solo, { slotID = 14, itemID = 222 }) == true and #solo.members == 2 and solo.message == "{item} ready")
     check("a fixed item twice is refused, a slot member's last seen item does not count",
@@ -888,7 +888,7 @@ do
     modes.members = { { itemID = 111 } }
     equipped[13], equipped[14] = 111, 222
     check("item member to slot mode takes the slot it sits in",
-        ns.setItemMemberMode(modes, 1, true) == true and modes.members[1].slotID == 13 and modes.message == "Trinket 1 ready")
+        ns.setItemMemberMode(modes, 1, true) == true and modes.members[1].slotID == 13 and modes.message == "{slot} ready")
     check("slot member back to item mode keeps the carried item",
         ns.setItemMemberMode(modes, 1, false) == true and modes.members[1].slotID == nil
         and modes.members[1].itemID == 111 and modes.message == "Alpha ready")
@@ -1391,6 +1391,7 @@ do
     local realAfter = C_Timer.After
     local realGetProfile = ns.getRuleScreenProfile
     local realApplyStyle, realPosition = ns.applyScreenFrameStyle, ns.positionScreenFrame
+local realFontStyle, realFit = ns.applyScreenFontStyle, ns.fitScreenFrame
     local realFrames, realPool = ns.screenFrames, ns.screenFramePool
     local callbacks, created = {}, 0
     local function newUIObject()
@@ -1413,8 +1414,9 @@ do
         function object:Hide() self.shown = false end
         function object:Show() self.shown = true end
         function object:SetText(value) self.value = value end
-        function object:CreateFontString()
+        function object:CreateFontString(_, _, template)
             local font = newUIObject()
+            font.font = template
             return font
         end
         return object
@@ -1435,6 +1437,8 @@ do
         return rule.screenProfiles[eventKey]
     end
     ns.applyScreenFrameStyle = function() end
+    ns.applyScreenFontStyle = function() end
+    ns.fitScreenFrame = function() end
     ns.positionScreenFrame = function() end
 
     local first, duplicate = { id = "same" }, { id = "same" }
@@ -1477,7 +1481,64 @@ do
     CreateFrame, UIParent, C_Timer.After = realCreateFrame, realUIParent, realAfter
     ns.getRuleScreenProfile = realGetProfile
     ns.applyScreenFrameStyle, ns.positionScreenFrame = realApplyStyle, realPosition
+    ns.applyScreenFontStyle, ns.fitScreenFrame = realFontStyle, realFit
     ns.screenFrames, ns.screenFramePool = realFrames, realPool
+end
+
+-- Screen text: a FontString without a font raises "Font not set" on SetText. The font is set first, and a
+-- font file that does not load falls back to the Blizzard font.
+do
+    local function fontString(template)
+        local fs = { font = template }
+        function fs:SetFont(path, size, flags)
+            if path == "Fonts\\MISSING.TTF" then return end
+            self.font = path
+        end
+        function fs:GetFont() return self.font end
+        function fs:SetFontObject(object) self.font = object end
+        function fs:SetText(value)
+            if not self.font then error("Font not set") end
+            self.value = value
+        end
+        function fs:SetTextColor() end
+        function fs:SetShadowColor() end
+        function fs:SetShadowOffset() end
+        return fs
+    end
+    local realFrame, realFontChoice = ns.getScreenFrame, ns.getScreenFontChoiceByKey
+    local realProfile, realFitNow = ns.getRuleScreenProfile, ns.fitScreenFrame
+    local realPlace, realTimer = ns.positionScreenFrame, C_Timer.After
+    ns.positionScreenFrame = function() end
+    C_Timer.After = function() end
+    ns.fitScreenFrame = function() end
+    ns.getRuleScreenProfile = function() return { enabled = true, font = "Friz Quadrata", style = "NONE",
+        size = 32, color = { r = 1, g = 1, b = 1, a = 1 } } end
+    ns.getScreenFontChoiceByKey = function() return { key = "Friz Quadrata", path = "Fonts\\FRIZQT__.TTF" } end
+    local frame = { text = fontString(nil), Show = function() end }
+    ns.getScreenFrame = function() return frame end
+
+    -- Frames created from the template already have a font: SetText works.
+    local templated = { text = fontString("GameFontNormal"), Show = function() end }
+    ns.getScreenFrame = function() return templated end
+    local okTemplate = pcall(ns.showScreenText, { id = "t" }, "apply", "Hello")
+    check("screen text: a templated FontString accepts text", okTemplate and templated.text.value == "Hello")
+
+    -- Bare FontString: the font is applied before SetText, so no error.
+    ns.getScreenFrame = function() return frame end
+    local okBare = pcall(ns.showScreenText, { id = "b" }, "apply", "Bare")
+    check("screen text: a bare FontString gets its font before the text", okBare and frame.text.value == "Bare"
+        and frame.text.font ~= nil)
+
+    -- Font file that does not load: fall back to the Blizzard font, text still shows.
+    frame.text = fontString(nil)
+    ns.getScreenFontChoiceByKey = function() return { key = "Broken", path = "Fonts\\MISSING.TTF" } end
+    local okFallback = pcall(ns.showScreenText, { id = "f" }, "apply", "Fallback")
+    check("screen text: a font file that does not load falls back to Friz Quadrata",
+        okFallback and frame.text.value == "Fallback" and frame.text.font == "Fonts\\FRIZQT__.TTF")
+
+    ns.getScreenFrame, ns.getScreenFontChoiceByKey = realFrame, realFontChoice
+    ns.getRuleScreenProfile, ns.fitScreenFrame = realProfile, realFitNow
+    ns.positionScreenFrame, C_Timer.After = realPlace, realTimer
 end
 
 -- Help tooltips: extra lines in order, a font override only where asked, reset by ns.resetTooltipFonts.
@@ -1870,10 +1931,16 @@ do
     local starter = { starter = "trinket", name = "Add a trinket", members = {} }
     ns.retargetItemRule(starter, 1, 242395, "Astral Antenna", 1, 13)
     check("picking a trinket for the starter names the rule after the slot",
-        starter.name == "Trinket 1" and starter.message == "Trinket 1 ready", starter.name .. " / " .. tostring(starter.message))
+        starter.name == "Trinket 1" and starter.message == "{slot} ready", starter.name .. " / " .. tostring(starter.message))
     local exactPick = { starter = "trinket", name = "Add a trinket", members = {} }
     ns.retargetItemRule(exactPick, 1, 242395, "Astral Antenna", 1, nil)
     check("picking one exact item keeps the item's name", exactPick.name == "Astral Antenna")
+    local oldSlot = { name = "Trinket 1", message = "Trinket 1 ready", members = { { slotID = 13, itemID = 111 } } }
+    ns.nameSlotRule(oldSlot)
+    local ownSlot = { name = "Trinket 1", message = "Blink!", members = { { slotID = 13, itemID = 111 } } }
+    ns.nameSlotRule(ownSlot)
+    check("an older generated slot text switches to {slot}, a custom text stays",
+        oldSlot.message == "{slot} ready" and ownSlot.message == "Blink!")
 end
 
 -- Shipped starter set: Bloodlust, one rule per trinket slot, nothing else.
@@ -1891,8 +1958,8 @@ do
         and db.items[1].members[1].slotID == 13 and db.items[2].members[1].slotID == 14
         and db.items[1].members[1].itemID == nil and #db.items[1].members == 1)
     check("starter: trinket rules are named and worded after the slot",
-        db.items[1].name == "Trinket 1" and db.items[1].message == "Trinket 1 ready"
-        and db.items[2].name == "Trinket 2" and db.items[2].message == "Trinket 2 ready")
+        db.items[1].name == "Trinket 1" and db.items[1].message == "{slot} ready"
+        and db.items[2].name == "Trinket 2" and db.items[2].message == "{slot} ready")
     check("starter: the old 'Add a trinket' placeholder is gone",
         db.items[1].starter == nil and db.items[2].starter == nil)
     local item = db.items[1]
@@ -2143,4 +2210,48 @@ do
     check("registered native media prevents a false no-output warning", table.concat(lines):find("may remain silent", 1, true) == nil)
     GameTooltip, ns.RuleOutput.Decide = oldTooltip, oldOutput
     ns._Aura.auraSecrecy, ns._Aura.addonCanSpeak = oldSecrecy, oldSpeak
+end
+
+-- Sharing item rules: what Ctrl-click on an item rule shares (ns.ShareUI.groupForRule). Logic only: the row handler
+-- (Ctrl-click on a real list row) and the chat link are not testable here.
+do
+    local realDB = WoWraVoxDB
+    local groupForRule = ns.ShareUI.groupForRule
+    local function itemRule(name, members) return { name = name, members = members } end
+    local t1 = itemRule("Trinket 1", { { slotID = 13 } })
+    local t2 = itemRule("Trinket 2", { { slotID = 14, itemID = 193762 } })
+    local head = itemRule("Head", { { slotID = 1 } })
+    local hoof = itemRule("Hoof", { { itemID = 193762 } })
+    local mixed = itemRule("Mixed", { { itemID = 5 }, { slotID = 13 } })
+    local starter = { starter = "trinket", name = "Add a trinket", members = {} }
+    local function same(group, ...)
+        local expected = { ... }
+        if #group ~= #expected then return false end
+        for i = 1, #expected do
+            if group[i] ~= expected[i] then return false end
+        end
+        return true
+    end
+    WoWraVoxDB = { items = { t1, head, t2, hoof, mixed, starter }, auras = {}, skills = {} }
+    check("share group: trinket 1 shares both trinket rules, in list order", same(groupForRule(t1), t1, t2))
+    check("share group: trinket 2 shares the same two", same(groupForRule(t2), t1, t2))
+    check("share group: another slot rule shares only itself", same(groupForRule(head), head))
+    check("share group: an exact-item rule shares only itself", same(groupForRule(hoof), hoof))
+    check("share group: a trinket slot that is not the first member does not count", same(groupForRule(mixed), mixed))
+    check("share group: an empty starter shares only itself", same(groupForRule(starter), starter))
+    local aura = { name = "aura" }
+    check("share group: a rule without members shares only itself", same(groupForRule(aura), aura))
+    local outsider = itemRule("Outsider", { { slotID = 13 } })
+    check("share group: a trinket rule missing from the list is still included", same(groupForRule(outsider), t1, t2, outsider))
+    local many = {}
+    for i = 1, 10 do many[i] = itemRule("T" .. i, { { slotID = i % 2 == 0 and 14 or 13 } }) end
+    WoWraVoxDB = { items = many }
+    local first, last = groupForRule(many[1]), groupForRule(many[10])
+    check("share group: at most 8 rules, the clicked one always among them", #first == 8 and first[1] == many[1]
+        and #last == 8 and last[8] == many[10] and last[1] == many[1])
+    WoWraVoxDB = nil
+    check("share group: no database gives only the clicked rule", same(groupForRule(t1), t1))
+    WoWraVoxDB = { auras = {} }
+    check("share group: no item list gives only the clicked rule", same(groupForRule(t2), t2))
+    WoWraVoxDB = realDB
 end

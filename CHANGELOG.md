@@ -1,5 +1,12 @@
 # WoWraVox
 
+## 0.13.0
+
+- Trinket rules can be shared as a pair: Ctrl-click one of the trinket rules and both are posted as one group. The import creates one item rule per trinket, and the preview lists both with their slots and warns when a slot is already tracked. Other item rules are shared on their own.
+- Trinket rules use the {slot} wildcard in their ready text, so the announcement says "Trinket 1" or "Trinket 2" in every language and a swapped trinket keeps the same wording. Existing trinket rules with the generated text switch to it on the next load; texts you wrote yourself stay.
+- The German interface uses "Trinket" for the trinket slots.
+- Fixed: on-screen text could fail with "Font not set" when a font was not yet set on a new text frame.
+
 ## 0.12.1
 
 - Chat sharing is rate-limited and robust against spam, double clicks and look-alike senders. Large groups arrive reliably (the transfer timeout extends while data keeps coming) and the maximum size of a shared group is 8 KB.

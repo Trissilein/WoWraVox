@@ -1578,20 +1578,33 @@ function ns.getScreenFrameKey(rule, eventKey)
     return tostring(rule and rule.id or rule) .. ":" .. tostring(eventKey)
 end
 
-function ns.applyScreenFrameStyle(frame, profile)
+-- Font, colour and shadow without measuring. The font must exist before the first SetText: a FontString
+-- without a font raises "Font not set". A font file that does not load falls back to the Blizzard font.
+function ns.applyScreenFontStyle(frame, profile)
     if not (frame and frame.text and profile) then return end
     local font = ns.getScreenFontChoiceByKey(profile.font)
     local style = ns.getScreenStyleChoice(profile.style)
-    frame.text:SetFont(font.path, ns.getScreenSizeValue(profile.size), style.flags or "")
-    local color = ns.copyScreenColor(profile.color)
-    frame.text:SetTextColor(color.r, color.g, color.b, color.a)
-    if style.shadow then
-        frame.text:SetShadowColor(0, 0, 0, style.shadowAlpha or 1)
-        frame.text:SetShadowOffset(style.shadowX or 2, style.shadowY or -2)
-    else
-        frame.text:SetShadowColor(0, 0, 0, 0)
-        frame.text:SetShadowOffset(0, 0)
+    local text = frame.text
+    local size, flags = ns.getScreenSizeValue(profile.size), style.flags or ""
+    if not (pcall(text.SetFont, text, font.path, size, flags) and text:GetFont()) then
+        if not (pcall(text.SetFont, text, "Fonts\\FRIZQT__.TTF", size, flags) and text:GetFont()) then
+            text:SetFontObject(GameFontNormal)
+        end
     end
+    local color = ns.copyScreenColor(profile.color)
+    text:SetTextColor(color.r, color.g, color.b, color.a)
+    if style.shadow then
+        text:SetShadowColor(0, 0, 0, style.shadowAlpha or 1)
+        text:SetShadowOffset(style.shadowX or 2, style.shadowY or -2)
+    else
+        text:SetShadowColor(0, 0, 0, 0)
+        text:SetShadowOffset(0, 0)
+    end
+end
+
+function ns.applyScreenFrameStyle(frame, profile)
+    if not (frame and frame.text and profile) then return end
+    ns.applyScreenFontStyle(frame, profile)
     ns.fitScreenFrame(frame) -- font / size changed: re-measure the current text
 end
 
@@ -1839,7 +1852,8 @@ function ns.createScreenFrame(rule, eventKey)
     frame.anchorBorder:SetBackdropColor(0, 0, 0, 0)
     frame.anchorBorder:SetBackdropBorderColor(0.95, 0.72, 0.25, 1)
     frame.anchorBorder:Hide()
-    frame.text = frame:CreateFontString(nil, "OVERLAY")
+    -- Template font: a FontString without a font raises "Font not set" on its first SetText.
+    frame.text = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.text:SetPoint("CENTER", frame, "CENTER", 0, 0)
     frame.text:SetJustifyH("CENTER")
     frame.text:SetJustifyV("MIDDLE")
@@ -1946,8 +1960,9 @@ function ns.showScreenText(rule, eventKey, message, force)
     frame.generation = (frame.generation or 0) + 1
     local generation = frame.generation
     frame.active = true
+    ns.applyScreenFontStyle(frame, profile) -- the font must be set before the text is assigned
     frame.text:SetText(message)
-    ns.applyScreenFrameStyle(frame, profile) -- also fits the frame to the text
+    ns.fitScreenFrame(frame) -- fits the frame to the text
     ns.positionScreenFrame(frame, profile)
     frame:Show()
     C_Timer.After(3, function()
@@ -2656,8 +2671,9 @@ function ns.slotName(slotID)
     return string.format(L("Slot %d"), tonumber(slotID) or 0)
 end
 
+-- {slot} is resolved at announcement time (ns.itemContext), so the text follows the slot in any language.
 function ns.slotDefaultMessage(slotID)
-    return ns.slotName(slotID) .. " " .. L("ready")
+    return "{slot} " .. L("ready")
 end
 
 -- itemSwapAt[member] = time a slot member last saw a different item: the cooldown running then is the
@@ -2962,6 +2978,9 @@ function ns.nameSlotRule(rule)
     local first = ns.itemMembers(rule)[1]
     if not (first and first.slotID) then return end
     local slotName = ns.slotName(first.slotID)
+    -- Older profiles carry the generated "<slot name> ready" text; switch it to the {slot} wildcard.
+    -- Any other text is the user's and stays.
+    if rule.message == slotName .. " " .. L("ready") then rule.message = ns.slotDefaultMessage(first.slotID) end
     if rule.name == slotName then return end
     local candidates = {}
     for _, itemID in ipairs({ first.itemID or 0, ns.getEquippedItemID(first.slotID) or 0 }) do
@@ -3629,8 +3648,10 @@ function refreshList()
             addHelpTooltip(row.remove, "Remove rule", "Delete this rule. Built-in rules can be switched off but not deleted.")
             -- Scripts read self.rule/self.category, so they are set once per row frame.
             row:SetScript("OnClick", function(self)
-                -- Ctrl-click posts the aura group as a link into the chat box instead of selecting it.
-                if IsControlKeyDown() and self.category == "auras" then
+                -- Ctrl-click posts the aura group (or the item rule with its members) as a link into the chat box
+                -- instead of selecting it. An item rule without a member (empty starter) is just selected.
+                if IsControlKeyDown() and (self.category == "auras"
+                    or (self.category == "items" and #ns.itemMembers(self.rule) > 0)) then
                     if self.rule.builtin then
                         setStatus(L("Built-in rules cannot be shared."), true)
                         return
@@ -3675,7 +3696,8 @@ function refreshList()
         end
 
         row.rule, row.category = rule, category
-        row.tipLines[1] = (category == "auras" and not rule.builtin) and { text = "Ctrl-click to post in chat." } or nil
+        row.tipLines[1] = ((category == "auras" or (category == "items" and #ns.itemMembers(rule) > 0)) and not rule.builtin)
+            and { text = "Ctrl-click to post in chat." } or nil
         row:SetWidth(width)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", listChild, "TOPLEFT", 6, -position)
@@ -6815,15 +6837,50 @@ function shareUI.openExport(rule)
     frame.edit:HighlightText()
 end
 
--- Ctrl-click on an aura group row. The export text stays in memory; only the short marker goes into the chat box.
+-- The item rule constructor, for ShareGroups.ToItemRules (newItemRule is a local of this file).
+ns.newItemRule = newItemRule
+
+-- A trinket rule: its first member tracks a trinket slot (13 or 14).
+local function isTrinketRule(rule)
+    local first = type(rule) == "table" and ns.itemMembers(rule)[1] or nil
+    return type(first) == "table" and (first.slotID == 13 or first.slotID == 14)
+end
+
+-- What Ctrl-click on an item rule shares: every trinket rule (WoWraVoxDB.items, at most MAX_SHARED_ITEMS, the clicked
+-- one always among them) when the clicked rule is a trinket rule, otherwise only the clicked rule.
+local MAX_SHARED_ITEMS = 8
+function shareUI.groupForRule(rule)
+    if not isTrinketRule(rule) then return { rule } end
+    local group, included = {}, false
+    local items = type(WoWraVoxDB) == "table" and type(WoWraVoxDB.items) == "table" and WoWraVoxDB.items or {}
+    for _, other in ipairs(items) do
+        if #group < MAX_SHARED_ITEMS and isTrinketRule(other) then
+            group[#group + 1] = other
+            if other == rule then included = true end
+        end
+    end
+    if not included then group[math.min(#group + 1, MAX_SHARED_ITEMS)] = rule end
+    return group
+end
+
+-- Ctrl-click on an aura group or item rule row. The export text stays in memory; only the short marker goes into
+-- the chat box.
 function shareUI.postToChat(rule)
-    local ok, text = ns.ShareGroups.Export(rule)
+    local ok, text, name
+    if type(rule.members) == "table" then
+        local group = shareUI.groupForRule(rule)
+        ok, text = ns.ShareGroups.ExportItems(group)
+        name = #group > 1 and L("Trinkets") or rule.name
+    else
+        ok, text = ns.ShareGroups.Export(rule)
+        name = rule.name
+    end
     if not ok then
-        setStatus(text, true)
+        setStatus(text == "builtin" and "Built-in rules cannot be shared." or text, true)
         return
     end
     if not ns.ShareChat then return end
-    ns.ShareChat.SendToChat(text, rule.name)
+    ns.ShareChat.SendToChat(text, name)
 end
 
 local function importRow(parent, index)
@@ -6836,6 +6893,9 @@ local function importRow(parent, index)
     row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.text:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+    row.text:SetWidth(490) -- a long item rule name is cut ("...") instead of running out of the window
+    row.text:SetWordWrap(false)
+    row.text:SetJustifyH("LEFT")
     row:Hide()
     return row
 end
@@ -6890,6 +6950,41 @@ local function showPreview(frame, preview)
     showTexts(frame, preview.texts or {})
 end
 
+-- One row per member, entry by entry (the entry name in front unless the row already says it), then what each
+-- rule will say. An item the client has no name for yet is shown as "Item <id>" in yellow, not as an error.
+local function showItemPreview(frame, preview)
+    local lines, members = {}, 0
+    for _, entry in ipairs(preview.entries) do
+        for _, member in ipairs(entry.members) do
+            members = members + 1
+            local text = member.itemName or member.slotName or ""
+            if member.slotName and member.itemName then text = member.slotName .. " · " .. member.itemName end
+            if not text:find(entry.name, 1, true) then text = entry.name .. " · " .. text end
+            lines[#lines + 1] = { text = text, icon = member.icon, known = member.known }
+        end
+    end
+    frame.summary:SetText(L("Item rules") .. ": " .. #preview.entries)
+    frame.effects:SetText(members == 1 and L("1 item") or string.format(L("%d items"), members))
+    for index, line in ipairs(frame.notes) do line:SetText(preview.notes[index] or "") end
+    for index, row in ipairs(frame.rows) do
+        local data = lines[index]
+        if data then
+            row.icon:SetTexture(data.icon or UNKNOWN_SPELL_ICON)
+            row.text:SetText(data.text)
+            if data.known then row.text:SetTextColor(0.9, 0.9, 0.9) else row.text:SetTextColor(1, 0.82, 0.2) end
+            row:Show()
+        else
+            row:Hide()
+        end
+    end
+    frame.more:SetText(#lines > IMPORT_ROWS and string.format(L("+ %d more"), #lines - IMPORT_ROWS) or "")
+    local texts = {}
+    for _, entry in ipairs(preview.entries) do
+        if entry.message ~= "" then texts[#texts + 1] = { label = entry.name, text = entry.message } end
+    end
+    showTexts(frame, texts)
+end
+
 local function refreshImportButtons(frame)
     frame.importButton:SetEnabled(ns.ShareGroups.CanImport(frame.preview, frame.edit:GetText()))
 end
@@ -6900,7 +6995,7 @@ local function runCheck(frame)
     if preview then
         frame.error:SetText(L("Check passed. Click Import to add the group."))
         frame.error:SetTextColor(0.55, 0.86, 0.62)
-        showPreview(frame, preview)
+        if preview.kind == "item-group" then showItemPreview(frame, preview) else showPreview(frame, preview) end
     else
         frame.error:SetText(L(errorKey))
         frame.error:SetTextColor(1, 0.35, 0.25)
@@ -6913,6 +7008,26 @@ local function runImport(frame)
     local preview = frame.preview
     if not ns.ShareGroups.CanImport(preview, frame.edit:GetText()) then
         refreshImportButtons(frame)
+        return
+    end
+    if preview.kind == "item-group" then
+        -- Every entry becomes its own new item rule; nothing existing is touched.
+        local rules = ns.ShareGroups.ToItemRules(preview.group)
+        if #rules == 0 then
+            refreshImportButtons(frame)
+            return
+        end
+        if ns.AuraPresetUI and ns.AuraPresetUI.creationActive then ns.AuraPresetUI.finishCreation(true) end
+        for _, newRule in ipairs(rules) do
+            ns.registerNewRule(newRule, "items")
+            table.insert(WoWraVoxDB.items, newRule)
+        end
+        frame:Hide()
+        ns.queueItemScan(0.1)
+        refreshList()
+        updateDetails()
+        selectRule(rules[1], "items")
+        setStatus("Items imported.")
         return
     end
     local rule = ns.ShareGroups.ToRule(preview.group, preview.meta)

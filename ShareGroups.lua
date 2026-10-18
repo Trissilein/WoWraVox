@@ -2,8 +2,9 @@ local _, ns = ...
 ns.ShareGroups = ns.ShareGroups or {}
 local Share = ns.ShareGroups
 
--- Export and import of aura groups as text. Pure functions: no frames, no saved variables written here.
+-- Export and import of aura groups and item rule groups as text. Pure functions: no frames, no saved variables written here.
 -- Format: "WVX1:" .. Base64(Deflate(CBOR({ v = 1, kind = "aura-group", class = <token>, group = {...} })))
+-- Item rules: the same wrapper with kind = "item-group" and items = { { name, message, enabled, members }, ... }.
 -- Text from another player is data only. Every field is checked against its type and range, unknown fields
 -- are dropped, "|" is escaped so no chat link or texture code survives, and nothing is loaded or executed.
 
@@ -19,12 +20,16 @@ local MAX_PAIRS = 100
 local MAX_SPECS = 8
 local MAX_TEXT = 200
 local MAX_ID = 2147483647
+local MAX_ITEMS = 8   -- item rules in one shared group (both trinkets = 2)
+local MAX_MEMBERS = 4 -- slots or items inside one shared item rule
 
 local ERR_NOT_EXPORT = "Not a WoWraVox export."
 local ERR_VERSION = "Unsupported export version."
 local ERR_TOO_LARGE = "The export is too large."
 local ERR_INVALID = "The export data is invalid."
 local ERR_CLIENT = "This client cannot read exports."
+local ERR_EMPTY = "This rule has no item to share yet."
+local ERR_MEMBERS = "Only rules with up to 4 items can be shared."
 
 local TEXT_FIELDS = { "name", "applyMessage", "expireMessage", "applySoundMediaName", "expireSoundMediaName" }
 local BOOL_FIELDS = { "applyEnabled", "expireEnabled", "oneEffect", "applySoundEnabled", "expireSoundEnabled" }
@@ -216,6 +221,67 @@ local function sanitizeGroup(source, raw)
     return out
 end
 
+-- Members of one item rule: 1..MAX_MEMBERS tables, each { slotID } (whatever sits in that slot), { itemID } (one
+-- exact item) or both; only the fields that are present are kept. A member seen twice (same slot, or same exact
+-- item) is kept once. Returns a new list or nil. A text slot ("13") is refused: only numbers count.
+local function sanitizeMembers(value)
+    if type(value) ~= "table" or countKeys(value) ~= #value or #value < 1 or #value > MAX_MEMBERS then return nil end
+    local out, seen = {}, {}
+    for i = 1, #value do
+        local source = value[i]
+        if type(source) ~= "table" then return nil end
+        local member = {}
+        if source.slotID ~= nil then
+            if type(source.slotID) ~= "number" then return nil end
+            member.slotID = ns.normalizeSlotID(source.slotID)
+            if not member.slotID then return nil end
+        end
+        if source.itemID ~= nil then
+            if not isID(source.itemID) then return nil end
+            member.itemID = source.itemID
+        end
+        if member.slotID == nil and member.itemID == nil then return nil end
+        local key = member.slotID and ("s" .. member.slotID) or ("i" .. member.itemID)
+        if not seen[key] then
+            seen[key] = true
+            out[#out + 1] = member
+        end
+    end
+    return out
+end
+
+-- One item rule: name and message (texts), enabled (boolean, read but never applied on import), members.
+-- raw = true (export) / false (import): same text handling as sanitizeGroup.
+local function sanitizeEntry(source, raw)
+    if type(source) ~= "table" then return nil end
+    local out = {}
+    for _, key in ipairs({ "name", "message" }) do
+        local v = source[key]
+        if v ~= nil then
+            if type(v) ~= "string" then return nil end
+            out[key] = raw and unescapeText(v) or cleanText(v)
+        end
+    end
+    if source.enabled ~= nil then
+        if type(source.enabled) ~= "boolean" then return nil end
+        out.enabled = source.enabled
+    end
+    out.members = sanitizeMembers(source.members)
+    if not out.members then return nil end
+    return out
+end
+
+-- The items of a group: 1..MAX_ITEMS entries. Returns { items = {...} } or nil.
+local function sanitizeItems(source, raw)
+    if type(source) ~= "table" or countKeys(source) ~= #source or #source < 1 or #source > MAX_ITEMS then return nil end
+    local items = {}
+    for i = 1, #source do
+        items[i] = sanitizeEntry(source[i], raw)
+        if not items[i] then return nil end
+    end
+    return { items = items }
+end
+
 -- Whitelisted copy of a local rule. Personal values (voice, volume, speed, font, colour, position, id,
 -- enabled, builtin, presetID) are never read here.
 local function pickGroup(rule)
@@ -238,6 +304,15 @@ local function pickGroup(rule)
     return group
 end
 
+-- "WVX1:" .. Base64(Deflate(CBOR(payload))), or nil when one of the three steps gives nothing.
+local function encodePayload(api, payload)
+    local cbor = api.SerializeCBOR(payload)
+    local packed = type(cbor) == "string" and api.CompressString(cbor) or nil
+    local encoded = type(packed) == "string" and api.EncodeBase64(packed) or nil
+    if type(encoded) ~= "string" or encoded == "" then return nil end
+    return TOKEN .. encoded
+end
+
 local function exportRule(rule)
     if type(rule) ~= "table" then return false, ERR_INVALID end
     if rule.builtin then return false, "builtin" end
@@ -245,11 +320,39 @@ local function exportRule(rule)
     if type(api) ~= "table" then return false, ERR_CLIENT end
     local group = sanitizeGroup(pickGroup(rule), true)
     if not group then return false, ERR_INVALID end
-    local cbor = api.SerializeCBOR({ v = VERSION, kind = "aura-group", class = playerClassToken(), group = group })
-    local packed = type(cbor) == "string" and api.CompressString(cbor) or nil
-    local encoded = type(packed) == "string" and api.EncodeBase64(packed) or nil
-    if type(encoded) ~= "string" or encoded == "" then return false, ERR_INVALID end
-    return true, TOKEN .. encoded
+    local text = encodePayload(api, { v = VERSION, kind = "aura-group", class = playerClassToken(), group = group })
+    if not text then return false, ERR_INVALID end
+    return true, text
+end
+
+-- Item rules (the list is one group): only name, message, enabled and the members { slotID, itemID } leave the
+-- machine. Built-in rules and rules without a member cannot be exported; neither can a rule with more members than
+-- an import accepts (cutting them silently would share something else than the rule).
+local function exportItems(rules)
+    if type(rules) ~= "table" or #rules < 1 or countKeys(rules) ~= #rules then return false, ERR_INVALID end
+    if #rules > MAX_ITEMS then return false, ERR_TOO_LARGE end
+    local api = C_EncodingUtil
+    if type(api) ~= "table" then return false, ERR_CLIENT end
+    local items = {}
+    for index, rule in ipairs(rules) do
+        if type(rule) ~= "table" then return false, ERR_INVALID end
+        if rule.builtin then return false, "builtin" end
+        local members = rule.members
+        if type(members) ~= "table" or #members == 0 then return false, ERR_EMPTY end
+        if #members > MAX_MEMBERS then return false, ERR_MEMBERS end
+        local picked = {}
+        for i, member in ipairs(members) do
+            if type(member) ~= "table" then return false, ERR_INVALID end
+            picked[i] = { slotID = member.slotID, itemID = member.itemID }
+        end
+        items[index] = sanitizeEntry({ name = rule.name, message = rule.message, enabled = rule.enabled ~= false,
+            members = picked }, true)
+        if not items[index] then return false, ERR_INVALID end
+    end
+    local text = encodePayload(api, { v = VERSION, kind = "item-group", class = playerClassToken(), items = items })
+    if not text then return false, ERR_INVALID end
+    if #text > MAX_INPUT then return false, ERR_TOO_LARGE end
+    return true, text
 end
 
 local function parseText(text)
@@ -272,10 +375,16 @@ local function parseText(text)
     local payload = api.DeserializeCBOR(packed)
     if type(payload) ~= "table" then return nil, ERR_INVALID end
     if payload.v ~= VERSION then return nil, ERR_VERSION end
-    if payload.kind ~= "aura-group" then return nil, ERR_INVALID end
+    local kind = payload.kind
+    if kind ~= "aura-group" and kind ~= "item-group" then return nil, ERR_INVALID end
     local class = payload.class
     if class ~= nil and (type(class) ~= "string" or #class > 16 or not class:match("^%u+$")) then
         return nil, ERR_INVALID
+    end
+    if kind == "item-group" then
+        local items = sanitizeItems(payload.items, false)
+        if not items then return nil, ERR_INVALID end
+        return items, { class = class, version = VERSION, kind = kind }
     end
     local group = sanitizeGroup(payload.group, false)
     if not group then return nil, ERR_INVALID end
@@ -299,7 +408,16 @@ function Share.Export(rule)
     return result, text
 end
 
+-- Item rules (list of rules, 1..8, each with 1..4 members): ok, text ("WVX1:...") or ok=false, error text.
+-- A built-in rule gives false, "builtin"; the other refusals give a translatable English text.
+function Share.ExportItems(rules)
+    local ok, result, text = pcall(exportItems, rules)
+    if not ok then return false, ERR_INVALID end
+    return result, text
+end
+
 -- ok, group, meta on success; ok=false, error text otherwise. Never runs or loads the text.
+-- Aura group: group = the fields of the rule. Item group: group = { items = { entry, ... } } and meta.kind = "item-group".
 function Share.Parse(text)
     local ok, group, meta = pcall(parseText, text)
     if not ok then return false, ERR_INVALID end
@@ -331,21 +449,26 @@ local function nameKey(name)
     return trim(name):lower()
 end
 
--- Name match against the existing aura rules, ignoring capitalisation and surrounding spaces.
-local function auraNameExists(name)
-    local auras = auraList()
-    if not auras then return false end
+-- Name match against a list of rules (nil = no list), ignoring capitalisation and surrounding spaces.
+local function listHasName(list, name)
+    if not list then return false end
     local wanted = nameKey(name)
-    for _, rule in ipairs(auras) do
+    for _, rule in ipairs(list) do
         if type(rule) == "table" and type(rule.name) == "string" and nameKey(rule.name) == wanted then return true end
     end
     return false
 end
 
--- Name as it would be stored: " (2)", " (3)" ... appended while the name is taken. The base is cut so the result
--- stays within MAX_TEXT; a cut never splits a UTF-8 character or leaves a lone "|" (same rules as cleanText).
-local function uniqueName(name)
-    if not auraNameExists(name) then return name end
+local function auraNameExists(name)
+    return listHasName(auraList(), name)
+end
+
+-- Name as it would be stored: " (2)", " (3)" ... appended while the name is taken (exists(name), default: an aura
+-- rule has it). The base is cut so the result stays within MAX_TEXT; a cut never splits a UTF-8 character or
+-- leaves a lone "|" (same rules as cleanText).
+local function uniqueName(name, exists)
+    exists = exists or auraNameExists
+    if not exists(name) then return name end
     local n = 2
     while true do
         local suffix = " (" .. n .. ")"
@@ -353,7 +476,7 @@ local function uniqueName(name)
         local trailing = base:match("|*$") or ""
         if #trailing % 2 == 1 then base = base:sub(1, -2) end
         local candidate = trim(base) .. suffix
-        if not auraNameExists(candidate) then return candidate end
+        if not exists(candidate) then return candidate end
         n = n + 1
     end
 end
@@ -382,6 +505,70 @@ function Share.ToRule(group, meta)
     local keepSpecs = sameClass and group.specializationIDs and specsBelongToPlayer(group.specializationIDs) ~= false
     rule.specializationIDs = keepSpecs and shallowCopy(group.specializationIDs) or nil
     return rule
+end
+
+-- Name of an item as the client knows it now, nil while it is not loaded. Asks the client to load it, so the next
+-- Check shows the name.
+local function lookupItemName(itemID)
+    local name
+    if type(GetItemInfo) == "function" then
+        local ok, value = pcall(GetItemInfo, itemID)
+        if ok and type(value) == "string" and value ~= "" then name = value end
+    end
+    if type(C_Item) == "table" then
+        if not name and type(C_Item.GetItemNameByID) == "function" then
+            local ok, value = pcall(C_Item.GetItemNameByID, itemID)
+            if ok and type(value) == "string" and value ~= "" then name = value end
+        end
+        if not name and type(C_Item.RequestLoadItemDataByID) == "function" then pcall(C_Item.RequestLoadItemDataByID, itemID) end
+    end
+    return name
+end
+
+-- Icon of a member as the addon shows it (a slot member: the item worn there now), nil when there is none.
+local function memberIcon(member)
+    if type(ns.itemMemberInfo) ~= "function" then return nil end
+    local ok, _, icon = pcall(ns.itemMemberInfo, member)
+    if ok then return icon end
+    return nil
+end
+
+-- Name of an imported item rule: the sent name; empty = what a rule made by hand gets (first slot's name, or the item's).
+local function entryName(entry)
+    if entry.name ~= nil and entry.name ~= "" then return entry.name end
+    local first = entry.members[1]
+    if first.slotID then return ns.slotName(first.slotID) end
+    return lookupItemName(first.itemID) or ("Item " .. first.itemID)
+end
+
+-- Message of an imported item rule: the sent text (placeholders {slot} and {item} stay as text); only a missing
+-- message gets the generated default ("{slot} ready" for one slot, "{item} ready" otherwise).
+local function entryMessage(entry)
+    if entry.message ~= nil then return entry.message end
+    local first = entry.members[1]
+    if #entry.members == 1 and first.slotID then return ns.slotDefaultMessage(first.slotID) end
+    return "{item} " .. L("ready")
+end
+
+-- New item rules from a checked item group: one per entry, in order, with the personal values of a new rule (voice,
+-- volume, sounds, screen look). The caller registers each (ns.registerNewRule(rule, "items")) and adds it to
+-- WoWraVoxDB.items. Names stay unique against the existing item rules and the rules made here.
+function Share.ToItemRules(group)
+    local rules = {}
+    if type(group) ~= "table" or type(group.items) ~= "table" then return rules end
+    local existing = type(WoWraVoxDB) == "table" and type(WoWraVoxDB.items) == "table" and WoWraVoxDB.items or nil
+    local function taken(name) return listHasName(existing, name) or listHasName(rules, name) end
+    for _, entry in ipairs(group.items) do
+        local rule = ns.newItemRule()
+        rule.members = {}
+        for i, member in ipairs(entry.members) do rule.members[i] = { slotID = member.slotID, itemID = member.itemID } end
+        rule.name = uniqueName(entryName(entry), taken)
+        rule.message = entryMessage(entry)
+        rule.icon = memberIcon(entry.members[1])
+        rule.enabled = true
+        rules[#rules + 1] = rule
+    end
+    return rules
 end
 
 -- Adds { label, text } when the output is enabled and the text is not empty. Labels are translated here.
@@ -437,10 +624,70 @@ local function cueText(cue)
     return L("Category cue: %s", L(label))
 end
 
+-- Names of the enabled item rules that already have this slot as a member (first two names only) and the total count.
+-- Returns nil when no database is loaded. Exact-item members are not compared: a slot is what rules overlap on.
+local function overlappingItemNames(slotID)
+    local db = WoWraVoxDB
+    if type(db) ~= "table" or type(db.items) ~= "table" then return nil end
+    local names, count = {}, 0
+    for _, rule in ipairs(db.items) do
+        local hit = false
+        if type(rule) == "table" and rule.enabled ~= false and type(rule.members) == "table" then
+            for _, member in ipairs(rule.members) do
+                if type(member) == "table" and member.slotID == slotID then hit = true break end
+            end
+        end
+        if hit then
+            count = count + 1
+            if count <= 2 then names[#names + 1] = type(rule.name) == "string" and rule.name or "?" end
+        end
+    end
+    return names, count
+end
+
+local MAX_NOTES = 3 -- lines the import window has for notes; more are folded into a last "+ N more" line
+
+-- Preview of an item group: kind = "item-group", entries { name, message, members { slotName, slotID, itemID,
+-- itemName, known, icon } }, notes (translated). A slot member has slotName (and itemName when the sender's item
+-- travels with it); an exact item has only itemName ("Item <id>" with known = false while the client has no name).
+local function describeItems(group)
+    local preview = { kind = "item-group", entries = {}, notes = {} }
+    local notes = {}
+    for _, entry in ipairs(group.items or {}) do
+        local row = { name = entryName(entry), message = entryMessage(entry), members = {} }
+        for _, member in ipairs(entry.members) do
+            local info = { slotID = member.slotID, itemID = member.itemID, known = true, icon = memberIcon(member) }
+            if member.slotID then info.slotName = ns.slotName(member.slotID) end
+            if member.itemID then
+                local name = lookupItemName(member.itemID)
+                info.itemName = name or ("Item " .. member.itemID)
+                info.known = name ~= nil
+            end
+            row.members[#row.members + 1] = info
+            local names, count = nil, 0
+            if member.slotID then names, count = overlappingItemNames(member.slotID) end
+            if names and count > 0 then
+                local shown = table.concat(names, ", ")
+                if count > #names then shown = shown .. " +" .. (count - #names) end
+                notes[#notes + 1] = L("%s is already tracked in: %s. Both rules would announce it.", info.slotName, shown)
+            end
+        end
+        preview.entries[#preview.entries + 1] = row
+    end
+    if #notes > MAX_NOTES then
+        local more = #notes - (MAX_NOTES - 1)
+        for i = #notes, MAX_NOTES, -1 do notes[i] = nil end
+        notes[MAX_NOTES] = L("+ %d more", more)
+    end
+    preview.notes = notes
+    return preview
+end
+
 -- Preview data: name, effect count, rows { spellID, name, icon, known }, unknown count, notes (translated),
 -- texts { label, text } for every enabled, non-empty text the group would speak or show (stored form, "||" kept),
--- then the sound and the category cue of each event.
+-- then the sound and the category cue of each event. An item group (meta.kind) gets describeItems instead.
 function Share.Describe(group, meta)
+    if meta and meta.kind == "item-group" then return describeItems(group) end
     local preview = { name = group.name or "", effects = 0, rows = {}, unknown = 0, notes = {}, texts = {} }
     local profiles = group.screenProfiles or {}
     addText(preview.texts, "Spoken on application", group.applyEnabled, group.applyMessage)
