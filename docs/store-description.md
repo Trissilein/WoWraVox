@@ -15,7 +15,6 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 - **Sounds:** play a short sound or a spoken category word, also for effects the game hides from addons in combat.
 - **Profiles:** keep separate settings per character and per specialization.
 - **Aura presets:** choose effects for your class and specialization, or buffs received from other players, under **Add rule → Aura**. Nothing is preselected. You can combine selected effects with your own spell IDs and customize their announcements.
-- **Sharing:** send an aura group to other WoWraVox users with a chat link or as text. They see a preview first, and your personal voice and layout settings stay yours.
 - **Easy setup:** find spells by name or ID, test sounds, preview on-screen text, and open the settings from the addon compartment, Titan Panel or any LibDataBroker display.
 
 ## How it works
@@ -25,12 +24,6 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 3. Choose what you want to hear and see when it starts, ends or becomes ready.
 
 New profiles start with a ready-made Bloodlust rule and trinket rules.
-
-## Combat announcements
-
-WoW can hide some effects from addons during combat. Your custom spoken text may be unavailable for those effects. A configured and registered category sound can announce the effect instead. Effects that remain readable, and supported effects you cast yourself, can still use custom text when TTS is enabled. Effect tooltips explain detection and category registration separately; unknown availability is shown explicitly.
-
-Spell IDs are the most reliable lookup. Name search depends on names available to the client and may be incomplete.
 
 ## Good to know
 
