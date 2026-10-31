@@ -153,3 +153,282 @@ if hooksecurefunc and GameTooltip then
     hookAuraByInstance("SetUnitBuffByAuraInstanceID")
     hookAuraByInstance("SetUnitDebuffByAuraInstanceID")
 end
+
+-- Cooldown Manager buff icons show Blizzard's own tooltip, which carries no spell ID, and the aura data behind it
+-- is hidden in combat. The viewer's configuration still names the spell, so the ID comes from there.
+local function cdmInfoSpellIDs(info)
+    if type(info) ~= "table" then return nil end
+    local ids, seen = {}, {}
+    local function add(id)
+        id = publicID(id)
+        if id and not seen[id] then
+            seen[id] = true
+            table.insert(ids, id)
+        end
+    end
+    add(field(info, "overrideSpellID"))
+    add(field(info, "overrideTooltipSpellID"))
+    add(field(info, "spellID"))
+    local linked = field(info, "linkedSpellIDs")
+    if type(linked) == "table" and not (issecrettable and issecrettable(linked)) then
+        for _, spellID in ipairs(linked) do add(spellID) end
+    end
+    return #ids > 0 and ids or nil
+end
+
+local function cdmSpellIDs(frame)
+    local cdID = frame and frame.cooldownID
+    if not (C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo) then return nil end
+    if type(cdID) ~= "number" or (issecretvalue and issecretvalue(cdID)) then return nil end
+    local ok, info = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, cdID)
+    if not ok then return nil end
+    return cdmInfoSpellIDs(info)
+end
+
+local function scanCDMViewer(name, targets, found)
+    local viewer = _G[name]
+    local pool = viewer and viewer.itemFramePool
+    if not (pool and type(pool.EnumerateActive) == "function") then return false end
+    local ok = pcall(function()
+        for frame in pool:EnumerateActive() do
+            local ids = cdmSpellIDs(frame)
+            for _, spellID in ipairs(ids or {}) do
+                if targets[spellID] then found[spellID] = true end
+            end
+        end
+    end)
+    return ok
+end
+
+ns.AuraCDM = ns.AuraCDM or {}
+function ns.AuraCDM.CheckTracked(targets)
+    local found = {}
+    if type(targets) ~= "table" then return found, false end
+    local iconsKnown = scanCDMViewer("BuffIconCooldownViewer", targets, found)
+    local barsKnown = scanCDMViewer("BuffBarCooldownViewer", targets, found)
+    return found, iconsKnown and barsKnown
+end
+
+function ns.AuraCDM.GetEffectStatuses(rule)
+    local statuses, auraTargets, targetToAuras = {}, {}, {}
+    if type(rule) ~= "table" or type(rule.spellIDs) ~= "table" then return statuses end
+    local function addTarget(auraID, spellID)
+        if not publicID(spellID) then return end
+        auraTargets[spellID] = true
+        targetToAuras[spellID] = targetToAuras[spellID] or {}
+        targetToAuras[spellID][auraID] = true
+    end
+    for _, auraID in ipairs(rule.spellIDs) do
+        auraID = publicID(auraID)
+        if auraID then
+            local secrecy = ns._Aura and ns._Aura.auraSecrecy and ns._Aura.auraSecrecy(auraID) or "unknown"
+            local combatState = ns._Aura and ns._Aura.combatInfo and ns._Aura.combatInfo(auraID, rule)
+            if combatState == "spoken" then
+                statuses[auraID] = { key = "direct" }
+            else
+                addTarget(auraID, auraID)
+                local castID = ns._Aura and ns._Aura.castIDFor and ns._Aura.castIDFor(rule, auraID)
+                addTarget(auraID, castID)
+                statuses[auraID] = { key = combatState == "cast" and "ownCast" or "unknown", secrecy = secrecy }
+            end
+        end
+    end
+    if not next(auraTargets) then return statuses end
+
+    local priority = { unknown = 1, unavailable = 2, unlearned = 3, ownCast = 4, available = 5, tracked = 6, direct = 7 }
+    local function setStatus(auraID, key)
+        local current = statuses[auraID]
+        if not current or (priority[key] or 0) > (priority[current.key] or 0) then
+            statuses[auraID] = { key = key, secrecy = current and current.secrecy }
+        end
+    end
+    local tracked = ns.AuraCDM.CheckTracked(auraTargets)
+    for spellID in pairs(tracked or {}) do
+        for auraID in pairs(targetToAuras[spellID] or {}) do setStatus(auraID, "tracked") end
+    end
+
+    local api = C_CooldownViewer
+    local categories = Enum and Enum.CooldownViewerCategory
+    if not (api and type(api.GetCooldownViewerCategorySet) == "function"
+        and type(api.GetCooldownViewerCooldownInfo) == "function" and categories) then
+        return statuses
+    end
+    if type(api.IsCooldownViewerAvailable) == "function" then
+        local ok, available = pcall(api.IsCooldownViewerAvailable)
+        if not ok or available ~= true then return statuses end
+    end
+    local complete = true
+    local function scanCategory(category, isTracked)
+        if category == nil then complete = false; return end
+        local ok, cooldownIDs = pcall(api.GetCooldownViewerCategorySet, category, true)
+        if not ok or type(cooldownIDs) ~= "table" or (issecretvalue and issecretvalue(cooldownIDs))
+            or (issecrettable and issecrettable(cooldownIDs)) then
+            complete = false
+            return
+        end
+        for _, cdID in ipairs(cooldownIDs) do
+            cdID = publicID(cdID)
+            if cdID then
+                local infoOK, info = pcall(api.GetCooldownViewerCooldownInfo, cdID)
+                if not infoOK then
+                    complete = false
+                elseif type(info) == "table" then
+                    local matches = {}
+                    for _, spellID in ipairs(cdmInfoSpellIDs(info) or {}) do
+                        for auraID in pairs(targetToAuras[spellID] or {}) do matches[auraID] = true end
+                    end
+                    if next(matches) then
+                        local hasAuraValue, selfAuraValue = field(info, "hasAura"), field(info, "selfAura")
+                        local isKnown = field(info, "isKnown")
+                        if hasAuraValue == nil or selfAuraValue == nil or isKnown == nil then complete = false end
+                        local hasAura = hasAuraValue == true or selfAuraValue == true
+                        if hasAura and isKnown == true then
+                            for auraID in pairs(matches) do setStatus(auraID, isTracked and "tracked" or "available") end
+                        elseif hasAura and isKnown == false then
+                            for auraID in pairs(matches) do setStatus(auraID, "unlearned") end
+                        end
+                    end
+                else
+                    complete = false
+                end
+            end
+        end
+    end
+    scanCategory(categories.HiddenPassive, false)
+    scanCategory(categories.TrackedBuff, true)
+    scanCategory(categories.TrackedBar, true)
+
+    for auraID, status in pairs(statuses) do
+        if status.key == "unknown" and complete then
+            if status.secrecy == "always" or status.secrecy == "contextual" then
+                status.key = "unavailable"
+            end
+        end
+    end
+    return statuses
+end
+
+local loweredMainWindow
+local settingsHideHook
+
+local function restoreMainWindowStrata()
+    local state = loweredMainWindow
+    loweredMainWindow = nil
+    if state and state.frame and type(state.frame.SetFrameStrata) == "function" then
+        pcall(state.frame.SetFrameStrata, state.frame, state.strata)
+    end
+end
+
+function ns.AuraCDM.OpenSettings()
+    if InCombatLockdown and InCombatLockdown() then return false, "combat" end
+    local settings = _G.CooldownViewerSettings
+    if not (settings and type(settings.ShowUIPanel) == "function") then return false, "unavailable" end
+
+    local main = _G.WoWraVoxOptions
+    local canLower = main and type(main.GetFrameStrata) == "function" and type(main.SetFrameStrata) == "function"
+    if canLower and settingsHideHook ~= settings and type(settings.HookScript) == "function" then
+        local hookOK = pcall(settings.HookScript, settings, "OnHide", restoreMainWindowStrata)
+        if hookOK then settingsHideHook = settings end
+    end
+
+    local ok = pcall(settings.ShowUIPanel, settings)
+    if ok and canLower and settingsHideHook == settings and not loweredMainWindow then
+        local readOK, originalStrata = pcall(main.GetFrameStrata, main)
+        if readOK and type(originalStrata) == "string" and originalStrata ~= "MEDIUM" then
+            local lowerOK = pcall(main.SetFrameStrata, main, "MEDIUM")
+            if lowerOK then loweredMainWindow = { frame = main, strata = originalStrata } end
+        end
+    elseif not ok then
+        restoreMainWindowStrata()
+    end
+    return ok, ok and nil or "unavailable"
+end
+
+-- Whether a buff icon is lit: isActive, else wasSetFromAura, else an attached aura instance. nil while the answer is
+-- hidden (a secret isActive is never second-guessed) or missing: only positive readings count, never an absence.
+local function cdmFrameActive(frame)
+    local ok, active, setFromAura, instanceID = pcall(function()
+        return frame.isActive, frame.wasSetFromAura, frame.auraInstanceID
+    end)
+    if not ok then return nil end
+    if issecretvalue and issecretvalue(active) then return nil end
+    if type(active) == "boolean" then return active end
+    if type(setFromAura) == "boolean" and not (issecretvalue and issecretvalue(setFromAura)) then return setFromAura end
+    if type(instanceID) == "number" and not (issecretvalue and issecretvalue(instanceID)) then return true end
+    return nil
+end
+
+-- The icon of a buff lights up and goes dark even while the aura behind it is hidden in combat: hand that to the aura
+-- rules (ns._Aura.cdmSignal decides whether it is needed). active = the icon's own alert, nil = read the icon.
+local function signalCDMFrame(frame, active, source)
+    if active == nil then active = cdmFrameActive(frame) end
+    local ids = cdmSpellIDs(frame)
+    if ids and ns.SkillTracking and ns.SkillTracking.ObserveLearningCDM then
+        pcall(ns.SkillTracking.ObserveLearningCDM, ids, active, source or "Cooldown Manager")
+    end
+    if active == nil then return end
+    if ids and ns._Aura and ns._Aura.cdmSignal then pcall(ns._Aura.cdmSignal, ids, active) end
+end
+
+local CDM_STATE_HOOKS = {
+    { "TriggerAuraAppliedAlert", true },
+    { "TriggerAuraRemovedAlert", false },
+    { "OnActiveStateChanged" },
+}
+
+local hookedCDMFrames = setmetatable({}, { __mode = "k" })
+local hookedCDMPools = setmetatable({}, { __mode = "k" })
+
+local function hookCDMFrame(frame)
+    if not frame or hookedCDMFrames[frame] then return end
+    hookedCDMFrames[frame] = true
+    local ids = cdmSpellIDs(frame)
+    if ids and ns.SkillTracking and ns.SkillTracking.ObserveLearningCDM then
+        pcall(ns.SkillTracking.ObserveLearningCDM, ids, cdmFrameActive(frame), "Cooldown Manager row")
+    end
+    if type(frame.HookScript) == "function" then
+        pcall(frame.HookScript, frame, "OnEnter", function(self)
+            if not enabled() then return end
+            local spellID = cdmSpellID(self)
+            if not spellID then return end
+            if ns.ObserveSpell then ns.ObserveSpell(spellID, "Seen aura/spell") end
+            addID(GameTooltip, "WoWraVox Spell-ID", spellID)
+        end)
+    end
+    if not hooksecurefunc then return end
+    for _, hook in ipairs(CDM_STATE_HOOKS) do
+        local method, active = hook[1], hook[2]
+        local observedMethod = method
+        if type(frame[method]) == "function" then
+            pcall(hooksecurefunc, frame, method, function(self) pcall(signalCDMFrame, self, active, observedMethod) end)
+        end
+    end
+end
+
+local function hookActiveCDMFrames(pool)
+    pcall(function()
+        for frame in pool:EnumerateActive() do hookCDMFrame(frame) end
+    end)
+end
+
+local function hookCDMViewer(name)
+    local viewer = _G[name]
+    local pool = viewer and viewer.itemFramePool
+    if not (pool and type(pool.EnumerateActive) == "function") then return end
+    hookActiveCDMFrames(pool)
+    if hookedCDMPools[pool] or type(pool.Acquire) ~= "function" or not hooksecurefunc then return end
+    hookedCDMPools[pool] = true
+    hooksecurefunc(pool, "Acquire", function() hookActiveCDMFrames(pool) end)
+end
+
+local function hookCDMViewers()
+    hookCDMViewer("BuffIconCooldownViewer")
+    hookCDMViewer("BuffBarCooldownViewer")
+end
+
+hookCDMViewers()
+local cdmLoader = CreateFrame("Frame")
+cdmLoader:RegisterEvent("PLAYER_ENTERING_WORLD")
+cdmLoader:SetScript("OnEvent", function()
+    if C_Timer and C_Timer.After then C_Timer.After(2, hookCDMViewers) end
+end)

@@ -2255,3 +2255,457 @@ do
     check("share group: no item list gives only the clicked rule", same(groupForRule(t2), t2))
     WoWraVoxDB = realDB
 end
+
+-- Cooldown Manager fallback (WoWraVoxTooltip.lua -> ns._Aura.cdmSignal): a buff icon lighting up or going dark speaks
+-- for an aura the addon cannot read in combat. MOCKED here: secrecy (C_Secrets and the aura API's answers), the viewer
+-- frames, their methods and hooksecurefunc. NOT covered: the real viewer, Blizzard's real call order and timing, and how
+-- Divine Purpose really behaves in combat.
+do
+    local DP, DP_ALT = 223817, 408459
+    local hiddenValue = {}
+    local realPcall = pcall
+    local saved = {
+        issecretvalue = issecretvalue, hooksecurefunc = hooksecurefunc, CreateFrame = CreateFrame, GameTooltip = GameTooltip,
+        cooldownViewer = C_CooldownViewer, icons = BuffIconCooldownViewer, bars = BuffBarCooldownViewer,
+        notify = ns.DebugReport.NoteNotify, queue = ns._Aura.queueTTS, timer = C_Timer, db = WoWraVoxDB,
+        secrets = C_Secrets, spell = C_Spell, auras = C_UnitAuras, combat = InCombatLockdown,
+    }
+    local combat, secrecyLevel, live, selfBuff, infos = true, 2, {}, {}, {}
+    local spoken, tts = {}, {}
+    local hookCalls, loaders = {}, {}
+
+    issecretvalue = function(value) return value == hiddenValue end
+    C_Secrets = { ShouldAurasBeSecret = function() return combat end, GetSpellAuraSecrecy = function() return secrecyLevel end }
+    InCombatLockdown = function() return combat end
+    C_Spell = { IsSelfBuff = function(spellID) return selfBuff[spellID] == true end,
+        GetSpellInfo = function(spellID) return { name = "Spell " .. spellID, iconID = 1 } end }
+    C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return live[spellID] end }
+    C_Timer = { After = function(_, callback) table.insert(timerCallbacks, callback) end,
+        NewTimer = function() return { Cancel = function() end } end }
+    ns.AuraSoundFallback.Refresh = function() end
+    ns.AuraSoundFallback.LogAura = function() end
+    ns.DebugReport.NoteNotify = function(_, eventKey, _, spellID, source)
+        table.insert(spoken, eventKey .. ":" .. tostring(spellID) .. "@" .. tostring(source))
+    end
+    ns._Aura.queueTTS = function(_, message) table.insert(tts, message); return true, "queued" end
+
+    hooksecurefunc = function(target, name, hook)
+        local original = target[name]
+        hookCalls[target] = hookCalls[target] or {}
+        hookCalls[target][name] = (hookCalls[target][name] or 0) + 1
+        target[name] = function(...)
+            local result = original and original(...)
+            hook(...)
+            return result
+        end
+    end
+    CreateFrame = function()
+        local frame = {}
+        function frame:RegisterEvent() end
+        function frame:SetScript(name, handler) self[name] = handler end
+        loaders[#loaders + 1] = frame
+        return frame
+    end
+
+    local function newIcon(cooldownID)
+        local icon = { cooldownID = cooldownID, isActive = false }
+        function icon:TriggerAuraAppliedAlert() end
+        function icon:TriggerAuraRemovedAlert() end
+        function icon:OnActiveStateChanged() end
+        function icon:HookScript() end
+        return icon
+    end
+    local function newViewer(icons)
+        local pool = { icons = icons, acquired = 0 }
+        function pool:EnumerateActive()
+            local index = 0
+            return function() index = index + 1; return self.icons[index] end
+        end
+        function pool:Acquire() self.acquired = self.acquired + 1 end
+        return { itemFramePool = pool }
+    end
+    -- Loads the real WoWraVoxTooltip.lua against the mocked viewers (nil = viewer absent).
+    local function loadTooltip(icons, bars)
+        BuffIconCooldownViewer = icons and newViewer(icons) or nil
+        BuffBarCooldownViewer = bars and newViewer(bars) or nil
+        GameTooltip = nil
+        hookCalls, loaders = {}, {}
+        return realPcall(loadTooltipFile)
+    end
+    local function withIcon(cooldownID)
+        local icon = newIcon(cooldownID)
+        local ok, err = loadTooltip({ icon })
+        if not ok then error("tooltip file did not load: " .. tostring(err)) end
+        return icon
+    end
+    local function dpRule(ids)
+        return { id = "dp", name = "Divine Purpose", enabled = true, applyEnabled = true, applyMessage = "Divine Purpose",
+            expireEnabled = true, expireMessage = "Divine Purpose ended", spellIDs = ids or { DP, DP_ALT },
+            alertCategory = "none", expireCategory = "none", voiceID = 8, volume = 100, speechSpeed = 100,
+            applySoundEnabled = false, expireSoundEnabled = false, applySoundChannel = "Master",
+            expireSoundChannel = "Master", screenProfiles = {} }
+    end
+    -- Default: in combat with the buff hidden (the aura API answers nil, the baseline marks both IDs unreadable).
+    -- outOfCombat: auras are readable from the start.
+    local function setup(rule, outOfCombat)
+        clearOutput()
+        combat, secrecyLevel, live, selfBuff = not outOfCombat, 2, {}, {}
+        ns._Aura.secrecyCache = {}
+        ns._Aura.clearActiveState()
+        WoWraVoxDB = { auras = { rule } }
+        ns._Aura.syncAllAuras(true)
+        spoken, tts = {}, {}
+    end
+    local function list(values) return table.concat(values, "|") end
+    -- Runs fn and returns the errors that pcall swallowed meanwhile (the hooks wrap everything in pcall).
+    local function swallowedErrors(fn)
+        local errors = {}
+        pcall = function(...)
+            local results = table.pack(realPcall(...))
+            if not results[1] then errors[#errors + 1] = tostring(results[2]) end
+            return table.unpack(results, 1, results.n)
+        end
+        local ok, err = realPcall(fn)
+        pcall = realPcall
+        if not ok then errors[#errors + 1] = tostring(err) end
+        return errors
+    end
+    infos = { [101] = { spellID = DP_ALT }, [102] = { spellID = 5, overrideSpellID = DP }, [103] = { spellID = 999 },
+        [104] = { spellID = 999, linkedSpellIDs = { DP_ALT } } }
+    C_CooldownViewer = { GetCooldownViewerCooldownInfo = function(cooldownID) return infos[cooldownID] end }
+
+    -- (a) a signal for 408459 activates the rule and announces exactly once, through the normal rule output.
+    setup(dpRule())
+    local icon = withIcon(101)
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (a): a lit icon announces the rule once, spell ID from the icon",
+        list(spoken) == "apply:408459@CDM_SIGNAL" and list(tts) == "Divine Purpose", list(spoken) .. " / " .. list(tts))
+    setup(dpRule())
+    icon = withIcon(102) -- overrideSpellID wins over spellID
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (a): the override spell ID of the icon is the one announced", list(spoken) == "apply:223817@CDM_SIGNAL", list(spoken))
+    setup(dpRule({ DP_ALT }))
+    icon = withIcon(104) -- the matching configured aura is a later linked alias
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (a): a later linked aura alias is matched", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    Enum.CooldownViewerCategory = { HiddenPassive = 10, TrackedBuff = 11, TrackedBar = 12 }
+    local cooldownSets = { [10] = { 105 }, [11] = {}, [12] = {} }
+    infos[105] = { spellID = DP_ALT, hasAura = true, selfAura = true, isKnown = true }
+    C_CooldownViewer = {
+        GetCooldownViewerCooldownInfo = function(cooldownID) return infos[cooldownID] end,
+        GetCooldownViewerCategorySet = function(category) return cooldownSets[category] or {} end,
+    }
+    loadTooltip(nil, nil)
+    do
+        local oldSettings, oldOptions = _G.CooldownViewerSettings, _G.WoWraVoxOptions
+        local oldCombat = combat
+        combat = false
+        local mockSettings = { hooks = {}, hookCount = 0 }
+        function mockSettings:ShowUIPanel() self.shown = true end
+        function mockSettings:HookScript(script, callback)
+            self.hookCount = self.hookCount + 1
+            self.hooks[script] = callback
+        end
+        local mockOptions = { strata = "DIALOG" }
+        function mockOptions:GetFrameStrata() return self.strata end
+        function mockOptions:SetFrameStrata(strata) self.strata = strata end
+        _G.CooldownViewerSettings, _G.WoWraVoxOptions = mockSettings, mockOptions
+        local opened = ns.AuraCDM.OpenSettings()
+        ns.AuraCDM.OpenSettings()
+        check("CDM open lowers WoWraVox below the settings panel without duplicate hooks",
+            opened and mockSettings.shown and mockOptions.strata == "MEDIUM" and mockSettings.hookCount == 1)
+        mockSettings.hooks.OnHide()
+        check("closing CDM restores WoWraVox strata", mockOptions.strata == "DIALOG")
+        _G.CooldownViewerSettings, _G.WoWraVoxOptions = oldSettings, oldOptions
+        combat = oldCombat
+    end
+    local effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: learned aura in Hidden Passive is eligible for tracking",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "available", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    cooldownSets[11] = { 106 }
+    infos[106] = { spellID = DP_ALT, hasAura = true, selfAura = true, isKnown = true }
+    effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: aura in Tracked Buffs is recognized as tracked",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "tracked", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    cooldownSets[11], cooldownSets[10] = {}, { 107 }
+    infos[107] = { spellID = DP_ALT, hasAura = false, selfAura = false, isKnown = true }
+    effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: a non-aura cooldown is not offered for aura tracking",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "unavailable", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    cooldownSets[10] = { 108 }
+    infos[108] = { spellID = DP_ALT, hasAura = true, selfAura = true, isKnown = false }
+    effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: an unlearned aura does not prompt for tracking",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "unlearned", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    cooldownSets[10], cooldownSets[11], cooldownSets[12] = {}, {}, {}
+    effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: a contextual aura absent from CDM is category cue only",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "unavailable", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    C_CooldownViewer.GetCooldownViewerCategorySet = nil
+    effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: missing category data stays unknown",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "unknown", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    selfBuff[DP_ALT] = true
+    effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: self-buff from another class is not an own-cast path",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "unknown", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    local originalIsPlayerSpell = IsPlayerSpell
+    IsPlayerSpell = function(spellID) return spellID == DP_ALT or originalIsPlayerSpell(spellID) end
+    effectStatuses = ns.AuraCDM.GetEffectStatuses(dpRule({ DP_ALT }))
+    check("CDM status: self-buff cast path is named separately from readable aura",
+        effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key == "ownCast", tostring(effectStatuses[DP_ALT] and effectStatuses[DP_ALT].key))
+    Enum.CooldownViewerCategory = nil
+    setup(dpRule())
+    icon = withIcon(101)
+    icon.isActive = true
+    icon:OnActiveStateChanged() -- no alert, only the icon's own state
+    check("CDM (a): OnActiveStateChanged alone announces the application", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+
+    -- (b) the same change twice, from any hook or icon, fires once; the end fires once; a new application again.
+    setup(dpRule())
+    icon = withIcon(101)
+    icon:TriggerAuraAppliedAlert()
+    icon:TriggerAuraAppliedAlert()
+    icon.isActive = true
+    icon:OnActiveStateChanged()
+    check("CDM (b): the same change again announces nothing more", #spoken == 1 and #tts == 1, list(spoken))
+    icon.isActive = false
+    icon:TriggerAuraRemovedAlert()
+    icon:TriggerAuraRemovedAlert()
+    icon:OnActiveStateChanged()
+    check("CDM (b): the end announces once", list(spoken) == "apply:408459@CDM_SIGNAL|expire:408459@CDM_SIGNAL"
+        and tts[2] == "Divine Purpose ended", list(spoken))
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (b): a new application after the end announces again", #spoken == 3, list(spoken))
+    icon:TriggerAuraRemovedAlert()
+    icon:TriggerAuraRemovedAlert()
+    check("CDM (b): a repeated end announces nothing more", #spoken == 4, list(spoken))
+
+    -- the same buff in both viewers: one announcement per transition
+    setup(dpRule())
+    local iconA, iconB = newIcon(101), newIcon(101)
+    loadTooltip({ iconA }, { iconB })
+    iconA:TriggerAuraAppliedAlert()
+    iconB:TriggerAuraAppliedAlert()
+    iconA:TriggerAuraRemovedAlert()
+    iconB:TriggerAuraRemovedAlert()
+    check("CDM (b): the buff in two viewers announces each transition once", #spoken == 2, list(spoken))
+
+    -- (c) nothing happens without a matching, enabled rule
+    setup(dpRule({ 123 }))
+    icon = withIcon(101)
+    icon:TriggerAuraAppliedAlert()
+    icon:TriggerAuraRemovedAlert()
+    check("CDM (c): no rule with that ID, nothing happens", #spoken == 0 and #tts == 0, list(spoken))
+    local disabled = dpRule()
+    disabled.enabled = false
+    setup(disabled)
+    icon = withIcon(101)
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (c): a disabled rule, nothing happens", #spoken == 0 and #tts == 0, list(spoken))
+    setup(dpRule())
+    icon = withIcon(103) -- an icon of an unrelated spell
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (c): an unrelated icon, nothing happens", #spoken == 0 and #tts == 0, list(spoken))
+    icon.cooldownID = 101 -- a recycled icon now showing Divine Purpose is read afresh
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (c): a recycled icon resolves its new spell", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+
+    -- (d) hidden values are ignored, never second-guessed
+    setup(dpRule())
+    icon = withIcon(101)
+    icon.isActive, icon.wasSetFromAura, icon.auraInstanceID = hiddenValue, hiddenValue, hiddenValue
+    local errors = swallowedErrors(function() icon:OnActiveStateChanged() end)
+    check("CDM (d): a hidden isActive is ignored", #spoken == 0 and #errors == 0, list(spoken) .. " / " .. list(errors))
+    icon.wasSetFromAura = true
+    icon:OnActiveStateChanged()
+    check("CDM (d): a hidden isActive is not replaced by wasSetFromAura", #spoken == 0, list(spoken))
+    icon:TriggerAuraAppliedAlert()
+    icon.wasSetFromAura = false
+    icon:OnActiveStateChanged()
+    check("CDM (d): a hidden state read does not end a lit icon", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    icon:TriggerAuraRemovedAlert()
+    check("CDM (d): the real end still announces", #spoken == 2, list(spoken))
+    setup(dpRule())
+    icon = withIcon(101)
+    icon.isActive, icon.wasSetFromAura = nil, true
+    icon:OnActiveStateChanged()
+    check("CDM (d): without isActive, wasSetFromAura is the fallback", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    setup(dpRule())
+    icon = withIcon(101)
+    icon.isActive, icon.wasSetFromAura, icon.auraInstanceID = nil, nil, 42
+    icon:OnActiveStateChanged()
+    check("CDM (d): without both, an attached aura instance is the fallback", #spoken == 1, list(spoken))
+    setup(dpRule())
+    icon = withIcon(101)
+    errors = swallowedErrors(function()
+        icon.cooldownID = hiddenValue
+        icon:TriggerAuraAppliedAlert()
+        icon.cooldownID = 101
+        infos[101] = { spellID = hiddenValue }
+        icon:TriggerAuraAppliedAlert()
+        infos[101] = { spellID = DP_ALT }
+        icon.isActive, icon.wasSetFromAura, icon.auraInstanceID = nil, nil, nil
+        icon:OnActiveStateChanged() -- nothing readable at all
+    end)
+    check("CDM (d): a hidden cooldown ID or spell ID is ignored", #spoken == 0 and #errors == 0, list(spoken) .. " / " .. list(errors))
+
+    -- (e) missing or failing Cooldown Viewer API: no errors, no announcement
+    local function silentUnder(label)
+        setup(dpRule())
+        icon = withIcon(101)
+        local problems = swallowedErrors(function()
+            icon:TriggerAuraAppliedAlert()
+            icon.isActive = true
+            icon:OnActiveStateChanged()
+            icon:TriggerAuraRemovedAlert()
+        end)
+        check("CDM (e): " .. label, #spoken == 0 and #problems == 0, list(spoken) .. " / " .. list(problems))
+    end
+    C_CooldownViewer = nil
+    silentUnder("no C_CooldownViewer at all")
+    C_CooldownViewer = {}
+    silentUnder("C_CooldownViewer without the cooldown info call")
+    C_CooldownViewer = { GetCooldownViewerCooldownInfo = function() return nil end }
+    silentUnder("an unknown cooldown ID")
+    C_CooldownViewer = { GetCooldownViewerCooldownInfo = function() return "not a table" end }
+    silentUnder("a cooldown info that is no table")
+    C_CooldownViewer = { GetCooldownViewerCooldownInfo = function() error("API error") end }
+    setup(dpRule())
+    icon = withIcon(101)
+    check("CDM (e): a throwing API call is contained",
+        realPcall(function()
+            icon:TriggerAuraAppliedAlert()
+            icon.isActive = true
+            icon:OnActiveStateChanged()
+            icon:TriggerAuraRemovedAlert()
+        end) and #spoken == 0, list(spoken))
+    C_CooldownViewer = { GetCooldownViewerCooldownInfo = function(cooldownID) return infos[cooldownID] end }
+    check("CDM (e): no viewer at all loads without errors", loadTooltip(nil, nil))
+    BuffIconCooldownViewer = {}
+    check("CDM (e): a viewer without a frame pool loads without errors", realPcall(loadTooltipFile))
+    BuffIconCooldownViewer = { itemFramePool = {} }
+    check("CDM (e): a pool without EnumerateActive loads without errors", realPcall(loadTooltipFile))
+    local plain = { cooldownID = 101 } -- a frame with no methods at all
+    local plainOK = loadTooltip({ plain })
+    check("CDM (e): a frame without the alert methods loads and is left alone", plainOK and hookCalls[plain] == nil)
+    local noHook = hooksecurefunc
+    hooksecurefunc = nil
+    check("CDM (e): no hooksecurefunc loads without errors", loadTooltip({ newIcon(101) }))
+    hooksecurefunc = noHook
+    local realSignal = ns._Aura.cdmSignal
+    ns._Aura.cdmSignal = nil
+    setup(dpRule())
+    icon = withIcon(101)
+    check("CDM (e): a missing ns._Aura.cdmSignal is contained", realPcall(icon.TriggerAuraAppliedAlert, icon) and #spoken == 0)
+    ns._Aura.cdmSignal = realSignal
+
+    -- hooks are installed once per frame method and once per pool, however often the viewers are scanned
+    setup(dpRule())
+    icon = newIcon(101)
+    loadTooltip({ icon })
+    local pool = BuffIconCooldownViewer.itemFramePool
+    check("CDM hooks: each frame method and the pool's Acquire are hooked once",
+        hookCalls[icon].TriggerAuraAppliedAlert == 1 and hookCalls[icon].TriggerAuraRemovedAlert == 1
+        and hookCalls[icon].OnActiveStateChanged == 1 and hookCalls[pool].Acquire == 1)
+    loaders[1].OnEvent() -- PLAYER_ENTERING_WORLD: scan again after two seconds
+    runTimers()
+    check("CDM hooks: a repeated scan hooks nothing twice",
+        hookCalls[icon].TriggerAuraAppliedAlert == 1 and hookCalls[icon].TriggerAuraRemovedAlert == 1
+        and hookCalls[icon].OnActiveStateChanged == 1 and hookCalls[pool].Acquire == 1)
+    local late = newIcon(101)
+    table.insert(pool.icons, late)
+    pool:Acquire() -- Blizzard hands out a new frame
+    check("CDM hooks: a frame acquired later is hooked once through the pool",
+        hookCalls[late].TriggerAuraAppliedAlert == 1 and hookCalls[icon].TriggerAuraAppliedAlert == 1)
+    late:TriggerAuraAppliedAlert()
+    check("CDM hooks: the late frame signals", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+
+    -- readable aura: the normal path owns it, the icon adds nothing
+    setup(dpRule(), true)
+    icon = withIcon(101)
+    live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = 5, expirationTime = 0 }
+    icon:TriggerAuraAppliedAlert()
+    check("CDM dedupe: a readable aura ignores the icon signal", #spoken == 0, list(spoken))
+    ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+    icon:TriggerAuraAppliedAlert()
+    icon.isActive = true
+    icon:OnActiveStateChanged()
+    check("CDM dedupe: the normal path announces once, the icon adds nothing",
+        list(spoken) == "apply:408459@UNIT_AURA", list(spoken))
+    icon:TriggerAuraRemovedAlert()
+    check("CDM dedupe: a readable aura's end is left to the normal path", #spoken == 1, list(spoken))
+    -- readability is decided by the same rules as processAura: never-secret stays with it, hidden fields do not
+    setup(dpRule())
+    icon = withIcon(101)
+    secrecyLevel = 0
+    ns._Aura.secrecyCache = {}
+    icon:TriggerAuraAppliedAlert()
+    check("CDM dedupe: a never-secret aura stays with the normal path even in combat", #spoken == 0, list(spoken))
+    secrecyLevel = 2
+    ns._Aura.secrecyCache = {}
+    live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = hiddenValue, expirationTime = hiddenValue }
+    icon:TriggerAuraAppliedAlert()
+    check("CDM dedupe: an aura whose fields are hidden is spoken for by the icon", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    live[DP_ALT] = nil
+
+    -- the own-cast path (self buffs) and the icon announce the same application once, in either order
+    setup(dpRule())
+    icon = withIcon(101)
+    selfBuff[DP_ALT] = true
+    ns._Aura.handleCast("player", "guid-1", DP_ALT)
+    icon:TriggerAuraAppliedAlert()
+    check("CDM dedupe: own cast first, the icon adds no second application",
+        list(spoken) == "apply:408459@UNIT_SPELLCAST_SUCCEEDED", list(spoken))
+    icon:TriggerAuraRemovedAlert()
+    check("CDM dedupe: the icon still announces the end", #spoken == 2 and spoken[2] == "expire:408459@CDM_SIGNAL", list(spoken))
+    setup(dpRule())
+    icon = withIcon(101)
+    selfBuff[DP_ALT] = true
+    icon:TriggerAuraAppliedAlert()
+    ns._Aura.handleCast("player", "guid-2", DP_ALT)
+    check("CDM dedupe: icon first, the own cast adds no second application",
+        list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+
+    -- an aura applied readable (out of combat), ended in combat: only its natural expiry is announced, like processAura
+    setup(dpRule(), true)
+    icon = withIcon(101)
+    now = 10
+    live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = 5, expirationTime = 20 }
+    ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+    combat, live[DP_ALT], now = true, nil, 12
+    icon:TriggerAuraRemovedAlert()
+    check("CDM expiry: an early end of a readable aura stays silent", list(spoken) == "apply:408459@UNIT_AURA", list(spoken))
+    icon:TriggerAuraAppliedAlert()
+    check("CDM expiry: the state was cleared, a new application announces", #spoken == 2, list(spoken))
+    setup(dpRule(), true)
+    icon = withIcon(101)
+    now = 10
+    live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = 5, expirationTime = 20 }
+    ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+    combat, live[DP_ALT], now = true, nil, 20
+    icon:TriggerAuraRemovedAlert()
+    icon:TriggerAuraRemovedAlert()
+    check("CDM expiry: the natural end of a readable aura announces once",
+        list(spoken) == "apply:408459@UNIT_AURA|expire:408459@CDM_SIGNAL", list(spoken))
+
+    -- A CDM signal can start tracking while hidden, then become readable. Once readable, its real expiry must own removal.
+    setup(dpRule())
+    icon = withIcon(101)
+    icon:TriggerAuraAppliedAlert()
+    now = 10
+    live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = 5, expirationTime = 100 }
+    ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+    live[DP_ALT], now = nil, 12
+    icon:TriggerAuraRemovedAlert()
+    check("CDM expiry: early removal after a readable refresh is not mistaken for natural expiry",
+        list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+
+    IsPlayerSpell = originalIsPlayerSpell
+    issecretvalue, hooksecurefunc, CreateFrame, GameTooltip = saved.issecretvalue, saved.hooksecurefunc, saved.CreateFrame, saved.GameTooltip
+    C_CooldownViewer, BuffIconCooldownViewer, BuffBarCooldownViewer = saved.cooldownViewer, saved.icons, saved.bars
+    ns.DebugReport.NoteNotify, ns._Aura.queueTTS, C_Timer, WoWraVoxDB = saved.notify, saved.queue, saved.timer, saved.db
+    C_Secrets, C_Spell, C_UnitAuras, InCombatLockdown = saved.secrets, saved.spell, saved.auras, saved.combat
+    ns._Aura.secrecyCache = {}
+    ns._Aura.clearActiveState()
+end

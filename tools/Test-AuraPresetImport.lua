@@ -243,7 +243,7 @@ end
 do
     selfBuffs = { [findEntry("power-infusion").castID] = true }
     local speaks = ui.describe(ui.model(66).items["power-infusion"])
-    check("detail bar says the addon speaks the aura", speaks.output == "Your own cast can use custom text. Receiving this effect from another player may require the configured category sound."
+    check("detail bar says the addon speaks the aura", speaks.output == "Your current character knows this self-buff spell, so WoWraVox can use custom text for your cast. An effect from another player may need the configured category sound."
         and speaks.name == "Spell 10060" and speaks.meta:find("Offensive", 1, true) == 1
         and speaks.meta:find("No talent needed", 1, true) ~= nil, speaks.meta)
     selfBuffs = {}

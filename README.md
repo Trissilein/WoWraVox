@@ -4,7 +4,7 @@ WoWraVox is a World of Warcraft Retail addon for Heroism, Bloodlust, Time Warp, 
 
 ## Version
 
-Current stable version: **0.13.0**.
+Current stable version: **0.14.0**.
 
 Retail compatibility: **12.1.5** (interface **120105**).
 
@@ -12,6 +12,7 @@ Retail compatibility: **12.1.5** (interface **120105**).
 
 - **Aura rules** watch your player buffs, debuffs, and item-effect auras. Self-only buffs such as defensives are announced in combat from your own cast; auras the addon cannot read in combat can play a native category word (Defensive, Offensive, Healing, Bloodlust or Somebody loves you) or a selected sound through the game.
 - **Item rules** announce when an equipped item becomes ready after its cooldown. They track a fixed item or, in slot mode, whatever is equipped in a slot (for example Trinket 1).
+- **Aura learning:** select a custom aura rule and press **Learn** to observe casts, player aura changes and Cooldown Manager visibility for 20 seconds. Review the results and add a candidate aura ID explicitly. Trigger rows color-code direct and own-cast detection, existing CDM tracking, CDM eligibility, category cues, and unknown status. **Open CDM** opens settings for tracked effects; **Set up** asks before opening settings for eligible effects that are not tracked yet. Add eligible auras to **Tracked Buffs** or **Tracked Bars** manually. Category cues remain the other notification path when combat hides an aura.
 - **Skill rules** announce when a Spellbook ability or a returning charge becomes ready.
 - **Sharing:** Ctrl-click an aura group, or one of the trinket rules (which shares both), in the list to put a link in your chat box; other WoWraVox users click it to import the group after a preview. Groups can also be exported as text (**Export** button) and imported with `/wvimport` or **Add rule → Import**. Personal settings such as voice are not shared, an import always creates a new group, and chat sharing is blocked during encounters, Mythic+ and PvP.
 - Speaks through WoW Text-to-Speech with a per-rule voice, speed, and volume. Announcements raised in the same frame with the same voice are spoken as one sentence.

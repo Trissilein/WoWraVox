@@ -19,7 +19,7 @@ local CATEGORY_SET = {
 local EVENT_SET = { apply = true, expire = true, ready = true }
 local SOURCE_SET = {
     UNIT_SPELLCAST_SUCCEEDED = true, UNIT_AURA = true, AURA_TIMER = true,
-    BASELINE_SYNC = true, FULL_SYNC = true, ITEM_COOLDOWN_DONE = true,
+    BASELINE_SYNC = true, FULL_SYNC = true, ITEM_COOLDOWN_DONE = true, CDM_SIGNAL = true,
 }
 local HIDDEN_NOTE_SET = {
     ["payload hidden"] = true, ["full update"] = true, ["full update (unreadable)"] = true,

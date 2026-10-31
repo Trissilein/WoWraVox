@@ -1,5 +1,15 @@
 # WoWraVox
 
+## 0.14.0
+
+- Custom aura rules now offer a 20-second Learn mode. It observes configured casts, player aura changes and Blizzard Cooldown Manager visibility, then shows candidate aura IDs and category guidance. Adding a candidate to the rule requires an explicit selection.
+- Auras tracked in Blizzard's Tracked Buffs or Tracked Bars can use Cooldown Manager state changes to detect application and expiration when their aura data is hidden. Duplicate signals from readable auras, own casts and multiple viewers are suppressed. Availability depends on the effect and Blizzard's exposed state.
+- Trigger rows color-code direct, own-cast, CDM-tracked, CDM-available, category-cue and unknown states. A visible legend explains the colors; separate action buttons show when a row opens CDM settings or a setup prompt. Tracking changes remain manual.
+- CDM matching now considers linked spell IDs. A readable aura expiry supersedes stale CDM-only state, and aura learning checks cast aliases when reporting CDM visibility.
+- Aura name searches retain IDs of effects received by the player across sessions and include matching variants. Game-search suggestions require confirmation before use.
+- Diagnostic reports recognize Cooldown Manager signals. Aura-learning guidance includes German translations.
+- Trigger and spell-search rows share their UI setup code; an unused screen-frame helper was removed.
+
 ## 0.13.0
 
 - Trinket rules can be shared as a pair: Ctrl-click one of the trinket rules and both are posted as one group. The import creates one item rule per trinket, and the preview lists both with their slots and warns when a slot is already tracked. Other item rules are shared on their own.

@@ -14,6 +14,7 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 - **On-screen text:** show your own message with your own font, size, colour and position.
 - **Sounds:** play a short sound or a spoken category word, also for effects the game hides from addons in combat.
 - **Profiles:** keep separate settings per character and per specialization.
+- **Aura learning:** observe a custom aura for 20 seconds, review cast and aura IDs, and check whether Blizzard's Cooldown Manager tracks it. Color-coded trigger rows explain tracking status; tracked effects open CDM settings, while eligible untracked effects offer a setup prompt. Add a candidate ID explicitly. For effects hidden in combat, Tracked Buffs or Tracked Bars can provide another detection path; category sounds and an in-combat check help confirm the setup.
 - **Aura presets:** choose effects for your class and specialization, or buffs received from other players, under **Add rule → Aura**. Nothing is preselected. You can combine selected effects with your own spell IDs and customize their announcements.
 - **Easy setup:** find spells by name or ID, test sounds, preview on-screen text, and open the settings from the addon compartment, Titan Panel or any LibDataBroker display.
 

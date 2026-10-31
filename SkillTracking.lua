@@ -728,7 +728,13 @@ local function spellName(spellID)
     return text("Spell ID") .. " " .. tostring(spellID)
 end
 
-local function addLearningResult(session, kind, triggerType, spellID, event, source, elapsed)
+local function addLearningResult(session, kind, triggerType, spellID, event, source, elapsed, relatedAuraID)
+    if session.mode == "aura" then
+        session.resultSeen = session.resultSeen or {}
+        local key = table.concat({ tostring(kind), tostring(spellID), tostring(event), tostring(source) }, ":")
+        if session.resultSeen[key] then return end
+        session.resultSeen[key] = true
+    end
     if #session.results >= tracking.maxLearningResults then return end
     local result = {
         kind = kind,
@@ -738,6 +744,7 @@ local function addLearningResult(session, kind, triggerType, spellID, event, sou
         event = event,
         source = source,
         elapsed = elapsed or 0,
+        relatedAuraID = relatedAuraID,
     }
     table.insert(session.results, result)
     session.selected = result
@@ -803,6 +810,115 @@ function tracking.StartLearning(rule)
     return true
 end
 
+function tracking.GetAuraLearningSummary(session)
+    if type(session) ~= "table" or session.mode ~= "aura" then return "" end
+    local secrecy = "Never hidden"
+    local secrecyKnown = true
+    local mayBeHidden = false
+    for spellID in pairs(session.targetSpellIDs or {}) do
+        local value = ns._Aura and ns._Aura.auraSecrecy and ns._Aura.auraSecrecy(spellID) or "unknown"
+        if value == "always" or value == "contextual" then
+            mayBeHidden = true
+            break
+        elseif value == "unknown" then
+            secrecyKnown = false
+        end
+    end
+    if mayBeHidden then secrecy = "May be hidden"
+    elseif not secrecyKnown then secrecy = "Unknown" end
+
+    local cdm = "Unknown"
+    local hasCDM = false
+    for spellID in pairs(session.targetSpellIDs or {}) do
+        if session.cdmDetected and session.cdmDetected[spellID] then hasCDM = true; break end
+    end
+    if hasCDM then
+        cdm = session.cdmTransitionSeen and "State change observed" or "Detected"
+    elseif session.cdmScanKnown then
+        cdm = "Not detected"
+    end
+
+    local auraData = "Not observed"
+    if next(session.auraObserved or {}) then
+        auraData = "Change observed"
+    elseif session.auraAPIReadable then
+        auraData = "Readable; no matching change"
+    elseif session.auraAPIHidden then
+        auraData = "Unreadable or unavailable"
+    end
+
+    local recommendation
+    if secrecy == "Never hidden" then
+        recommendation = text("CDM is optional for this aura.")
+    elseif cdm == "Not detected" then
+        recommendation = text("If combat hides this aura, add it to Tracked Buffs or Bars and select a category sound.")
+    elseif cdm == "Detected" then
+        recommendation = text("CDM row detected; verify an apply or removal in combat.")
+    elseif cdm == "State change observed" then
+        recommendation = text("CDM state change observed; verify it in combat.")
+    else
+        recommendation = text("CDM status unknown; open the Cooldown Manager and repeat the observation.")
+    end
+    return string.format(text("Secrecy: %s · CDM row: %s · player aura API: %s."),
+        text(secrecy), text(cdm), text(auraData)) .. "\n" .. recommendation
+end
+
+function tracking.StartAuraLearning(rule)
+    if type(rule) ~= "table" or type(rule.spellIDs) ~= "table" then return false end
+    local targetSpellIDs, expectedCastIDs = {}, {}
+    for _, spellID in ipairs(rule.spellIDs) do
+        if publicInteger(spellID) then
+            targetSpellIDs[spellID] = true
+            expectedCastIDs[spellID] = spellID
+            local castID = ns._Aura and ns._Aura.castIDFor and ns._Aura.castIDFor(rule, spellID)
+            if publicInteger(castID) then expectedCastIDs[castID] = spellID end
+        end
+    end
+    if not next(targetSpellIDs) then return false end
+
+    tracking.CancelLearning("restarted", false)
+    tracking.learningSerial = (tracking.learningSerial or 0) + 1
+    local session = {
+        serial = tracking.learningSerial,
+        mode = "aura",
+        rule = rule,
+        spellName = rule.name or text("Aura"),
+        targetSpellIDs = targetSpellIDs,
+        expectedCastIDs = expectedCastIDs,
+        cdmTargets = expectedCastIDs,
+        phase = "observing",
+        deadline = GetTime() + 20,
+        remaining = 20,
+        results = {},
+        auraSnapshot = getAuraSnapshot(),
+        auraAPIHidden = false,
+        auraAPIReadable = false,
+        auraObserved = {},
+        candidateAuraIDs = {},
+        cdmDetected = {},
+        cdmStates = {},
+    }
+    session.auraAPIHidden = session.auraSnapshot == nil
+    session.auraAPIReadable = session.auraSnapshot ~= nil
+    if ns.AuraCDM and type(ns.AuraCDM.CheckTracked) == "function" then
+        local ok, tracked, known = pcall(ns.AuraCDM.CheckTracked, expectedCastIDs)
+        if ok and type(tracked) == "table" then
+            session.cdmScanKnown = known == true
+            for cdmSpellID in pairs(tracked) do
+                local auraID = session.cdmTargets[cdmSpellID]
+                if auraID then session.cdmDetected[auraID] = true end
+            end
+        end
+    end
+    tracking.learning = session
+    if tracking.learningWindow then tracking.learningWindow:Hide() end
+    tracking.RenderLearningResults(session)
+    if tracking.learningWindow then tracking.learningWindow:Show() end
+    if tracking.onLearningChanged then tracking.onLearningChanged(session) end
+    tracking.ScheduleLearningTick(session)
+    return true
+end
+
 function tracking.ScheduleLearningTick(session)
     local serial = session.serial
     C_Timer.After(1, function()
@@ -814,6 +930,7 @@ function tracking.ScheduleLearningTick(session)
                 or text("Observation window ended."))
             return
         end
+        active.remaining = remaining
         tracking.RenderLearningResults(active)
         if tracking.onLearningChanged then tracking.onLearningChanged(active, nil, remaining) end
         tracking.ScheduleLearningTick(active)
@@ -852,6 +969,18 @@ end
 
 function tracking.ObserveLearningCast(spellID, castGUID)
     local session = tracking.learning
+    if session and session.mode == "aura" and session.phase == "observing"
+        and GetTime() <= session.deadline and publicInteger(spellID) then
+        session.lastCastAt = GetTime()
+        session.lastCastSpellID = spellID
+        local auraID = session.expectedCastIDs[spellID]
+        if auraID then
+            addLearningResult(session, "cast", nil, spellID, "Configured cast observed",
+                "UNIT_SPELLCAST_SUCCEEDED", 0, auraID)
+        end
+        if tracking.onLearningChanged then tracking.onLearningChanged(session) end
+        return
+    end
     if not (session and session.phase == "waiting" and session.spellID == spellID) then return end
     session.phase = "observing"
     session.castAt = GetTime()
@@ -876,17 +1005,44 @@ end
 
 local function replaceLearningAuraSnapshot(session)
     local current = getAuraSnapshot()
-    if not current then session.auraSnapshot = nil; return false end
+    if not current then
+        session.auraSnapshot = nil
+        session.auraAPIHidden = true
+        return false
+    end
+    session.auraAPIReadable = true
+    session.auraAPIHidden = false
     local old = session.auraSnapshot
+    local function recordChange(spellID, event)
+        local elapsed = session.lastCastAt and (GetTime() - session.lastCastAt)
+            or session.castAt and (GetTime() - session.castAt) or 0
+        if session.mode ~= "aura" then
+            addLearningResult(session, "aura", nil, spellID, event, "UNIT_AURA:player", elapsed)
+            return
+        end
+        if session.targetSpellIDs[spellID] then
+            session.auraObserved[spellID] = true
+            addLearningResult(session, "aura", nil, spellID, event, "UNIT_AURA:player", elapsed)
+        elseif event == "Aura gained" then
+            session.candidateAuraIDs[spellID] = true
+            local source = text("Observed during this window")
+            if session.lastCastAt and elapsed <= 5 then
+                source = string.format(text("Aura after cast ID %d"), session.lastCastSpellID)
+            end
+            addLearningResult(session, "candidateAura", nil, spellID, event, source, elapsed)
+        elseif event == "Aura lost" and session.candidateAuraIDs[spellID] then
+            addLearningResult(session, "candidateAura", nil, spellID, event, "UNIT_AURA:player", elapsed)
+        end
+    end
     if old then
         for spellID, count in pairs(current.counts) do
             if count > 0 and not old.counts[spellID] then
-                addLearningResult(session, "aura", nil, spellID, "Aura gained", "UNIT_AURA:player", GetTime() - session.castAt)
+                recordChange(spellID, "Aura gained")
             end
         end
         for spellID, count in pairs(old.counts) do
             if count > 0 and not current.counts[spellID] then
-                addLearningResult(session, "aura", nil, spellID, "Aura lost", "UNIT_AURA:player", GetTime() - session.castAt)
+                recordChange(spellID, "Aura lost")
             end
         end
     end
@@ -899,9 +1055,53 @@ function tracking.ObserveLearningAuras(updateInfo)
     if not session then return end
     if not session.auraSnapshot then
         replaceLearningAuraSnapshot(session)
+        if session.mode == "aura" then
+            local added, addedOK = safeField(updateInfo, "addedAuras")
+            if addedOK and type(added) == "table" then
+                for _, aura in ipairs(added) do
+                    local spellID, idOK = safeField(aura, "spellId")
+                    if idOK and publicInteger(spellID) then
+                        if session.targetSpellIDs[spellID] then
+                            session.auraObserved[spellID] = true
+                            addLearningResult(session, "aura", nil, spellID, "Aura gained", "UNIT_AURA:player", 0)
+                        else
+                            session.candidateAuraIDs[spellID] = true
+                            local source = text("Observed during this window")
+                            if session.lastCastAt and GetTime() - session.lastCastAt <= 5 then
+                                source = string.format(text("Aura after cast ID %d"), session.lastCastSpellID)
+                            end
+                            addLearningResult(session, "candidateAura", nil, spellID, "Aura gained",
+                                source, 0)
+                        end
+                    end
+                end
+            end
+        end
         return
     end
     local old = session.auraSnapshot
+    session.auraAPIReadable = true
+    session.auraAPIHidden = false
+    local function recordChange(spellID, event)
+        local elapsed = session.lastCastAt and (GetTime() - session.lastCastAt)
+            or session.castAt and (GetTime() - session.castAt) or 0
+        if session.mode ~= "aura" then
+            addLearningResult(session, "aura", nil, spellID, event, "UNIT_AURA:player", elapsed)
+        elseif session.targetSpellIDs[spellID] then
+            session.auraObserved[spellID] = true
+            addLearningResult(session, "aura", nil, spellID, event, "UNIT_AURA:player", elapsed)
+        elseif event == "Aura gained" then
+            session.candidateAuraIDs[spellID] = true
+            local source = text("Observed during this window")
+            if session.lastCastAt and elapsed <= 5 then
+                source = string.format(text("Aura after cast ID %d"), session.lastCastSpellID)
+            end
+            addLearningResult(session, "candidateAura", nil, spellID, event,
+                source, elapsed)
+        elseif event == "Aura lost" and session.candidateAuraIDs[spellID] then
+            addLearningResult(session, "candidateAura", nil, spellID, event, "UNIT_AURA:player", elapsed)
+        end
+    end
     local fullUpdate, fullOK = safeField(updateInfo, "isFullUpdate")
     if not fullOK or fullUpdate then
         replaceLearningAuraSnapshot(session)
@@ -921,7 +1121,7 @@ function tracking.ObserveLearningAuras(updateInfo)
             old.byInstance[instanceID] = nil
             old.counts[spellID] = math.max(0, (old.counts[spellID] or 1) - 1)
             if old.counts[spellID] == 0 then
-                addLearningResult(session, "aura", nil, spellID, "Aura lost", "UNIT_AURA:player", GetTime() - session.castAt)
+                recordChange(spellID, "Aura lost")
             end
         else
             session.auraSnapshot = nil
@@ -939,7 +1139,29 @@ function tracking.ObserveLearningAuras(updateInfo)
         old.byInstance[instanceID] = spellID
         old.counts[spellID] = oldCount + 1
         if oldCount == 0 then
-            addLearningResult(session, "aura", nil, spellID, "Aura gained", "UNIT_AURA:player", GetTime() - session.castAt)
+            recordChange(spellID, "Aura gained")
+        end
+    end
+end
+
+function tracking.ObserveLearningCDM(spellIDs, active, source)
+    local session = tracking.learning
+    if not (session and session.mode == "aura" and session.phase == "observing"
+        and type(spellIDs) == "table") then return end
+    for _, spellID in ipairs(spellIDs) do
+        local auraID = session.cdmTargets[spellID]
+        if auraID then
+            session.cdmDetected[auraID] = true
+            local previous = session.cdmStates[auraID]
+            if type(active) == "boolean" then
+                if (previous ~= nil and previous ~= active)
+                    or source == "TriggerAuraAppliedAlert" or source == "TriggerAuraRemovedAlert" then
+                    session.cdmTransitionSeen = true
+                    addLearningResult(session, "cdm", nil, spellID,
+                        active and "CDM became active" or "CDM became inactive", "Cooldown Manager", 0)
+                end
+                session.cdmStates[auraID] = active
+            end
         end
     end
 end
@@ -962,10 +1184,12 @@ function tracking.CreateLearningWindow()
     frame.status:SetPoint("TOPLEFT", frame.title, "BOTTOMLEFT", 0, -8)
     frame.status:SetWidth(570)
     frame.status:SetJustifyH("LEFT")
+    frame.status:SetHeight(76)
+    frame.status:SetJustifyV("TOP")
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -4)
     frame.scroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-    frame.scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -54)
+    frame.scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -130)
     frame.scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -30, 52)
     frame.child = CreateFrame("Frame", nil, frame.scroll)
     frame.child:SetSize(560, 1)
@@ -988,8 +1212,15 @@ function tracking.CreateLearningWindow()
     frame.addAuraButton:SetPoint("LEFT", frame.useButton, "RIGHT", 8, 0)
     frame.addAuraButton:SetText(text("Create Aura Rule"))
     frame.addAuraButton:SetScript("OnClick", function()
-        local result = frame.session and frame.session.selected
-        if result and result.kind == "aura" and tracking.addAuraRule then
+        local session = frame.session
+        local result = session and session.selected
+        if session and session.mode == "aura" then
+            if result and result.kind == "candidateAura" and tracking.addAuraID
+                and tracking.addAuraID(session.rule, result.spellID) then
+                if tracking.learning == session then tracking.FinishLearning(text("Learning complete.")) end
+                frame:Hide()
+            end
+        elseif result and result.kind == "aura" and tracking.addAuraRule then
             tracking.CancelLearning(nil, true)
             tracking.addAuraRule(result.spellID, result.name)
         end
@@ -1028,19 +1259,44 @@ function tracking.RenderLearningResults(session)
     local frame = tracking.CreateLearningWindow()
     frame.session = session
     frame.title:SetText(text("Learning results") .. " · " .. tostring(session.spellName or spellName(session.spellID)))
-    frame.status:SetText((session.status or (session.phase == "waiting" and text("Cast the selected spell within 20 seconds.")
-        or session.phase == "observing" and text("Watching player cooldown, charges, buffs, and debuffs for 8 seconds.")
-        or text("Choose a result, then apply it."))) .. "  " .. text("Aura timing shows correlation, not proof of cause."))
+    local statusText
+    if session.mode == "aura" then
+        statusText = session.status or (session.phase == "observing"
+            and string.format(text("Observing this aura for %d seconds. Cast it or receive it while the window is open."),
+                session.remaining or math.max(1, math.ceil(session.deadline - GetTime())))
+            or text("Choose an aura candidate to add to this rule."))
+        statusText = statusText .. "\n" .. tracking.GetAuraLearningSummary(session)
+            .. " " .. text("Aura timing shows correlation, not proof of cause.")
+    else
+        statusText = (session.status or (session.phase == "waiting" and text("Cast the selected spell within 20 seconds.")
+            or session.phase == "observing" and text("Watching player cooldown, charges, buffs, and debuffs for 8 seconds.")
+            or text("Choose a result, then apply it."))) .. "  " .. text("Aura timing shows correlation, not proof of cause.")
+    end
+    frame.status:SetText(statusText)
     frame.useButton:SetEnabled(session.selected ~= nil and session.selected.triggerType ~= nil)
-    frame.addAuraButton:SetEnabled(session.selected ~= nil and session.selected.kind == "aura")
+    if session.mode == "aura" then
+        frame.useButton:Hide()
+        frame.addAuraButton:SetText(text("Add to this aura"))
+        frame.addAuraButton:ClearAllPoints()
+        frame.addAuraButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, 12)
+        frame.addAuraButton:SetEnabled(session.selected ~= nil and session.selected.kind == "candidateAura")
+    else
+        frame.useButton:Show()
+        frame.addAuraButton:SetText(text("Create Aura Rule"))
+        frame.addAuraButton:ClearAllPoints()
+        frame.addAuraButton:SetPoint("LEFT", frame.useButton, "RIGHT", 8, 0)
+        frame.addAuraButton:SetEnabled(session.selected ~= nil and session.selected.kind == "aura")
+    end
     for index, result in ipairs(session.results) do
         local row = frame.rows[index]
         row.result = result
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", frame.child, "TOPLEFT", 0, -(index - 1) * 46)
         row:SetPoint("TOPRIGHT", frame.child, "TOPRIGHT", 0, -(index - 1) * 46)
-        row.text:SetText(string.format(text("%s · ID %d\n%s · +%.2fs · %s"), result.name, result.spellID,
-            text(result.event), result.elapsed, text(result.source)))
+        local detail = string.format(text("%s · +%.2fs · %s"), text(result.event), result.elapsed, text(result.source))
+        if result.relatedAuraID then detail = detail .. " · Aura ID " .. tostring(result.relatedAuraID) end
+        if result.castSpellID then detail = detail .. " · Cast ID " .. tostring(result.castSpellID) end
+        row.text:SetText(string.format(text("%s · ID %d\n%s"), result.name, result.spellID, detail))
         row.selection:SetShown(result == session.selected)
         row:Show()
     end

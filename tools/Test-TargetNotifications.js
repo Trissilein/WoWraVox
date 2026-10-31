@@ -36,6 +36,11 @@ const profilesModule = fs.readFileSync(path.join(root, "Profiles.lua"), "utf8").
   /^local _, ns = \.\.\.$/m,
   "local _, ns = addonName, addonNamespace",
 );
+// Real WoWraVoxTooltip.lua, wrapped so the harness can load it on demand (loadTooltipFile) after setting up its CDM mocks.
+const tooltipModule = fs.readFileSync(path.join(root, "WoWraVoxTooltip.lua"), "utf8").replace(
+  /^local _, ns = \.\.\.$/m,
+  "local _, ns = addonName, addonNamespace",
+);
 const harness = fs.readFileSync(path.join(__dirname, "Test-TargetNotifications.lua"), "utf8");
 const prelude = [
   "function wipe(value) for key in pairs(value) do value[key] = nil end end",
@@ -67,6 +72,9 @@ source,
   "end",
   "do",
   debugReport,
+  "end",
+  "function loadTooltipFile()",
+  tooltipModule,
   "end",
   harness,
 ].join("\n");

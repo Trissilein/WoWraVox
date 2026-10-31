@@ -78,6 +78,8 @@ local triggerInputBox
 local triggerAddButton
 local triggerStatus
 local triggerLabel
+local triggerHelpButton
+local triggerLegendLine
 local triggerPlaceholder
 local triggerPanel
 local triggerScroll
@@ -1133,8 +1135,18 @@ local function isPublicNumber(value)
         and type(value) == "number" and value > 0 and value == math.floor(value)
 end
 
+-- Buffs the player receives are remembered across sessions (at most 2000 IDs). One name can belong to several
+-- spell IDs, one per spec, so a name search finds every variant the player has actually met.
 function ns.ObserveSpell(spellID, origin)
-    if isPublicNumber(spellID) then observedSpellIDs[spellID] = origin or "Seen" end
+    if not isPublicNumber(spellID) then return end
+    observedSpellIDs[spellID] = origin or "Seen"
+    local db = WoWraVoxProfilesDB
+    if origin ~= "Your aura" or type(db) ~= "table" then return end
+    if type(db.learnedSpellIDs) ~= "table" then db.learnedSpellIDs = {} end
+    local learned = db.learnedSpellIDs
+    if learned[spellID] or (db.learnedSpellCount or 0) >= 2000 then return end
+    learned[spellID] = true
+    db.learnedSpellCount = (db.learnedSpellCount or 0) + 1
 end
 
 local function collectPlayerAuras(candidates)
@@ -1194,6 +1206,10 @@ function ns._Aura.searchAvailableSpells(query, exactNameID)
     local numericQuery = needle:match("^%d+$") ~= nil
     local candidates, partialInfo = {}, {}
     for id, origin in pairs(observedSpellIDs) do candidates[id] = origin end
+    local learned = type(WoWraVoxProfilesDB) == "table" and WoWraVoxProfilesDB.learnedSpellIDs
+    if type(learned) == "table" then
+        for id in pairs(learned) do candidates[id] = candidates[id] or "Your aura" end
+    end
     for _, rule in ipairs(WoWraVoxDB.auras) do
         for _, id in ipairs(rule.spellIDs) do candidates[id] = "WoWraVox rule" end
     end
@@ -1574,9 +1590,6 @@ function ns.getRuleScreenProfile(rule, eventKey)
     return profile
 end
 
-function ns.getScreenFrameKey(rule, eventKey)
-    return tostring(rule and rule.id or rule) .. ":" .. tostring(eventKey)
-end
 
 -- Font, colour and shadow without measuring. The font must exist before the first SetText: a FontString
 -- without a font raises "Font not set". A font file that does not load falls back to the Blizzard font.
@@ -2365,12 +2378,29 @@ function ns._Aura.spellContext(spellID)
     end
 end
 
--- One decision for "can the addon speak this aura itself in combat?": the trigger's cast ID (the aura ID
--- itself unless the rule bundles another cast) is a self buff in WoW's eyes.  handleCast speaks from the
--- player's own successful cast under this condition; AuraSoundFallback skips the native category word for
--- the same triggers.  Anything else keeps the native word.
+-- C_Spell.IsSelfBuff describes the effect, not the spell's class owner. Require the current character to know
+-- the cast ID before treating it as an own-cast signal; otherwise external class buffs need their category cue.
 function ns._Aura.addonCanSpeak(spellID, rule)
-    return ns._Aura.getSelfBuffStatus(ns._Aura.castIDFor(rule, spellID)) == "true"
+    local castID = ns._Aura.castIDFor(rule, spellID)
+    if ns._Aura.getSelfBuffStatus(castID) ~= "true" then return false end
+    local hasSpellbookAPI = false
+    if type(IsPlayerSpell) == "function" then
+        hasSpellbookAPI = true
+        local ok, known = pcall(IsPlayerSpell, castID)
+        if ok and known == true then return true end
+    end
+    if type(IsSpellKnownOrOverridesKnown) == "function" then
+        hasSpellbookAPI = true
+        local ok, known = pcall(IsSpellKnownOrOverridesKnown, castID)
+        if ok and known == true then return true end
+    end
+    if type(IsSpellKnown) == "function" then
+        hasSpellbookAPI = true
+        local ok, known = pcall(IsSpellKnown, castID)
+        if ok and known == true then return true end
+    end
+    -- Retail always provides spellbook APIs. Keep non-Retail harnesses on prior behavior when none exist.
+    return not hasSpellbookAPI
 end
 
 function ns._Aura.combatInfo(spellID, rule)
@@ -2378,18 +2408,47 @@ function ns._Aura.combatInfo(spellID, rule)
     if secrecy == "never" then
         return "spoken", L("Combat: custom text possible"), L("WoW exposes this effect in combat. Custom text requires TTS to be enabled.")
     elseif ns._Aura.addonCanSpeak(spellID, rule) then
-        return "cast", L("Combat: own cast"), L("Your own cast can use custom text. Receiving this effect from another player may require the configured category sound.")
+        return "cast", L("Combat: own cast"), L("Your current character knows this self-buff spell, so WoWraVox can use custom text for your cast. An effect from another player may need the configured category sound.")
     elseif secrecy == "unknown" then
         return "unknown", L("Combat: availability unknown"), L("Combat detection cannot currently be determined. A configured category sound may announce this effect.")
     end
     return "sound", L("Combat: category may be needed"), L("WoW may hide this effect in combat. Custom text may be unavailable; the configured category sound can announce it instead.")
 end
 
-function ns._Aura.addCombatTooltip(spellID, rule)
+local AURA_TRACKING_STATUS = {
+    direct = { key = "direct", label = "Direct", color = { 0.35, 0.86, 0.56 },
+        help = "WoWraVox can read this aura in combat without a Cooldown Manager signal." },
+    ownCast = { key = "ownCast", label = "Own cast", color = { 0.45, 0.76, 0.96 },
+        help = "This self-buff spell is known to your current character, so WoWraVox can detect your own cast. An effect from another player may need the selected category cue." },
+    tracked = { key = "tracked", label = "CDM tracked", color = { 0.35, 0.82, 0.58 },
+        help = "This aura is already assigned to Cooldown Manager Tracked Buffs or Bars. Its active state can serve as a combat signal. Click this row to open Advanced Cooldown Settings." },
+    available = { key = "available", label = "Available, not tracked", color = { 1, 0.68, 0.2 },
+        help = "Your current class/spec exposes this learned aura in Cooldown Manager, but it is not assigned to Tracked Buffs or Bars yet. Click this row for a prompt, then open Advanced Cooldown Settings and assign it manually. The category cue remains available." },
+    unavailable = { key = "unavailable", label = "Category cue", color = { 1, 0.48, 0.34 },
+        help = "No matching trackable aura is exposed for this class/spec. If WoW hides the effect, WoWraVox can use the configured category cue; custom text may be unavailable." },
+    unlearned = { key = "unlearned", label = "Not learned", color = { 0.68, 0.7, 0.74 },
+        help = "Cooldown Manager lists this as an aura for your class/spec, but marks it as not learned. WoWraVox will not suggest tracking it." },
+    unknown = { key = "unknown", label = "Status unknown", color = { 0.68, 0.7, 0.74 },
+        help = "WoWraVox could not verify this aura's Cooldown Manager eligibility. Learning mode and the configured category cue remain available." },
+}
+
+local function auraTrackingPresentation(spellID, rule, statuses)
+    local combatState = ns._Aura.combatInfo(spellID, rule)
+    if combatState == "spoken" then return AURA_TRACKING_STATUS.direct end
+    local status = type(statuses) == "table" and statuses[spellID]
+    local key = type(status) == "table" and status.key or status
+    return AURA_TRACKING_STATUS[key] or AURA_TRACKING_STATUS.unknown
+end
+
+function ns._Aura.addCombatTooltip(spellID, rule, statuses)
     local state, label, explanation = ns._Aura.combatInfo(spellID, rule)
     GameTooltip:AddLine(label, 0.88, 0.75, 0.4, true)
     GameTooltip:AddLine(explanation, 0.8, 0.8, 0.8, true)
     if not rule then return end
+    local trackingStatus = auraTrackingPresentation(spellID, rule, statuses)
+    local statusColor = trackingStatus.color
+    GameTooltip:AddLine(L(trackingStatus.label), statusColor[1], statusColor[2], statusColor[3], true)
+    GameTooltip:AddLine(L(trackingStatus.help), 0.8, 0.8, 0.8, true)
     local decision = ns.RuleOutput.Decide(rule, "apply", { spellID = spellID })
     if decision.native.selected then
         local category = decision.native.category
@@ -2403,6 +2462,9 @@ function ns._Aura.addCombatTooltip(spellID, rule)
             or status == "failed" and "Category sound registration failed. This effect may remain silent in combat."
             or "Category sound is not currently registered."
         GameTooltip:AddLine(L(text), 0.8, 0.8, 0.8, true)
+    elseif trackingStatus.key == "ownCast" and decision.media.native.status ~= "registered" then
+        GameTooltip:AddLine(L("No category sound configured for effects received from another player. They may be silent in combat."),
+            0.95, 0.65, 0.3, true)
     elseif state ~= "spoken" and state ~= "cast" and decision.media.native.status ~= "registered" then
         GameTooltip:AddLine(L("No category sound configured. This effect may remain silent in combat."), 0.95, 0.65, 0.3, true)
     end
@@ -2500,6 +2562,8 @@ processAura = function(spellID, isBaseline, sourceEvent)
             end
         else
             state.queryFailures = 0
+            -- Once a real expiry is readable, a CDM removal must respect it; durationless CDM states keep their signal.
+            state.fromCDM = state.fromCDM and expirationTime <= 0
             if state.auraInstanceID and state.auraInstanceID ~= auraInstanceID then
                 auraByInstanceID[state.auraInstanceID] = nil
             end
@@ -2542,6 +2606,58 @@ processAura = function(spellID, isBaseline, sourceEvent)
 end
 
 ns._Aura.processAura = processAura
+
+-- Cooldown Manager signal for auras hidden in combat (WoWraVoxTooltip.lua reports the icon's linked spell IDs
+-- and whether it is lit). It speaks only while the addon's own reading of the aura is hidden:
+-- a readable aura belongs to processAura, so nothing is announced twice.  activeAuras[spellID] is the shared
+-- active state, so a transition runs once however many icons or hooks report it, and it feeds the same
+-- apply/expire rules (sayAura) as a normal read, with the cast dedupe of shouldAnnounceApply.
+function ns._Aura.cdmSignal(spellIDs, active)
+    if type(active) ~= "boolean" then return end
+    if type(spellIDs) ~= "table" then spellIDs = { spellIDs } end
+    local spellID
+    for _, candidateID in ipairs(spellIDs) do
+        if isPublicNumber(candidateID) and auraWatchBySpellID[candidateID] then
+            spellID = candidateID
+            break
+        end
+    end
+    if not spellID then return end
+    local aura, queryOK = getAura(spellID)
+    local hidden = not queryOK
+    if queryOK and aura == nil then
+        -- processAura treats "absent" in a secret context as unknown too; Blizzard's never-secret auras are exempt
+        hidden = ns._Aura.aurasAreSecret() and ns._Aura.auraSecrecy(spellID) ~= "never"
+    elseif queryOK then
+        local _, expirationOK = safeAuraField(aura, "expirationTime")
+        local _, instanceOK = safeAuraField(aura, "auraInstanceID")
+        hidden = not (expirationOK and instanceOK)
+    end
+    if not hidden then return end
+
+    local state = activeAuras[spellID]
+    if active then
+        if state then return end
+        activeAuras[spellID] = { expirationTime = 0, fromCDM = true }
+        -- the icon is proof of a new application: a hidden read of the same moment must not suppress it
+        ns._Aura.unreadableBaselines[spellID] = nil
+        if ns.AuraSoundFallback then ns.AuraSoundFallback.LogAura(spellID, "cdm-icon-active", "CDM_SIGNAL") end
+        if auraBaselineComplete then sayAura(spellID, "apply", "CDM_SIGNAL") end
+        return
+    end
+    if not state then return end
+    -- An end counts as an expiry like in processAura: inside the readable expiry window, or for an aura whose
+    -- application this signal announced (no expiry time known).
+    local now = GetTime()
+    local expired = (state.expirationTime > 0 and now >= state.expirationTime - 0.5 and now <= state.expirationTime + 3)
+        or (state.fromCDM and state.expirationTime <= 0)
+    ns._Aura.cancelExpiry(state)
+    ns._Aura.clearEventState(spellID)
+    activeAuras[spellID] = nil
+    if state.auraInstanceID then auraByInstanceID[state.auraInstanceID] = nil end
+    if ns.AuraSoundFallback then ns.AuraSoundFallback.LogAura(spellID, "cdm-icon-inactive", "CDM_SIGNAL") end
+    if expired then sayAura(spellID, "expire", "CDM_SIGNAL") end
+end
 
 local function syncAllAuras(isBaseline)
     local profiling = ns.Prof.on
@@ -2590,6 +2706,7 @@ local function onUnitAuraUpdate(unit, updateInfo)
     for _, aura in ipairs(type(added) == "table" and added or ns._Aura.EMPTY) do
         local spellID, ok = safeAuraField(aura, "spellId")
         ns.tryDebugReport("NoteAura", ok and isPublicNumber(spellID) and spellID or nil, "added, id hidden")
+        if ok and isPublicNumber(spellID) then ns.ObserveSpell(spellID, "Your aura") end
         if ok and isPublicNumber(spellID) and auraWatchBySpellID[spellID] then
             affected[spellID] = true
         elseif not ok then
@@ -3471,6 +3588,24 @@ local function removeSelectedRule()
 end
 
 if StaticPopupDialogs then
+    StaticPopupDialogs["WOWRAVOX_CDM_TRACK_AURA"] = {
+        text = "%s",
+        button1 = L("Open Advanced Cooldown Settings"),
+        button2 = L("Cancel"),
+        OnAccept = function()
+            local ok, reason = false, "unavailable"
+            if ns.AuraCDM and ns.AuraCDM.OpenSettings then ok, reason = ns.AuraCDM.OpenSettings() end
+            if not ok and DEFAULT_CHAT_FRAME then
+                local message = reason == "combat" and L("Open Advanced Cooldown Settings after combat.")
+                    or L("Open Advanced Cooldown Settings from Edit Mode.")
+                DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. message)
+            end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
     StaticPopupDialogs["WOWRAVOX_DELETE_RULE"] = {
         text = "%s",
         button1 = YES,
@@ -4603,9 +4738,12 @@ local function layoutSharedEditor(isAura)
     triggerPanel:SetHeight(triggerPanelHeight)
     triggerLabel:ClearAllPoints()
     triggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -10)
+    triggerHelpButton:ClearAllPoints()
+    triggerHelpButton:SetPoint("LEFT", triggerLabel, "RIGHT", 6, 0)
+    triggerHelpButton:SetShown(isAura)
     triggerInputBox:ClearAllPoints()
     triggerInputBox:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.FIELD_X, -13)
-    triggerInputBox:SetPoint("RIGHT", triggerAddButton, "LEFT", -8, 0)
+    triggerInputBox:SetPoint("RIGHT", isAura and auraEditor.skillLearnButton or triggerAddButton, "LEFT", -8, 0)
     triggerInputBox:SetHeight(30)
     triggerInputBox:SetTextInsets(24, 6, 0, 0)
     triggerInputBox.searchIcon:ClearAllPoints()
@@ -4613,12 +4751,22 @@ local function layoutSharedEditor(isAura)
     triggerAddButton:ClearAllPoints()
     triggerAddButton:SetSize(ns.Layout.BUTTON_W, 30)
     triggerAddButton:SetPoint("TOPRIGHT", triggerPanel, "TOPRIGHT", ns.Layout.RIGHT, -13)
+    auraEditor.skillLearnButton:ClearAllPoints()
+    auraEditor.skillLearnButton:SetSize(isAura and 76 or ns.Layout.BUTTON_W, 30)
+    if isAura then
+        auraEditor.skillLearnButton:SetPoint("RIGHT", triggerAddButton, "LEFT", -6, 0)
+    else
+        auraEditor.skillLearnButton:SetPoint("TOPRIGHT", triggerPanel, "TOPRIGHT", ns.Layout.RIGHT, -13)
+    end
     triggerStatus:ClearAllPoints()
     triggerStatus:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -51)
     triggerStatus:SetPoint("RIGHT", triggerPanel, "RIGHT", ns.Layout.RIGHT, 0)
     triggerScroll:ClearAllPoints()
     triggerScroll:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", 10, -70)
-    triggerScroll:SetPoint("BOTTOMRIGHT", triggerPanel, "BOTTOMRIGHT", -27, 8)
+    local showTrackingLegend = isAura and not addRuleMode
+        and not (ns.AuraPresetUI and ns.AuraPresetUI.creationActive)
+    triggerLegendLine:SetShown(showTrackingLegend)
+    triggerScroll:SetPoint("BOTTOMRIGHT", triggerPanel, "BOTTOMRIGHT", -27, showTrackingLegend and 27 or 8)
     triggerInputBox:SetShown(isAura)
     triggerPlaceholder:SetShown(isAura and query == "")
     triggerAddButton:SetShown(isAura or isItem)
@@ -4631,7 +4779,7 @@ local function layoutSharedEditor(isAura)
     if isAura then
         auraEditor.skillTriggerLabel:Hide()
         auraEditor.skillTriggerDropdown:Hide()
-        auraEditor.skillLearnButton:Hide()
+        auraEditor.skillLearnButton:SetShown(selectedAura() ~= nil and selectedAura().builtin ~= true)
         auraEditor.skillLearningStatus:Hide()
         ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
         layoutNotificationPanel(ns.notificationPanels.apply, messageY)
@@ -4864,11 +5012,51 @@ function ns.memberRowText(name, id, note)
     return name .. " |cff8c929a· " .. table.concat(parts, " · ") .. "|r"
 end
 
+function ns.setupMemberRow(row)
+    row.icon = row:CreateTexture(nil, "ARTWORK")
+    row.icon:SetSize(20, 20)
+    row.icon:SetPoint("LEFT", row, "LEFT", 3, 0)
+    row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    row.title = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
+    row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
+    row.title:SetJustifyH("LEFT")
+    row.title:SetWordWrap(false)
+    row.title:SetMaxLines(1)
+    row.remove = CreateFrame("Button", nil, row)
+    row.remove:SetSize(22, 22)
+    row.remove:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    row.remove.mark = row.remove:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    row.remove.mark:SetPoint("CENTER", row.remove, "CENTER", 0, 0)
+    row.remove.mark:SetText("×")
+    row.remove.mark:SetTextColor(0.92, 0.38, 0.32)
+    row.remove:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+end
+
+function ns.setupSpellSearchRow(row)
+    row.icon = row:CreateTexture(nil, "ARTWORK")
+    row.icon:SetSize(26, 26)
+    row.icon:SetPoint("LEFT", row, "LEFT", 5, 0)
+    row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    row.title = createLabel(row, "", "GameFontHighlightSmall")
+    row.title:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 8, -2)
+    row.title:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    row.title:SetJustifyH("LEFT")
+    row.title:SetMaxLines(1)
+    row.idText = createLabel(row, "", "GameFontDisableSmall")
+    row.idText:SetPoint("BOTTOMLEFT", row.icon, "BOTTOMRIGHT", 8, 1)
+    row.idText:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    row.idText:SetJustifyH("LEFT")
+    row.idText:SetMaxLines(1)
+end
+
 local function updateSelectedTriggers()
     local rule = selectedAura()
     if not (triggerScroll and triggerChild and rule) then return end
     for _, itemRow in ipairs(ns.itemMemberRows) do itemRow:Hide() end
 
+    local cdmStatuses = ns.AuraCDM and ns.AuraCDM.GetEffectStatuses
+        and ns.AuraCDM.GetEffectStatuses(rule) or {}
     local validCount, pendingCount, invalidCount = 0, 0, 0
     for index, spellID in ipairs(rule.spellIDs or {}) do
         local info, state = getSpellInfo(spellID)
@@ -4880,24 +5068,29 @@ local function updateSelectedTriggers()
         if not row then
             row = CreateFrame("Frame", nil, triggerChild)
             row:SetHeight(ns.Layout.MEMBER_ROW_H)
-            row.icon = row:CreateTexture(nil, "ARTWORK")
-            row.icon:SetSize(20, 20)
-            row.icon:SetPoint("LEFT", row, "LEFT", 3, 0)
-            row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-            row.title = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
-            row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
-            row.title:SetJustifyH("LEFT")
-            row.title:SetWordWrap(false)
-            row.title:SetMaxLines(1)
-            row.remove = CreateFrame("Button", nil, row)
-            row.remove:SetSize(22, 22)
-            row.remove:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-            row.remove.mark = row.remove:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-            row.remove.mark:SetPoint("CENTER", row.remove, "CENTER", 0, 0)
-            row.remove.mark:SetText("×")
-            row.remove.mark:SetTextColor(0.92, 0.38, 0.32)
-            row.remove:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+            ns.setupMemberRow(row)
+            row.actionButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            row.actionButton:SetSize(82, 22)
+            row.actionButton:SetPoint("RIGHT", row.remove, "LEFT", -4, 0)
+            row.actionButton:SetScript("OnClick", function(self)
+                local parent = self:GetParent()
+                if parent.openTrackingSettings then parent:openTrackingSettings() end
+            end)
+            row.actionButton:HookScript("OnEnter", function(self)
+                local parent = self:GetParent()
+                local status = AURA_TRACKING_STATUS[parent.cdmStatusKey]
+                if not status then return end
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                local title = parent.cdmStatusKey == "tracked" and "Click to open CDM" or "Click to set up"
+                ns.fillHelpTooltip(GameTooltip, title, status.help)
+                GameTooltip:Show()
+            end)
+            row.actionButton:HookScript("OnLeave", function()
+                GameTooltip:Hide()
+                ns.resetTooltipFonts()
+            end)
+            ns.Skin.Register(row.actionButton, "button")
+            row:EnableMouse(true)
             row.remove:SetScript("OnClick", function(self)
                 local parent = self:GetParent()
                 local auraRule = selectedAura()
@@ -4921,10 +5114,31 @@ local function updateSelectedTriggers()
                 local ok = pcall(GameTooltip.SetSpellByID, GameTooltip, self.spellID)
                 if not ok then GameTooltip:SetText(self.spellName or L("Unknown ID")) end
                 GameTooltip:AddLine("ID: " .. self.spellID, 0.72, 0.78, 0.86)
-                ns._Aura.addCombatTooltip(self.spellID, self.rule)
+                ns._Aura.addCombatTooltip(self.spellID, self.rule, self.cdmStatuses)
                 GameTooltip:Show()
             end)
             row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            row.openTrackingSettings = function(self)
+                if self.cdmStatusKey == "tracked" then
+                    local ok, reason = false, "unavailable"
+                    if ns.AuraCDM and ns.AuraCDM.OpenSettings then ok, reason = ns.AuraCDM.OpenSettings() end
+                    if not ok and DEFAULT_CHAT_FRAME then
+                        local message = reason == "combat" and L("Open Advanced Cooldown Settings after combat.")
+                            or L("Open Advanced Cooldown Settings from Edit Mode.")
+                        DEFAULT_CHAT_FRAME:AddMessage("|cffd8b65aWoWraVox:|r " .. message)
+                    end
+                    return
+                end
+                if self.cdmStatusKey ~= "available" or not StaticPopup_Show then return end
+                local prompt = string.format(L("%s (ID %d) is available for your class/spec but not assigned to Tracked Buffs or Bars. Open Advanced Cooldown Settings and assign it manually. WoWraVox cannot add it automatically. Your category cue remains available."),
+                    self.spellName or L("Unknown ID"), self.spellID)
+                StaticPopup_Show("WOWRAVOX_CDM_TRACK_AURA", prompt, nil, { spellID = self.spellID })
+            end
+            row:SetScript("OnMouseUp", function(self, button)
+                if button == "LeftButton" and self.openTrackingSettings then
+                    self:openTrackingSettings()
+                end
+            end)
             addHelpTooltip(row.remove, "Remove trigger", "Remove this spell ID from the aura rule. Triggers of built-in rules cannot be removed.")
             ns.Skin.Register(row, "memberRow")
             ns.Skin.Register(row.remove, "dangerButton")
@@ -4937,11 +5151,37 @@ local function updateSelectedTriggers()
         row.spellName = info and info.name or (state == "pending" and L("Loading…") or L("Unknown ID"))
         row.icon:SetTexture(info and info.iconID or "Interface\\Icons\\INV_Misc_QuestionMark")
         row.rule = rule
-        local combatState, combatLabel = ns._Aura.combatInfo(spellID, rule)
-        row.combat = combatState
-        local note = state == "pending" and L("loading") or state ~= "valid" and L("invalid") or combatLabel
-        row.title:SetText(ns.memberRowText(row.spellName, spellID, note))
-        row.title:SetTextColor(state == "valid" and 0.93 or 1, state == "valid" and 0.93 or 0.65, state == "valid" and 0.96 or 0.38)
+        row.cdmStatuses = cdmStatuses
+        if state == "valid" then
+            local trackingStatus = auraTrackingPresentation(spellID, rule, cdmStatuses)
+            local color = trackingStatus.color
+            row.cdmStatusKey = trackingStatus.key
+            local isClickable = trackingStatus.key == "tracked" or trackingStatus.key == "available"
+            row.actionButton:SetShown(isClickable)
+            row.actionButton:SetText(L(trackingStatus.key == "tracked" and "Open CDM" or "Set up"))
+            row.actionButton:SetEnabled(isClickable)
+            row.title:ClearAllPoints()
+            row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
+            if isClickable then
+                row.title:SetPoint("RIGHT", row.actionButton, "LEFT", -6, 0)
+            else
+                row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
+            end
+            local hex = string.format("%02x%02x%02x", math.floor(color[1] * 255 + 0.5),
+                math.floor(color[2] * 255 + 0.5), math.floor(color[3] * 255 + 0.5))
+            row.title:SetText("|cff" .. hex .. row.spellName .. "|r |cff8c929a· " .. spellID .. "|r"
+                .. " |cff" .. hex .. "· " .. L(trackingStatus.label) .. "|r")
+            row.title:SetTextColor(0.93, 0.93, 0.96)
+        else
+            row.cdmStatusKey = nil
+            row.actionButton:Hide()
+            row.title:ClearAllPoints()
+            row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
+            row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
+            local note = state == "pending" and L("loading") or L("invalid")
+            row.title:SetText(ns.memberRowText(row.spellName, spellID, note))
+            row.title:SetTextColor(state == "pending" and 0.75 or 1, state == "pending" and 0.78 or 0.65, state == "pending" and 0.84 or 0.38)
+        end
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", triggerChild, "TOPLEFT", 2, -((index - 1) * ns.Layout.MEMBER_ROW_H))
         row:SetPoint("RIGHT", triggerChild, "RIGHT", -2, 0)
@@ -5015,24 +5255,7 @@ ns.AuraPresetUI.makeOverviewRow = function()
     local ui = ns.AuraPresetUI
     local row = CreateFrame("Frame", nil, ui.ovChild)
     row:SetHeight(ns.Layout.MEMBER_ROW_H)
-    row.icon = row:CreateTexture(nil, "ARTWORK")
-    row.icon:SetSize(20, 20)
-    row.icon:SetPoint("LEFT", row, "LEFT", 3, 0)
-    row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    row.title = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
-    row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
-    row.title:SetJustifyH("LEFT")
-    row.title:SetWordWrap(false)
-    row.title:SetMaxLines(1)
-    row.remove = CreateFrame("Button", nil, row)
-    row.remove:SetSize(22, 22)
-    row.remove:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-    row.remove.mark = row.remove:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    row.remove.mark:SetPoint("CENTER", row.remove, "CENTER", 0, 0)
-    row.remove.mark:SetText("×")
-    row.remove.mark:SetTextColor(0.92, 0.38, 0.32)
-    row.remove:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    ns.setupMemberRow(row)
     row.remove:SetScript("OnClick", function() ui.removeRow(row.data) end)
     addHelpTooltip(row.remove, "Remove from group",
         "Remove this trigger from the new group. A preset effect is unticked in the list above.")
@@ -5218,6 +5441,14 @@ local function addTriggerIDs(ids)
     return true
 end
 
+ns.SkillTracking.addAuraID = function(rule, spellID)
+    if selectedAura() ~= rule or type(spellID) ~= "number" or spellID <= 0 or spellID ~= math.floor(spellID) then
+        return false
+    end
+    if rule.builtin then return false end
+    return addTriggerIDs({ spellID })
+end
+
 runTriggerSearch = function(expectedGeneration)
     if not (triggerInputBox and triggerAddButton and searchPopup and selectedAuraRule) then return end
     if expectedGeneration and expectedGeneration ~= searchGeneration then return end
@@ -5257,12 +5488,9 @@ runTriggerSearch = function(expectedGeneration)
         results, hasPending, exactNamePending = ns._Aura.searchAvailableSpells(
             query, exactSearch and nameSearch.id, selectedAuraRule)
         if exactSearch then nameSearch.pending = exactNamePending end
-        local exactHit, exactCount
+        local exactHit
         for _, result in ipairs(results) do
-            if result.name:lower() == query:lower() then
-                exactHit = result
-                exactCount = (exactCount or 0) + 1
-            end
+            if result.name:lower() == query:lower() then exactHit = exactHit or result end
         end
         if exactHit and (exactHit.origin == "Game search" or (exactSearch and nameSearch.id)) then
             exactHit.confirmOnly = true
@@ -5277,9 +5505,15 @@ runTriggerSearch = function(expectedGeneration)
             triggerAddButton.selectedSearchResult = nil
             selectedResult = nil
         end
-        if exactHit and exactCount == 1 then
+        if exactHit then
+            -- Every ID with this exact name is added together: one name can belong to several spells (one per spec).
+            local exactIDs = {}
+            for _, result in ipairs(results) do
+                if result.name:lower() == query:lower() then exactIDs[#exactIDs + 1] = result.id end
+            end
+            table.sort(exactIDs)
             triggerAddButton.exactResult = {
-                query = query, rule = selectedAuraRule, generation = searchGeneration, id = exactHit.id,
+                query = query, rule = selectedAuraRule, generation = searchGeneration, id = exactIDs[1], ids = exactIDs,
             }
             triggerAddButton:SetText(L("Add"))
             triggerAddButton:SetEnabled(true)
@@ -5405,20 +5639,7 @@ local function createTriggerSearchPopup()
         row.selection:SetAllPoints(row)
         row.selection:SetColorTexture(0.68, 0.43, 0.08, 0.28)
         row.selection:Hide()
-        row.icon = row:CreateTexture(nil, "ARTWORK")
-        row.icon:SetSize(26, 26)
-        row.icon:SetPoint("LEFT", row, "LEFT", 5, 0)
-        row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-        row.title = createLabel(row, "", "GameFontHighlightSmall")
-        row.title:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 8, -2)
-        row.title:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        row.title:SetJustifyH("LEFT")
-        row.title:SetMaxLines(1)
-        row.idText = createLabel(row, "", "GameFontDisableSmall")
-        row.idText:SetPoint("BOTTOMLEFT", row.icon, "BOTTOMRIGHT", 8, 1)
-        row.idText:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        row.idText:SetJustifyH("LEFT")
-        row.idText:SetMaxLines(1)
+        ns.setupSpellSearchRow(row)
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         addHelpTooltip(row, "Add trigger", "Click local spell suggestions to add. Select game-search results, then press Add.")
         row:SetScript("OnClick", function(self)
@@ -5843,7 +6064,7 @@ ns.AuraPresetUI.beginCreation = function()
     creationView.backButton:Show()
     creationView.createAuraButton:Show()
 
-    for _, control in ipairs({ triggerLabel, triggerInputBox, triggerPlaceholder, triggerAddButton, triggerStatus, triggerScroll }) do
+    for _, control in ipairs({ triggerLabel, triggerHelpButton, triggerInputBox, triggerPlaceholder, triggerAddButton, triggerStatus, triggerLegendLine, triggerScroll }) do
         control:SetParent(creationView.manualPanel)
         control:ClearAllPoints()
         control:Show()
@@ -5851,6 +6072,10 @@ ns.AuraPresetUI.beginCreation = function()
     triggerScroll.backdrop = creationView.manualPanel
     triggerLabel:SetText(L("TRIGGERS"))
     triggerLabel:SetPoint("TOPLEFT", creationView.manualPanel, "TOPLEFT", ns.Layout.PAD, -10)
+    triggerLegendLine:SetPoint("BOTTOMLEFT", creationView.manualPanel, "BOTTOMLEFT", ns.Layout.PAD, 7)
+    triggerLegendLine:SetPoint("RIGHT", creationView.manualPanel, "RIGHT", ns.Layout.RIGHT, 0)
+    triggerHelpButton:SetPoint("LEFT", triggerLabel, "RIGHT", 6, 0)
+    triggerHelpButton:Show()
     triggerInputBox:SetPoint("TOPLEFT", creationView.manualPanel, "TOPLEFT", ns.Layout.FIELD_X, -13)
     triggerInputBox:SetPoint("RIGHT", triggerAddButton, "LEFT", -8, 0)
     triggerInputBox:SetHeight(30)
@@ -5863,7 +6088,7 @@ ns.AuraPresetUI.beginCreation = function()
     triggerStatus:SetPoint("TOPLEFT", creationView.manualPanel, "TOPLEFT", ns.Layout.PAD, -51)
     triggerStatus:SetPoint("RIGHT", creationView.manualPanel, "RIGHT", ns.Layout.RIGHT, 0)
     triggerScroll:SetPoint("TOPLEFT", creationView.manualPanel, "TOPLEFT", 10, -70)
-    triggerScroll:SetPoint("BOTTOMRIGHT", creationView.manualPanel, "BOTTOMRIGHT", -27, 8)
+    triggerScroll:SetPoint("BOTTOMRIGHT", creationView.manualPanel, "BOTTOMRIGHT", -27, 27)
 
     triggerInputBox:SetText("")
     triggerPlaceholder:Show()
@@ -5877,11 +6102,13 @@ ns.AuraPresetUI.finishCreation = function(restoreSelection)
     searchGeneration = searchGeneration + 1
     ns._Aura.cancelPartialSpellSearch()
     if searchPopup then searchPopup:Hide() end
-    for _, control in ipairs({ triggerLabel, triggerInputBox, triggerPlaceholder, triggerAddButton, triggerStatus, triggerScroll }) do
+    for _, control in ipairs({ triggerLabel, triggerHelpButton, triggerInputBox, triggerPlaceholder, triggerAddButton, triggerStatus, triggerLegendLine, triggerScroll }) do
         control:SetParent(triggerPanel)
         control:ClearAllPoints()
     end
     triggerScroll.backdrop = triggerPanel
+    triggerLegendLine:SetPoint("BOTTOMLEFT", triggerPanel, "BOTTOMLEFT", ns.Layout.PAD, 7)
+    triggerLegendLine:SetPoint("RIGHT", triggerPanel, "RIGHT", ns.Layout.RIGHT, 0)
     triggerPlaceholder:SetPoint("LEFT", triggerInputBox, "LEFT", 23, 0)
     triggerPlaceholder:SetPoint("RIGHT", triggerInputBox, "RIGHT", -8, 0)
     triggerInputBox:SetText("")
@@ -6082,6 +6309,35 @@ local function buildTriggerControls()
     triggerPanel = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
     stylePanel(triggerPanel, 0.07, 0.075, 0.085)
     triggerLabel = makeSectionLabel(triggerPanel, "TRIGGERS", 12, -8, true)
+    triggerHelpButton = CreateFrame("Button", nil, triggerPanel)
+    triggerHelpButton:SetSize(18, 18)
+    triggerHelpButton.label = triggerHelpButton:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    triggerHelpButton.label:SetAllPoints()
+    triggerHelpButton.label:SetText("?")
+    triggerHelpButton.label:SetTextColor(0.75, 0.78, 0.84)
+    triggerHelpButton:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    local trackingLegend = {}
+    local trackingLegendText = {}
+    for _, key in ipairs({ "direct", "ownCast", "tracked", "available", "unavailable", "unlearned", "unknown" }) do
+        local status = AURA_TRACKING_STATUS[key]
+        local label = L(status.label)
+        trackingLegend[#trackingLegend + 1] = { text = label, r = status.color[1], g = status.color[2], b = status.color[3] }
+        local hex = string.format("%02x%02x%02x", math.floor(status.color[1] * 255 + 0.5),
+            math.floor(status.color[2] * 255 + 0.5), math.floor(status.color[3] * 255 + 0.5))
+        trackingLegendText[#trackingLegendText + 1] = "|cff" .. hex .. label .. "|r"
+    end
+    addHelpTooltip(triggerHelpButton, "Effect status colors",
+        "Each trigger row shows its combat tracking status. The legend at the bottom maps colors to statuses. The action button on CDM rows opens settings or a setup prompt.",
+        trackingLegend)
+    triggerLegendLine = triggerPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    triggerLegendLine:SetPoint("BOTTOMLEFT", triggerPanel, "BOTTOMLEFT", ns.Layout.PAD, 7)
+    triggerLegendLine:SetPoint("RIGHT", triggerPanel, "RIGHT", ns.Layout.RIGHT, 0)
+    triggerLegendLine:SetHeight(14)
+    triggerLegendLine:SetJustifyH("LEFT")
+    triggerLegendLine:SetWordWrap(false)
+    triggerLegendLine:SetMaxLines(1)
+    triggerLegendLine:SetText(L("Tracking colors:") .. " " .. table.concat(trackingLegendText, " |cff8c929a·|r "))
+    triggerLegendLine:Hide()
     triggerInputBox = createEditBox(triggerPanel, 300, 24)
     triggerInputBox.searchIcon = triggerInputBox:CreateTexture(nil, "ARTWORK")
     triggerInputBox.searchIcon:SetSize(14, 14)
@@ -6152,6 +6408,13 @@ end)
 triggerInputBox:SetScript("OnEnterPressed", function(self)
     local ids, valid = parseSpellIDs(self:GetText())
     if valid and #ids > 0 then addTriggerIDs(ids); return end
+    -- An exact name with several IDs goes through Add, which adds all of them.
+    local exactResult = triggerAddButton.exactResult
+    if exactResult and exactResult.query == trim(self:GetText()) and exactResult.rule == selectedAura()
+        and exactResult.generation == searchGeneration then
+        triggerAddButton:Click()
+        return
+    end
     if searchPopup:IsShown() and searchRows[1] and searchRows[1].result then
         if searchRows[1].result.confirmOnly then
             triggerAddButton:Click()
@@ -6202,7 +6465,7 @@ triggerAddButton:SetScript("OnClick", function()
     local exactResult = triggerAddButton.exactResult
     if exactResult and exactResult.query == query and exactResult.rule == selectedAura()
         and exactResult.generation == searchGeneration then
-        addTriggerIDs({ exactResult.id })
+        addTriggerIDs(exactResult.ids or { exactResult.id })
         return
     end
     local scan = ns.spellSearch.partial
@@ -6543,6 +6806,10 @@ local function buildMessageControls()
     auraEditor.skillLearnButton:SetScript("OnClick", function()
         if ns.SkillTracking.learning then
             ns.SkillTracking.StopLearning()
+        elseif selectedAura() then
+            if not ns.SkillTracking.StartAuraLearning(selectedAura()) then
+                setStatus(L("Select an aura rule with at least one spell ID before learning."), true)
+            end
         elseif not ns.SkillTracking.StartLearning(selectedSkill()) then
             setStatus(L("Select a valid spell rule before learning."), true)
         end
@@ -6674,20 +6941,7 @@ local function styleCreationOption(button, iconPath, title, description, y)
         row:SetPoint("TOPLEFT", skillSearchPopup, "TOPLEFT", 5, -4 - (index - 1) * 36)
         row:SetPoint("TOPRIGHT", skillSearchPopup, "TOPRIGHT", -5, -4 - (index - 1) * 36)
         row:SetHeight(34)
-        row.icon = row:CreateTexture(nil, "ARTWORK")
-        row.icon:SetSize(26, 26)
-        row.icon:SetPoint("LEFT", row, "LEFT", 5, 0)
-        row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-        row.title = createLabel(row, "", "GameFontHighlightSmall")
-        row.title:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 8, -2)
-        row.title:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        row.title:SetJustifyH("LEFT")
-        row.title:SetMaxLines(1)
-        row.idText = createLabel(row, "", "GameFontDisableSmall")
-        row.idText:SetPoint("BOTTOMLEFT", row.icon, "BOTTOMRIGHT", 8, 1)
-        row.idText:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        row.idText:SetJustifyH("LEFT")
-        row.idText:SetMaxLines(1)
+        ns.setupSpellSearchRow(row)
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         row:SetScript("OnClick", function(self) selectSkillSearchResult(self.result) end)
         skillSearchRows[index] = row
@@ -7303,7 +7557,7 @@ addHelpTooltip(testExpireButton, "Test notification", "Preview this message with
 addHelpTooltip(readyMessageBox, "Ready notification", "Message spoken when the observed item cooldown is ready.")
 addHelpTooltip(testItemButton, "Test notification", "Preview this message with the selected voice and volume.")
 addHelpTooltip(auraEditor.skillTriggerDropdown, "Spell trigger", "Choose a spell cooldown, charge, or successful cast event to monitor.")
-addHelpTooltip(auraEditor.skillLearnButton, "Learning Mode", "Observe this spell cast, its cooldown and charges, and changes to your own buffs and debuffs.")
+addHelpTooltip(auraEditor.skillLearnButton, "Learning Mode", "For spell rules, observe the cast and cooldown. For aura rules, observe aura IDs and Cooldown Manager visibility for 20 seconds.")
 addHelpTooltip(voiceDropdown.Button or voiceDropdown, "Voice", "Select the voice for this rule.")
 addHelpTooltip(volumeSlider, "Volume", "Set the speech volume from 0 to 100.")
 addHelpTooltip(auraEditor.speedSlider, "Speech speed", "Set the speech speed from 100% to 200%.")
