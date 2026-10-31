@@ -37,7 +37,7 @@ These rules are created only for a new profile. Existing WoWraVox settings are p
 - `/wowravox` or `/wvr` opens WoWraVox; so does the addon compartment entry or a Titan Panel / LibDataBroker button.
 - Select **Add rule** to create an Aura, Equipped item, or Spell cooldown rule.
 - Under **Add rule → Aura**, choose available preset effects from the icon tiles and add manual spell IDs if needed. Nothing is preselected. **Create aura** builds one new group from the selected effects and manual triggers; each preset keeps its category unless you set an overriding category on the group.
-- Aura messages accept `{spell}` for the effect that triggered the announcement. For effects hidden in combat, native category cues provide a fallback; they cannot speak a custom spell name.
+- Aura messages accept `{spell}` for the effect that triggered the announcement. For effects hidden in combat, the selected category cue can announce the effect; it cannot speak a custom spell name.
 - An equipped-item rule can hold several items or slots (**Add item**); each announces on its own when its cooldown ends, `{item}` and `{slot}` in the message stand for the one that became ready, and an entry's tag switches between tracking the item and the slot it sits in.
 - Settings are stored in profiles that can be assigned per character and per specialization.
 - On-screen text profiles can be previewed, recolored, and independently anchored.
