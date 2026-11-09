@@ -1,4 +1,4 @@
-"""Lua 5.1 syntax + top-level-locals headroom check for every file in WoWraVox.toc (+ tools/*.lua).
+"""Lua 5.1 syntax + top-level-locals headroom check for every file in WoWraVox.toc and WoWraVox_Camelot.toc (+ tools/*.lua).
 
 Usage: python tools/Test-LuaSyntax.py      (needs: pip install lupa)
 Exit 1 on any syntax error. Low headroom only warns (WoW limit: 200 locals per function).
@@ -20,11 +20,12 @@ load = rt.eval("function(s, n) local f, e = loadstring(s, n) if f then return ni
 
 def toc_files():
     files = []
-    with open(os.path.join(ROOT, "WoWraVox.toc"), encoding="utf8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line and not line.startswith("#") and line.lower().endswith(".lua"):
-                files.append(line.replace("\\", "/"))
+    for toc in ("WoWraVox.toc", "WoWraVox_Camelot.toc"):
+        with open(os.path.join(ROOT, toc), encoding="utf8") as fh:
+            for line in fh:
+                line = line.strip().replace("\\", "/")
+                if line and not line.startswith("#") and line.lower().endswith(".lua") and line not in files:
+                    files.append(line)
     return files
 
 

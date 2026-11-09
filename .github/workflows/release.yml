@@ -31,6 +31,7 @@ jobs:
       stability: ${{ steps.release.outputs.stability }}
       publish_target: ${{ steps.release.outputs.publish_target }}
       patch: ${{ steps.release.outputs.patch }}
+      forever_patch: ${{ steps.release.outputs.forever_patch }}
       commit: ${{ steps.release.outputs.commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -66,12 +67,20 @@ jobs:
           minor=$(printf '%s' "$interface" | cut -c3-4)
           build=$(printf '%s' "$interface" | cut -c5-6)
           patch="$((10#$major)).$((10#$minor)).$((10#$build))"
+          # WoW Forever patch from the Camelot TOC (first interface number), e.g. 16001 -> 1.60.1
+          forever_interface=$(sed -n 's/^## Interface: *\([0-9]\{5,6\}\).*/\1/p' WoWraVox_Camelot.toc | head -n1)
+          if [ -z "$forever_interface" ]; then
+            echo "Cannot read ## Interface from WoWraVox_Camelot.toc" >&2
+            exit 1
+          fi
+          forever_patch="$((10#$forever_interface / 10000)).$((10#$forever_interface / 100 % 100)).$((10#$forever_interface % 100))"
           commit="$(git rev-parse HEAD)"
           {
             echo "version=$version"
             echo "stability=stable"
             echo "publish_target=$target"
             echo "patch=$patch"
+            echo "forever_patch=$forever_patch"
             echo "commit=$commit"
           } >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
@@ -143,16 +152,21 @@ jobs:
           WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
           PATCH: ${{ needs.verify.outputs.patch }}
+          FOREVER_PATCH: ${{ needs.verify.outputs.forever_patch }}
           STABILITY: ${{ needs.verify.outputs.stability }}
         shell: bash
         run: |
           CHANGELOG=$(cat "$NOTES_FILE")
+          # Forever: docs.wago.io does not list the field yet. The data endpoint uses the plural, older plugins the
+          # singular; send both and read the kept response body if Wago answers 422 (resume with publish_target=wago).
           metadata=$(jq -cn \
             --arg label "$VERSION" \
             --arg stability "$STABILITY" \
             --arg changelog "$CHANGELOG" \
             --arg patch "$PATCH" \
-            '{label: $label, stability: $stability, changelog: $changelog, supported_retail_patch: $patch}')
+            --arg forever "$FOREVER_PATCH" \
+            '{label: $label, stability: $stability, changelog: $changelog, supported_retail_patch: $patch,
+              supported_forever_patch: $forever, supported_forever_patches: [$forever]}')
           # Keep the response body: a bare "curl: (22) ... 422" hides why the API refused the upload.
           http_code=$(curl --silent --show-error -o "$RUNNER_TEMP/wago-response.txt" -w '%{http_code}' -X POST \
             --form-string "metadata=$metadata" \
@@ -169,6 +183,7 @@ jobs:
           CURSEFORGE_API_TOKEN: ${{ secrets.CURSEFORGE_API_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
           PATCH: ${{ needs.verify.outputs.patch }}
+          FOREVER_PATCH: ${{ needs.verify.outputs.forever_patch }}
           STABILITY: ${{ needs.verify.outputs.stability }}
         shell: bash
         run: |
@@ -177,12 +192,24 @@ jobs:
             *) echo "Unsupported release channel: $STABILITY" >&2; exit 1 ;;
           esac
           CHANGELOG=$(cat "$NOTES_FILE")
+          # Numeric game-version IDs for Retail and Forever (gameVersionNames cannot address Forever). Fail before
+          # uploading if either is missing, so nothing half-published goes out.
+          versions=$(curl -sSf --retry 3 -H "X-Api-Token: $CURSEFORGE_API_TOKEN" https://www.curseforge.com/api/game/versions \
+            || curl -sSf --retry 3 -H "X-Api-Token: $CURSEFORGE_API_TOKEN" https://wow.curseforge.com/api/game/versions)
+          retail_id=$(jq -r --arg v "$PATCH" '[.[] | select(.name == $v)][0].id // empty' <<< "$versions")
+          forever_id=$(jq -r --arg v "$FOREVER_PATCH" '[.[] | select(.name == $v)][0].id // empty' <<< "$versions")
+          if [ -z "$retail_id" ] || [ -z "$forever_id" ]; then
+            echo "CurseForge game versions missing: Retail $PATCH='$retail_id', Forever $FOREVER_PATCH='$forever_id'" >&2
+            exit 1
+          fi
+          echo "CurseForge game versions: Retail $PATCH = $retail_id, Forever $FOREVER_PATCH = $forever_id"
           metadata=$(jq -cn \
             --arg display_name "WoWraVox $VERSION" \
             --arg release_type "$release_type" \
             --arg changelog "$CHANGELOG" \
-            --arg patch "$PATCH" \
-            '{changelog: $changelog, changelogType: "markdown", displayName: $display_name, gameVersionNames: [$patch], releaseType: $release_type}')
+            --argjson retail "$retail_id" \
+            --argjson forever "$forever_id" \
+            '{changelog: $changelog, changelogType: "markdown", displayName: $display_name, gameVersions: [$retail, $forever], releaseType: $release_type}')
           http_code=$(curl --silent --show-error -o "$RUNNER_TEMP/curseforge-response.txt" -w '%{http_code}' -X POST \
             --form-string "metadata=$metadata" \
             -F "file=@release/WoWraVox-$VERSION.zip;type=application/zip" \
