@@ -1,12 +1,14 @@
 # WoWraVox
 
-WoWraVox is a World of Warcraft Retail addon for Heroism, Bloodlust, Time Warp, buffs, debuffs, trinkets, spell cooldowns, and spoken or on-screen notifications.
+WoWraVox is a World of Warcraft addon (Retail and WoW Forever beta) for Heroism, Bloodlust, Time Warp, buffs, debuffs, trinkets, spell cooldowns, and spoken or on-screen notifications.
 
 ## Version
 
-Current stable version: **0.14.0**.
+Current stable version: **0.15.0**.
 
 Retail compatibility: **12.1.5** (interface **120105**).
+
+WoW Forever compatibility (beta): interface **16001** (`WoWraVox_Camelot.toc`). Preset packages and the built-in Bloodlust rule are Retail-only for now; Forever has no raid-wide Bloodlust or Sated yet.
 
 ## What it does
 

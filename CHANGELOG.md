@@ -1,5 +1,11 @@
 # WoWraVox
 
+## 0.15.0
+
+- WoW Forever support (beta): the package now ships `WoWraVox_Camelot.toc` (interface 16001) next to the Retail TOC. Text-to-speech, on-screen text, aura search, trinket and cooldown rules work as on Retail.
+- Specialization detection falls back to `C_SpecializationInfo` where the global specialization API is missing, so Forever (one pseudo specialization per class) no longer errors.
+- On Forever the Retail preset catalog is not offered and new profiles start without the built-in Bloodlust rule, because Forever has no raid-wide Bloodlust, Heroism or Sated effect yet. Retail is unchanged.
+
 ## 0.14.0
 
 - Custom aura rules now offer a 20-second Learn mode. It observes configured casts, player aura changes and Blizzard Cooldown Manager visibility, then shows candidate aura IDs and category guidance. Adding a candidate to the rule requires an explicit selection.

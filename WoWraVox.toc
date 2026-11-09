@@ -2,7 +2,7 @@
 ## X-Compatible-With: retail
 ## Title: WoWraVox
 ## Notes: Spoken and on-screen notifications for player auras, equipped items, and spell cooldowns.
-## Version: 0.14.0
+## Version: 0.15.0
 ## X-Wago-ID: BNBwma6x
 ## X-Curse-Project-ID: 1715995
 ## IconTexture: Interface\AddOns\WoWraVox\Assets\WoWraVoxIcon.tga
