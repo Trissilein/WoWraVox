@@ -1761,6 +1761,16 @@ do
     check("builtin trigger lookup", ns.isBuiltinTrigger(old, 57724) and not ns.isBuiltinTrigger(old, 1)
         and not ns.isBuiltinTrigger({ spellIDs = {} }, 57724))
 
+    -- Forever: the built-in Bloodlust rule is removed from existing profiles and never recreated.
+    local foreverKeep = { name = "Mine", spellIDs = { 1 } }
+    local foreverList = { { presetID = "heroism-bloodlust", builtin = true, spellIDs = { 2825 } }, foreverKeep }
+    ns.isForever = true
+    local realDefaultAuras = ns.Defaults.auras
+    ns.Defaults.auras = {}
+    ns.ensureBuiltinRules(foreverList)
+    ns.isForever, ns.Defaults.auras = nil, realDefaultAuras
+    check("forever drops the builtin Bloodlust rule and keeps user rules", #foreverList == 1 and foreverList[1] == foreverKeep)
+
     -- Startup selection: keep a live selection, otherwise prefer stable Bloodlust identity and fall back by category.
     local bloodlust = { presetID = "heroism-bloodlust", builtin = true }
     local firstAura = { name = "First aura" }

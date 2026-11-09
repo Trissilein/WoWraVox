@@ -836,6 +836,13 @@ end
 -- Idempotent: runs on every load for every profile.
 function ns.ensureBuiltinRules(rules)
     if type(rules) ~= "table" then return end
+    if ns.isForever then
+        -- Forever ships no built-in aura rules (Defaults.lua); drop the Bloodlust rule an older copy or profile created.
+        for index = #rules, 1, -1 do
+            local rule = rules[index]
+            if type(rule) == "table" and rule.builtin and rule.presetID == "heroism-bloodlust" then table.remove(rules, index) end
+        end
+    end
     for _, preset in ipairs(ns.Defaults and ns.Defaults.auras or {}) do
         if preset.builtin and preset.presetID then
             local found
