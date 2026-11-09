@@ -41,6 +41,10 @@ ns.Defaults = {
     },
 }
 
+-- WoW Forever has no raid-wide Bloodlust/Heroism or Sated debuff yet (verified, docs/forever-api-matrix.md), so the
+-- built-in rule would never fire there.  Trinket rules stay.
+if ns.isForever then ns.Defaults.auras = {} end
+
 -- Remove only the exact legacy starter shape, before current normalization adds fields with dynamic defaults.
 -- Any extra, missing, or changed field leaves provenance uncertain, so preserve the group.
 local REMOVED_DEFENSIVES_FIELDS = {

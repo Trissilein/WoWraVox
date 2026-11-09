@@ -23,3 +23,19 @@ if (status !== lua.LUA_OK) {
   console.error(to_jsstring(lua.lua_tostring(state, -1)));
   process.exit(1);
 }
+
+// WoW Forever (FlavorCamelot.lua sets ns.isForever before Defaults.lua): no built-in Bloodlust rule, trinket rules stay.
+const foreverState = lauxlib.luaL_newstate();
+lualib.luaL_openlibs(foreverState);
+const foreverProgram = [
+  "local addonName = 'WoWraVox'",
+  "local addonNamespace = { isForever = true }",
+  defaults,
+  "assert(#addonNamespace.Defaults.auras == 0, 'forever has no built-in aura rule')",
+  "assert(#addonNamespace.Defaults.items == 2, 'forever keeps the trinket rules')",
+  "print('PASS forever starter has no Bloodlust rule')",
+].join("\n");
+if (lauxlib.luaL_dostring(foreverState, to_luastring(foreverProgram)) !== lua.LUA_OK) {
+  console.error(to_jsstring(lua.lua_tostring(foreverState, -1)));
+  process.exit(1);
+}

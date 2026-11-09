@@ -12,6 +12,7 @@
 ## AddonCompartmentFuncOnLeave: WoWraVox_OnAddonCompartmentLeave
 Locales/enUS.lua
 Locales/deDE.lua
+FlavorCamelot.lua
 Defaults.lua
 Profiles.lua
 SkinData.lua

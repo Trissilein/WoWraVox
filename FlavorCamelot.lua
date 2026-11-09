@@ -1,0 +1,3 @@
+-- Loaded only by WoWraVox_Camelot.toc (WoW Forever). The retail TOC does not list it, so ns.isForever stays nil there.
+local _, ns = ...
+ns.isForever = true

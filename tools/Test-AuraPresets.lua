@@ -287,3 +287,9 @@ check("status has external audit split", status.externalVerified > 0 and status.
 print(string.format("CATALOG_STATUS specs=%d entries=%d verified=%d blocked=%d externals=%d externalVerified=%d externalBlocked=%d",
     status.specs, status.entries, status.verified, status.blocked, status.externals,
     status.externalVerified, status.externalBlocked))
+
+-- WoW Forever: the Retail catalog never offers packages.
+check("retail has packages", #catalog.GetPackages(65, true) > 0)
+ns.isForever = true
+check("forever offers no preset packages", #catalog.GetPackages(65, true) == 0)
+ns.isForever = nil

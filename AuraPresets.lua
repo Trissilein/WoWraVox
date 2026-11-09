@@ -722,6 +722,8 @@ end
 
 function catalog.GetPackages(specID, includeBlocked)
     local result, byKey = {}, {}
+    -- The catalog is built from Retail 12.1 specs and spell IDs; none of it applies to WoW Forever.
+    if ns.isForever then return result end
     local function add(entry, external)
         if not external and not catalog.EntryMatchesSpec(entry, specID) then return end
         if not includeBlocked and not catalog.IsSelectable(entry) then return end
