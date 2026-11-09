@@ -13,9 +13,11 @@ $archive = Join-Path $releaseDirectory "WoWraVox-$Version.zip"
 $tocPath = Join-Path $root 'WoWraVox.toc'
 
 # Runtime files = the TOC itself + every non-metadata TOC line (so a new .lua can never be forgotten).
-$tocFiles = @(Get-Content -LiteralPath $tocPath | ForEach-Object { $_.Trim() } |
-    Where-Object { $_ -and -not $_.StartsWith('#') } | ForEach-Object { $_ -replace '\\', '/' })
-$runtimeFiles = @('WoWraVox.toc') + $tocFiles
+$tocFiles = @(foreach ($toc in 'WoWraVox.toc', 'WoWraVox_Camelot.toc') {
+    Get-Content -LiteralPath (Join-Path $root $toc) | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and -not $_.StartsWith('#') } | ForEach-Object { $_ -replace '\\', '/' }
+})
+$runtimeFiles = @('WoWraVox.toc', 'WoWraVox_Camelot.toc') + $tocFiles
 # Only game-loadable assets ship; source PNGs live in docs/branding/.
 $assetsRoot = Join-Path $root 'Assets'
 $assetFiles = @(Get-ChildItem -LiteralPath $assetsRoot -File |

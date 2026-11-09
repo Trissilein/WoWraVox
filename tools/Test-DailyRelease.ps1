@@ -39,6 +39,7 @@ try {
     }
 
     Require-Match $tocPath "(?m)^## Version: $([regex]::Escape($Version))\s*$" 'WoWraVox.toc'
+    Require-Match (Join-Path $root 'WoWraVox_Camelot.toc') "(?m)^## Version: $([regex]::Escape($Version))\s*$" 'WoWraVox_Camelot.toc'
     Require-Match $readmePath "(?m)^Current stable version: \*\*$([regex]::Escape($Version))\*\*\.\s*$" 'README.md'
     Require-Match $changelogPath "(?m)^##\s+$([regex]::Escape($Version))\s*$" 'CHANGELOG.md'
 
@@ -57,7 +58,7 @@ try {
     # a local pre-check also covers what `git add` would pick up (untracked files not ignored by .gitignore).
     $denylist = '^\.agents/', 'SECOND_OPINION', '\.(bak|tmp|orig)$', '^release/', '^WTF/', 'SavedVariables',
         '^docs/UI-ALIGNMENT', '/unused/', '^\.wago$', '\.zip$', '^Libs/'
-    $allowlist = '^(WoWraVox\.toc$|[A-Za-z]+\.lua$|Locales/|Assets/|docs/branding/|docs/store-description\.md$|tools/|\.github/|README\.md$|CHANGELOG\.md$|LICENSE$|\.editorconfig$|\.gitattributes$|\.gitignore$)'
+    $allowlist = '^(WoWraVox(_Camelot)?\.toc$|[A-Za-z]+\.lua$|Locales/|Assets/|docs/branding/|docs/store-description\.md$|docs/forever-api-matrix\.md$|tools/|\.github/|README\.md$|CHANGELOG\.md$|LICENSE$|\.editorconfig$|\.gitattributes$|\.gitignore$)'
     $hygienePaths = if ($RequireExistingTag -or $env:GITHUB_ACTIONS) { @(& git -c core.quotepath=off ls-files) }
         else { @(& git -c core.quotepath=off ls-files --cached --others --exclude-standard) }
     $violations = @()

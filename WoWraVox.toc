@@ -1,4 +1,5 @@
 ## Interface: 120105
+## X-Compatible-With: retail
 ## Title: WoWraVox
 ## Notes: Spoken and on-screen notifications for player auras, equipped items, and spell cooldowns.
 ## Version: 0.14.0

@@ -1,0 +1,29 @@
+## Interface: 16001
+## X-Compatible-With: forever
+## Title: WoWraVox
+## Notes: Spoken and on-screen notifications for player auras, equipped items, and spell cooldowns.
+## Version: 0.14.0
+## X-Wago-ID: BNBwma6x
+## X-Curse-Project-ID: 1715995
+## IconTexture: Interface\AddOns\WoWraVox\Assets\WoWraVoxIcon.tga
+## SavedVariables: WoWraVoxDB, WoWraVoxProfilesDB
+## AddonCompartmentFunc: WoWraVox_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: WoWraVox_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: WoWraVox_OnAddonCompartmentLeave
+Locales/enUS.lua
+Locales/deDE.lua
+Defaults.lua
+Profiles.lua
+SkinData.lua
+Skin.lua
+SkillTracking.lua
+AuraPresets.lua
+AuraSoundFallback.lua
+RuleOutput.lua
+DebugReport.lua
+ShareGroups.lua
+ShareChat.lua
+WoWraVox.lua
+WoWraVoxTooltip.lua
+Simulation.lua
+WoWraVoxLauncher.lua

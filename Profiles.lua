@@ -48,10 +48,14 @@ local function getCharacter()
 end
 
 function Profiles.GetCurrentSpecialization()
-    if type(GetSpecialization) ~= "function" or type(GetSpecializationInfo) ~= "function" then return nil end
-    local ok, index = pcall(GetSpecialization)
+    -- WoW Forever has no global GetSpecialization/GetSpecializationInfo; only the C_SpecializationInfo versions exist.
+    local api = C_SpecializationInfo
+    local getIndex = GetSpecialization or (api and api.GetSpecialization)
+    local getInfo = GetSpecializationInfo or (api and api.GetSpecializationInfo)
+    if type(getIndex) ~= "function" or type(getInfo) ~= "function" then return nil end
+    local ok, index = pcall(getIndex)
     if not ok or type(index) ~= "number" or index < 1 or index ~= math.floor(index) then return nil end
-    local infoOK, specID, specName = pcall(GetSpecializationInfo, index)
+    local infoOK, specID, specName = pcall(getInfo, index)
     if not infoOK or type(specID) ~= "number" or specID <= 0 then return nil end
     return specID, type(specName) == "string" and specName or tostring(specID)
 end
