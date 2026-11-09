@@ -194,12 +194,15 @@ jobs:
           CHANGELOG=$(cat "$NOTES_FILE")
           # Numeric game-version IDs for Retail and Forever (gameVersionNames cannot address Forever). Fail before
           # uploading if either is missing, so nothing half-published goes out.
-          versions=$(curl -sSf --retry 3 -H "X-Api-Token: $CURSEFORGE_API_TOKEN" https://www.curseforge.com/api/game/versions \
-            || curl -sSf --retry 3 -H "X-Api-Token: $CURSEFORGE_API_TOKEN" https://wow.curseforge.com/api/game/versions)
+          # The WoW host first: the generic www host answered 200 on 2026-11-09 but without our version names.
+          versions=$(curl -sSf --retry 3 -H "X-Api-Token: $CURSEFORGE_API_TOKEN" https://wow.curseforge.com/api/game/versions \
+            || curl -sSf --retry 3 -H "X-Api-Token: $CURSEFORGE_API_TOKEN" https://www.curseforge.com/api/game/versions)
           retail_id=$(jq -r --arg v "$PATCH" '[.[] | select(.name == $v)][0].id // empty' <<< "$versions")
           forever_id=$(jq -r --arg v "$FOREVER_PATCH" '[.[] | select(.name == $v)][0].id // empty' <<< "$versions")
           if [ -z "$retail_id" ] || [ -z "$forever_id" ]; then
             echo "CurseForge game versions missing: Retail $PATCH='$retail_id', Forever $FOREVER_PATCH='$forever_id'" >&2
+            # Version names are public data; print what the API returned so the next attempt can be exact.
+            jq -c 'if type == "array" then {count: length, sample: .[0:3], match: [.[] | select((.name // "") | test("^(12\\.1|1\\.60)"))]} else {type: type, keys: keys} end' <<< "$versions" >&2 || head -c 400 <<< "$versions" >&2
             exit 1
           fi
           echo "CurseForge game versions: Retail $PATCH = $retail_id, Forever $FOREVER_PATCH = $forever_id"
