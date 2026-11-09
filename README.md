@@ -1,6 +1,6 @@
 # WoWraVox
 
-WoWraVox is a World of Warcraft addon (Retail and WoW Forever beta) for Heroism, Bloodlust, Time Warp, buffs, debuffs, trinkets, spell cooldowns, and spoken or on-screen notifications.
+WoWraVox is a World of Warcraft addon (Retail and WoW Forever beta) for buffs and debuffs that start or end, trinkets, spell cooldowns, and spoken or on-screen notifications.
 
 ## Version
 

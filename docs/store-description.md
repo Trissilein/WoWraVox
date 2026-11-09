@@ -4,11 +4,11 @@
 
 ## Why it exists
 
-It started as a small announcer for Bloodlust, Power Infusion and defensive cooldowns. It grew into a general notification system for auras, trinkets and cooldowns, built around one idea: tell the player clearly what happens to *them*, without clutter and without having to watch icons.
+It started as a small announcer for big raid buffs and defensive cooldowns. It grew into a general notification system for auras, trinkets and cooldowns, built around one idea: tell the player clearly what happens to *them*, without clutter and without having to watch icons.
 
 ## What it does
 
-- **Auras:** announces buffs and debuffs on you, such as Bloodlust, Heroism, Time Warp, defensives and procs, when they start and when they end.
+- **Auras:** announces buffs and debuffs on you when they start and when they end: a buff that comes in, a buff that runs out. Works for any aura you pick, such as procs, defensives, potions or raid buffs.
 - **Cooldowns and items:** tells you when a trinket or other equipped item, a spell or a returning charge is ready again. Trinket rules can follow the slot, so swapping trinkets needs no new rule.
 - **Voice:** speaks with the built-in WoW Text-to-Speech. Voice, speed and volume are set per rule.
 - **On-screen text:** show your own message with your own font, size, colour and position.
