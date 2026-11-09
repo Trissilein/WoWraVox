@@ -7756,6 +7756,18 @@ local function beginItemPicker(replaceRule, replaceIndex, addRule)
         end)
     end
 
+    local characterShown = _G.CharacterFrame and CharacterFrame:IsShown()
+    if ns.isForever then
+        -- Opening the window from addon code taints Forever's CharacterFrame (it compares secret health values in
+        -- OnShow and errors).  The OnShow hook above draws the overlays once the player opens it themself.
+        if not characterShown then
+            setStatus("Open your character window (C), then click an equipped item slot.")
+        else
+            setStatus("Click an equipped item slot.")
+        end
+        C_Timer.After(0.25, refreshPickerOverlays)
+        return
+    end
     if ToggleCharacter then
         local paperDollShown = _G.PaperDollFrame and PaperDollFrame:IsShown()
         if not (_G.CharacterFrame and CharacterFrame:IsShown() and paperDollShown) then

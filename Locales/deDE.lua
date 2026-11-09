@@ -134,6 +134,7 @@ ns.Locales.deDE = {
     ["Item selection ended."] = "Item-Auswahl beendet.", ["Item selection is blocked in combat."] = "Item-Auswahl ist im Kampf gesperrt.",
     ["No item in this equipment slot."] = "In diesem Ausrüstungsslot liegt kein Item.", ["Equipped"] = "Angelegt", ["Slot"] = "Slot", ["Not equipped"] = "Derzeit nicht angelegt",
     ["Click an equipped item slot."] = "Klicke im Charakterfenster auf einen Ausrüstungsslot.",
+    ["Open your character window (C), then click an equipped item slot."] = "Öffne dein Charakterfenster (C) und klicke auf einen Ausrüstungsslot.",
     ["No equipment slots found in the character window."] = "Ausrüstungsslots im Charakterfenster nicht gefunden.",
     ["Item selection was stopped when combat started."] = "Item-Auswahl wurde beim Kampfbeginn beendet.",
     ["%d of %d matches shown"] = "%d von %d Treffern angezeigt",
