@@ -15,7 +15,7 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 - **Sounds:** play a short sound or a spoken category word, also for effects the game hides from addons in combat.
 - **Profiles:** keep separate settings per character and per specialization.
 - **Aura learning:** observe a custom aura for 20 seconds, review cast and aura IDs, and check whether Blizzard's Cooldown Manager tracks it. Color-coded trigger rows explain tracking status; tracked effects open CDM settings, while eligible untracked effects offer a setup prompt. Add a candidate ID explicitly. For effects hidden in combat, Tracked Buffs or Tracked Bars can provide another detection path; category sounds and an in-combat check help confirm the setup.
-- **Aura presets:** choose effects for your class and specialization, or buffs received from other players, under **Add rule → Aura**. Nothing is preselected. You can combine selected effects with your own spell IDs and customize their announcements.
+- **Aura presets (Retail):** choose effects for your class and specialization, or buffs received from other players, under **Add rule → Aura**. Nothing is preselected. You can combine selected effects with your own spell IDs and customize their announcements.
 - **Easy setup:** find spells by name or ID, test sounds, preview on-screen text, and open the settings from the addon compartment, Titan Panel or any LibDataBroker display.
 
 ## How it works
@@ -24,17 +24,17 @@ It started as a small announcer for Bloodlust, Power Infusion and defensive cool
 2. Add a rule: an aura, an equipped item or a spell cooldown.
 3. Choose what you want to hear and see when it starts, ends or becomes ready.
 
-New profiles start with a ready-made Bloodlust rule and trinket rules.
+On Retail, new profiles start with a ready-made Bloodlust rule and trinket rules. On WoW Forever they start with the trinket rules, because the game has no raid-wide Bloodlust effect yet.
 
 ## Good to know
 
-- World of Warcraft Retail. The interface is available in English and German.
+- World of Warcraft Retail and WoW Forever (beta, one package for both). The interface is available in English and German.
 - Everything stays in your game. The addon does not collect or send any data.
 - What is new in each version is listed in the changelog of the file on this page.
 
 ## Install
 
-Use the Wago or CurseForge app, WowUp, or download the ZIP from the [latest release](https://github.com/Trissilein/WoWraVox/releases/latest) and extract the `WoWraVox` folder into `Interface/AddOns`. In WowUp, **Get Addons → Install from URL** with `https://github.com/Trissilein/WoWraVox` also follows tagged releases.
+Use the Wago or CurseForge app, WowUp, or download the ZIP from the [latest release](https://github.com/Trissilein/WoWraVox/releases/latest) and extract the `WoWraVox` folder into `Interface/AddOns` (`_retail_` or `_forever_`). In WowUp, **Get Addons → Install from URL** with `https://github.com/Trissilein/WoWraVox` also follows tagged releases.
 
 ## Links
 
