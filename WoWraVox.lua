@@ -8062,6 +8062,15 @@ function ns.refreshTimeline(rule)
     end
     if duration and estimated then learnedText = learnedText .. " · " .. L("estimated in combat") end
     timeline.durationHint:SetText(learnedText)
+    -- The property row belongs to the selected node: shown only for an inner node, never as empty fields.
+    local nodeSelected = not endpoint
+    for _, region in ipairs({ timeline.percentLabel, timeline.percentBox, timeline.percentUnit, timeline.durationLabel,
+        timeline.durationBox, timeline.durationHint, timeline.removeButton }) do
+        region:SetShown(nodeSelected)
+    end
+    timeline.secondsBox:SetShown(nodeSelected and seconds ~= nil)
+    timeline.secondsUnit:SetShown(nodeSelected and seconds ~= nil)
+    timeline.frame:SetHeight(nodeSelected and 132 or 92)
 end
 
 function ns.layoutTimeline(y)
@@ -8089,6 +8098,11 @@ function ns.layoutTimeline(y)
     timeline.secondsUnit:SetPoint("LEFT", timeline.secondsBox, "RIGHT", 4, 0)
     timeline.durationLabel:ClearAllPoints()
     timeline.durationLabel:SetPoint("LEFT", timeline.secondsUnit, "RIGHT", 24, 0)
+    ns.refreshTimeline(selectedAura())
+    if not timeline.secondsUnit:IsShown() then
+        timeline.durationLabel:ClearAllPoints()
+        timeline.durationLabel:SetPoint("LEFT", timeline.percentUnit, "RIGHT", 24, 0)
+    end
     timeline.durationBox:ClearAllPoints()
     timeline.durationBox:SetPoint("LEFT", timeline.durationLabel, "RIGHT", 10, 0)
     timeline.durationHint:ClearAllPoints()
