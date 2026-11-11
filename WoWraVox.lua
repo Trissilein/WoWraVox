@@ -6873,7 +6873,7 @@ function updateDetails()
             nodePanel.eventKey, nodePanel.key, nodePanel.screen.eventKey = nodeKey, nodeKey, nodeKey
             loadNotificationPanel(nodePanel, auraRule, nodeKey)
             nodePanel.loadedKey = nodeKey
-            nodePanel.heading:SetText(ns.markerTitle(ns.findMarker(auraRule, nodeKey)))
+            nodePanel.heading:SetText(ns.markerTitle(ns.findMarker(auraRule, nodeKey), auraRule))
         end
         layoutSharedEditor(true)
         if not keepTriggerQuery then triggerInputBox:SetText("") end
@@ -7832,10 +7832,23 @@ local function formatNumber(value)
     return text
 end
 
-local function markerTitle(marker)
-    if marker.key == "apply" then return L("Start") end
-    if marker.key == "expire" then return L("End") end
-    return L("Node") .. " " .. formatNumber(marker.at) .. " %"
+-- Inner nodes are numbered 1, 2, 3 ... from left to right; the number is shown on the line and in the panel title.
+local function markerNumber(rule, key)
+    local n = 0
+    for _, marker in ipairs(rule and rule.markers or {}) do
+        if not ns.Markers.IsEndpoint(marker.key) then
+            n = n + 1
+            if marker.key == key then return n end
+        end
+    end
+end
+ns.markerNumber = markerNumber
+
+local function markerTitle(marker, rule)
+    if marker.key == "apply" then return L("Start") .. " (0 %)" end
+    if marker.key == "expire" then return L("End") .. " (100 %)" end
+    local number = markerNumber(rule or selectedAura(), marker.key)
+    return L("Node") .. " " .. tostring(number or "?") .. "  ·  " .. formatNumber(marker.at) .. " %"
 end
 ns.markerTitle = markerTitle
 
@@ -7872,13 +7885,13 @@ end
 
 local function buildTimelinePanel()
     local frame = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
-    frame:SetHeight(132)
+    frame:SetHeight(150)
     stylePanel(frame, 0.09, 0.095, 0.105)
     timeline.frame = frame
     timeline.heading = makeSectionLabel(frame, L("Timeline"), 12, -8)
 
     local track = CreateFrame("Frame", nil, frame)
-    track:SetHeight(26)
+    track:SetHeight(34)
     timeline.track = track
     -- Clicking the line itself adds a node at that spot.
     track:EnableMouse(true)
@@ -7918,7 +7931,7 @@ local function buildTimelinePanel()
     }
     local line = track:CreateTexture(nil, "BACKGROUND")
     line:SetColorTexture(0.35, 0.29, 0.18, 0.95)
-    line:SetHeight(4)
+    line:SetHeight(6)
     line:SetPoint("LEFT", track, "LEFT", 0, 0)
     line:SetPoint("RIGHT", track, "RIGHT", 0, 0)
     timeline.handles = {}
@@ -7953,14 +7966,14 @@ local function buildTimelinePanel()
     ns.Skin.Register(timeline.addButton, "button")
     ns.Skin.Register(timeline.removeButton, "button")
 
-    timeline.percentLabel = createLabel(frame, "Position", "GameFontNormalSmall")
-    timeline.percentBox = createEditBox(frame, 64, 24)
-    timeline.percentUnit = createLabel(frame, "%", "GameFontHighlightSmall")
-    timeline.secondsBox = createEditBox(frame, 64, 24)
-    timeline.secondsUnit = createLabel(frame, "s after start", "GameFontHighlightSmall")
-    timeline.durationLabel = createLabel(frame, "Duration", "GameFontNormalSmall")
-    timeline.durationBox = createEditBox(frame, 64, 24)
-    timeline.durationHint = createLabel(frame, "", "GameFontHighlightSmall")
+    timeline.percentLabel = createLabel(frame, "Position", "GameFontNormal")
+    timeline.percentBox = createEditBox(frame, 70, 28)
+    timeline.percentUnit = createLabel(frame, "%", "GameFontHighlight")
+    timeline.secondsBox = createEditBox(frame, 70, 28)
+    timeline.secondsUnit = createLabel(frame, "s after start", "GameFontHighlight")
+    timeline.durationLabel = createLabel(frame, "Duration", "GameFontNormal")
+    timeline.durationBox = createEditBox(frame, 70, 28)
+    timeline.durationHint = createLabel(frame, "", "GameFontHighlight")
     timeline.durationHint:SetTextColor(0.72, 0.72, 0.72)
     for _, box in ipairs({ timeline.percentBox, timeline.secondsBox, timeline.durationBox }) do box:SetMaxLetters(10) end
     timeline.percentBox:HookScript("OnEditFocusLost", function() applyMarkerPosition(false) end)
@@ -7978,12 +7991,22 @@ local function handleFor(index)
     local handle = timeline.handles[index]
     if handle then return handle end
     handle = CreateFrame("Button", nil, timeline.track)
-    handle:SetSize(14, 22)
-    handle.tex = handle:CreateTexture(nil, "ARTWORK")
-    handle.tex:SetAllPoints()
-    handle.tex:SetTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
-    handle.label = handle:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    handle.label:SetPoint("TOP", handle, "BOTTOM", 0, -1)
+    handle:SetSize(28, 28)
+    handle.border = handle:CreateTexture(nil, "ARTWORK", nil, 1)
+    handle.border:SetTexture("Interface\\Buttons\\WHITE8X8")
+    handle.border:SetSize(20, 20)
+    handle.border:SetPoint("CENTER")
+    handle.border:SetRotation(math.rad(45))
+    handle.tex = handle:CreateTexture(nil, "ARTWORK", nil, 2)
+    handle.tex:SetTexture("Interface\\Buttons\\WHITE8X8")
+    handle.tex:SetSize(16, 16)
+    handle.tex:SetPoint("CENTER")
+    handle.tex:SetRotation(math.rad(45))
+    handle.number = handle:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    handle.number:SetPoint("CENTER", 0, 0)
+    handle.number:SetTextColor(0.05, 0.05, 0.05)
+    handle.label = handle:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    handle.label:SetPoint("TOP", handle, "BOTTOM", 0, -2)
     handle:RegisterForClicks("LeftButtonUp")
     -- Press: select (and arm a drag for inner nodes). Release without moving on a node that was already
     -- selected: ask whether to remove it. Release after moving: the node takes the new position.
@@ -8034,10 +8057,23 @@ function ns.refreshTimeline(rule)
         handle.key = marker.key
         handle:ClearAllPoints()
         handle:SetPoint("CENTER", timeline.track, "LEFT", width * marker.at / 100, 0)
+        local endpoint = ns.Markers.IsEndpoint(marker.key)
+        local number = not endpoint and markerNumber(rule, marker.key) or nil
+        handle.number:SetText(number and tostring(number) or "")
         handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
-            or (formatNumber(marker.at) .. "%"))
+            or (formatNumber(marker.at) .. " %"))
         local isSelected = marker.key == selected
-        handle.tex:SetVertexColor(isSelected and 1 or 0.6, isSelected and 0.82 or 0.6, isSelected and 0.2 or 0.6)
+        if isSelected then
+            handle.tex:SetVertexColor(1, 0.82, 0.2)
+        elseif endpoint then
+            handle.tex:SetVertexColor(0.55, 0.55, 0.55)
+        else
+            handle.tex:SetVertexColor(0.85, 0.7, 0.35)
+        end
+        handle.border:SetVertexColor(0.05, 0.04, 0.02, 1)
+        local size = endpoint and 12 or 16
+        handle.tex:SetSize(size, size)
+        handle.border:SetSize(size + 4, size + 4)
         handle:SetFrameLevel(timeline.track:GetFrameLevel() + (isSelected and 3 or 1))
         handle:Show()
     end
@@ -8070,7 +8106,7 @@ function ns.refreshTimeline(rule)
     end
     timeline.secondsBox:SetShown(nodeSelected and seconds ~= nil)
     timeline.secondsUnit:SetShown(nodeSelected and seconds ~= nil)
-    timeline.frame:SetHeight(nodeSelected and 132 or 92)
+    timeline.frame:SetHeight(nodeSelected and 150 or 106)
 end
 
 function ns.layoutTimeline(y)
@@ -8084,10 +8120,10 @@ function ns.layoutTimeline(y)
     timeline.removeButton:ClearAllPoints()
     timeline.removeButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
     timeline.track:ClearAllPoints()
-    timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 24, -44)
-    timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 24, -44)
+    timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -42)
+    timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -42)
     timeline.percentLabel:ClearAllPoints()
-    timeline.percentLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -100)
+    timeline.percentLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -116)
     timeline.percentBox:ClearAllPoints()
     timeline.percentBox:SetPoint("LEFT", timeline.percentLabel, "RIGHT", 10, 0)
     timeline.percentUnit:ClearAllPoints()
