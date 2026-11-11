@@ -541,7 +541,62 @@ local function getVoices()
     return {}
 end
 
+-- Voices carry no language field, only a name like "Microsoft Hedda - German (Germany)" (or the OS language's
+-- spelling of it), so the game language is matched against words in that name.
+local LOCALE_VOICE_WORDS = {
+    deDE = { "german", "deutsch" }, enUS = { "english", "englisch" }, enGB = { "english", "englisch" },
+    frFR = { "french", "fran" }, esES = { "spanish", "espa" }, esMX = { "spanish", "espa" },
+    itIT = { "italian", "italiano" }, ptBR = { "portuguese", "portugu" }, ruRU = { "russian", "русск" },
+    koKR = { "korean", "한국" }, zhCN = { "chinese", "中文" }, zhTW = { "chinese", "中文" },
+}
+
+local function voiceMatchesLocale(voice)
+    local words = LOCALE_VOICE_WORDS[GetLocale and GetLocale() or "enUS"]
+    local name = voice and type(voice.name) == "string" and voice.name:lower()
+    if not (words and name) then return false end
+    for _, word in ipairs(words) do
+        if name:find(word, 1, true) then return true end
+    end
+    return false
+end
+
+-- The voice that fits the game language: the user's system default when it already does, else the first that does.
+local function localeVoiceID()
+    local voices = getVoices()
+    local default
+    if C_TTSSettings and C_TTSSettings.GetVoiceOptionID and Enum and Enum.TtsVoiceType then
+        local ok, voiceID = pcall(C_TTSSettings.GetVoiceOptionID, Enum.TtsVoiceType.Standard)
+        if ok and type(voiceID) == "number" then default = voiceID end
+    end
+    for _, voice in ipairs(voices) do
+        if voice.voiceID == default and voiceMatchesLocale(voice) then return default end
+    end
+    for _, voice in ipairs(voices) do
+        if voiceMatchesLocale(voice) then return voice.voiceID end
+    end
+    return nil
+end
+
+-- Once per game language: rules whose voice speaks another language move to a voice that fits the client.
+function ns.MatchVoicesToLocale(rules)
+    local store = type(WoWraVoxProfilesDB) == "table" and WoWraVoxProfilesDB or nil
+    if not store or store.voiceLocale == GetLocale() then return false end
+    local target = localeVoiceID()
+    if not target then return false end
+    local byID = {}
+    for _, voice in ipairs(getVoices()) do byID[voice.voiceID] = voice end
+    for _, rule in ipairs(rules) do
+        if type(rule) == "table" then
+            local current = byID[tonumber(rule.voiceID)]
+            if not current or not voiceMatchesLocale(current) then rule.voiceID = target end
+        end
+    end
+    return true
+end
+
 local function getDefaultVoiceID()
+    local fitting = localeVoiceID()
+    if fitting then return fitting end
     if C_TTSSettings and C_TTSSettings.GetVoiceOptionID and Enum and Enum.TtsVoiceType then
         local ok, voiceID = pcall(C_TTSSettings.GetVoiceOptionID, Enum.TtsVoiceType.Standard)
         if ok and type(voiceID) == "number" then return voiceID end
@@ -1229,6 +1284,7 @@ local function initializeDatabase()
 end
 
 function ns.NormalizeAllProfiles()
+    local voicesMatched = false
     if not ns.Profiles or not ns.Profiles.ForEachProfileData then return end
     ns.Profiles.ForEachProfileData(function(data)
         data.spellSearchIndex = nil
@@ -1261,9 +1317,11 @@ function ns.NormalizeAllProfiles()
                     end
                 end
                 if category == "skills" then ns.migrateSharedChargeRules(rules) end
+                if ns.MatchVoicesToLocale(rules) then voicesMatched = true end
             end
         end
     end)
+    if voicesMatched and type(WoWraVoxProfilesDB) == "table" then WoWraVoxProfilesDB.voiceLocale = GetLocale() end
 end
 
 local function getSpellInfo(spellID)
