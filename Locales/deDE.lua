@@ -446,4 +446,8 @@ ns.Locales.deDE = {
     ["Percent or seconds, depending on the timing on the left. Decimals allowed."] = "Prozent oder Sekunden, je nach Zeitpunkt links. Kommazahlen erlaubt.",
     ["Track all ranks"] = "Alle Ränge erfassen",
     ["Every rank of a spell you added counts as that spell (Lay on Hands rank 1, 2 and 3). The ranks are found once in the background and remembered."] = "Jeder Rang eines eingetragenen Zaubers zählt als dieser Zauber (Handauflegung Rang 1, 2 und 3). Die Ränge werden einmal im Hintergrund gesucht und gemerkt.",
+    ["Ranks"] = "Ränge", ["All ranks"] = "Alle Ränge", ["All Seals"] = "Alle Siegel",
+    ["Every rank of this spell counts (Lay on Hands rank 1, 2 and 3). The ranks are found once in the background and remembered."] = "Jeder Rang dieses Zaubers zählt (Handauflegung Rang 1, 2 und 3). Die Ränge werden einmal im Hintergrund gesucht und gemerkt.",
+    ["Paladin: one aura rule with every Seal you know."] = "Paladin: eine Aura-Regel mit allen Siegeln, die du kennst.",
+    ["Seals could not be added."] = "Siegel konnten nicht hinzugefügt werden.",
 }

@@ -36,7 +36,7 @@ local ERR_EMPTY = "This rule has no item to share yet."
 local ERR_MEMBERS = "Only rules with up to 4 items can be shared."
 
 local TEXT_FIELDS = { "name", "applyMessage", "expireMessage", "applySoundMediaName", "expireSoundMediaName" }
-local BOOL_FIELDS = { "applyEnabled", "expireEnabled", "oneEffect", "applySoundEnabled", "expireSoundEnabled", "allRanks" }
+local BOOL_FIELDS = { "applyEnabled", "expireEnabled", "oneEffect", "applySoundEnabled", "expireSoundEnabled" }
 local ID_FIELDS = { "applySoundKitID", "expireSoundKitID" }
 local CUE_FIELDS = { "alertCategory", "expireCategory" }
 local CHANNEL_FIELDS = { "applySoundChannel", "expireSoundChannel" }
@@ -51,8 +51,8 @@ local function joined(...)
 end
 
 local SCALAR_FIELDS = joined(TEXT_FIELDS, BOOL_FIELDS, ID_FIELDS, CUE_FIELDS, CHANNEL_FIELDS)
-local EXPORT_FIELDS = joined(SCALAR_FIELDS, { "spellIDs", "castByAuraID", "categoryByAuraID", "specializationIDs" })
-local COPY_FIELDS = joined(SCALAR_FIELDS, { "spellIDs", "castByAuraID", "categoryByAuraID" })
+local EXPORT_FIELDS = joined(SCALAR_FIELDS, { "spellIDs", "castByAuraID", "categoryByAuraID", "specializationIDs", "rankIDs" })
+local COPY_FIELDS = joined(SCALAR_FIELDS, { "spellIDs", "castByAuraID", "categoryByAuraID", "rankIDs" })
 
 -- Text in English; the window translates it with ns.L. Formatted text is translated before formatting.
 local function L(key, ...)
@@ -205,6 +205,10 @@ local function sanitizeGroup(source, raw)
     if source.castByAuraID ~= nil then
         out.castByAuraID = idMap(source.castByAuraID, isID)
         if not out.castByAuraID then return nil end
+    end
+    if source.rankIDs ~= nil then
+        out.rankIDs = idMap(source.rankIDs, function(flag) return type(flag) == "boolean" end)
+        if not out.rankIDs then return nil end
     end
     if source.categoryByAuraID ~= nil then
         out.categoryByAuraID = idMap(source.categoryByAuraID, function(cue) return isCue(cue, false) end)

@@ -2802,11 +2802,15 @@ do
     ns.SpellRanks.Reset()
     ns.SpellRanks.api.name = function(id) return (id == 633 or id == 2800 or id == 10310) and "Lay on Hands" or nil end
     ns.SpellRanks.api.icon = function() return 135928 end
-    check("all ranks: rank 2 matches a rule with rank 1", ns.RuleSpellMatches({ allRanks = true }, 633, 2800))
-    check("without all ranks only the exact ID matches", not ns.RuleSpellMatches({ allRanks = false }, 633, 2800)
-        and ns.RuleSpellMatches({ allRanks = false }, 633, 633))
-    local rule = { spellIDs = { 633 } }
+    check("ranks on: rank 2 matches a trigger with rank 1", ns.RuleSpellMatches({ rankIDs = { [633] = true } }, 633, 2800))
+    check("ranks off: only the exact ID matches", not ns.RuleSpellMatches({ rankIDs = { [633] = false } }, 633, 2800)
+        and ns.RuleSpellMatches({ rankIDs = { [633] = false } }, 633, 633))
+    local rule = { spellIDs = { 633, 498 }, rankIDs = { [498] = false } }
     ns.normalizeNotificationSettings(rule, "auras")
-    check("all ranks follows the flavor by default", rule.allRanks == (ns.isForever == true))
+    check("new triggers follow the flavor, an explicit off stays off",
+        rule.rankIDs[633] == (ns.isForever == true) and rule.rankIDs[498] == false and rule.allRanks == nil)
+    local old = { spellIDs = { 633 }, allRanks = true }
+    ns.normalizeNotificationSettings(old, "auras")
+    check("a former rule-wide all ranks seeds every trigger", old.rankIDs[633] == true)
     WoWraVoxProfilesDB = savedDB
 end

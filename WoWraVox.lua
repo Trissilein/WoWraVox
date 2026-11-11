@@ -784,9 +784,24 @@ function ns.normalizeNotificationSettings(rule, category)
         rule.readySoundChannel = NOTIFICATION_SOUND_CHANNEL_SET[rule.readySoundChannel] and rule.readySoundChannel or "Master"
     end
     -- Spell ranks (SpellRanks.lua): on by default in WoW Forever, where spells come in ranks.
-    if category ~= "items" then
+    if category == "skills" then
         if rule.allRanks == nil then rule.allRanks = ns.isForever == true end
         rule.allRanks = rule.allRanks == true
+    elseif category == "auras" then
+        -- Per trigger: rankIDs[id] = true counts every rank of that spell. Missing entries take the flavor default
+        -- (on in WoW Forever); an explicit false stays off. A former rule-wide allRanks seeds the entries once.
+        local old = rule.allRanks
+        rule.allRanks = nil
+        local ranks = type(rule.rankIDs) == "table" and rule.rankIDs or {}
+        local clean = {}
+        for _, id in ipairs(rule.spellIDs or {}) do
+            local flag = ranks[id]
+            if flag == nil then
+                if old ~= nil then flag = old == true else flag = ns.isForever == true end
+            end
+            clean[id] = flag == true
+        end
+        rule.rankIDs = clean
     end
     -- Timeline markers (Markers.lua). Their output fields stay flat on the rule under the marker key.
     if ns.Markers then
@@ -2356,9 +2371,15 @@ function ns._Aura.otherTriggerActive(rule, spellID, eventKind)
 end
 
 -- A configured ID matches a spell ID directly, or as another rank of the same spell when the rule tracks all ranks.
+function ns.TriggerTracksRanks(rule, configuredID)
+    local flag = rule and type(rule.rankIDs) == "table" and rule.rankIDs[configuredID]
+    if flag == nil then flag = ns.isForever == true end
+    return flag == true
+end
+
 function ns.RuleSpellMatches(rule, configuredID, spellID)
     if configuredID == spellID then return true end
-    return rule and rule.allRanks == true and ns.SpellRanks ~= nil and ns.SpellRanks.SameFamily(configuredID, spellID)
+    return ns.TriggerTracksRanks(rule, configuredID) and ns.SpellRanks ~= nil and ns.SpellRanks.SameFamily(configuredID, spellID)
 end
 
 -- True when an intermediate timeline node of the rule has some output switched on.
@@ -3152,7 +3173,17 @@ function rebuildAuraWatchesInner()
             or ns.ruleHasMarkerOutput(rule))
         if ruleActive then
             activeRuleIDs[ruleID] = true
-            local watchIDs = rule.allRanks and ns.SpellRanks and ns.SpellRanks.Expand(rule.spellIDs) or rule.spellIDs
+            local watchIDs = rule.spellIDs
+            if ns.SpellRanks then
+                watchIDs = {}
+                for _, id in ipairs(rule.spellIDs) do
+                    if ns.TriggerTracksRanks(rule, id) then
+                        for _, member in ipairs(ns.SpellRanks.Expand({ id })) do watchIDs[#watchIDs + 1] = member end
+                    else
+                        watchIDs[#watchIDs + 1] = id
+                    end
+                end
+            end
             for _, spellID in ipairs(watchIDs) do
                 local _, status = getSpellInfo(spellID)
                 if status == "valid" then auraWatchBySpellID[spellID] = true end
@@ -5740,8 +5771,7 @@ local function layoutSharedEditor(isAura)
         auraEditor.batchSealsButton:ClearAllPoints()
         auraEditor.batchSealsButton:SetPoint("TOPRIGHT", triggerPanel, "TOPRIGHT", ns.Layout.RIGHT, -46)
         triggerStatus:SetPoint("RIGHT", auraEditor.batchSealsButton, "LEFT", -6, 0)
-        auraEditor.batchSealsButton:SetShown(isAura and auraEditor.isPaladin
-            and selectedAura() ~= nil and selectedAura().builtin ~= true)
+        auraEditor.batchSealsButton:SetShown(false) -- offered in "Add rule" for Paladins instead
     else
         triggerStatus:SetPoint("RIGHT", triggerPanel, "RIGHT", ns.Layout.RIGHT, 0)
     end
@@ -6069,9 +6099,28 @@ local function updateSelectedTriggers()
             row = CreateFrame("Frame", nil, triggerChild)
             row:SetHeight(ns.Layout.MEMBER_ROW_H)
             ns.setupMemberRow(row)
+            -- Per trigger: count every rank of this spell (Lay on Hands rank 1, 2, 3 ...).
+            row.ranks = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+            row.ranks:SetSize(22, 22)
+            row.ranks:SetPoint("RIGHT", row.remove, "LEFT", -54, 0)
+            row.ranksLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.ranksLabel:SetPoint("LEFT", row.ranks, "RIGHT", 0, 0)
+            row.ranksLabel:SetText(L("Ranks"))
+            row.ranks:SetScript("OnClick", function(self)
+                local parent = self:GetParent()
+                local auraRule = selectedAura()
+                if not (auraRule and parent.spellID) then return end
+                auraRule.rankIDs = type(auraRule.rankIDs) == "table" and auraRule.rankIDs or {}
+                local checked = self:GetChecked()
+                auraRule.rankIDs[parent.spellID] = checked == true or checked == 1
+                rebuildAuraWatches()
+                syncAllAuras(true)
+            end)
+            addHelpTooltip(row.ranks, "All ranks", "Every rank of this spell counts (Lay on Hands rank 1, 2 and 3). The ranks are found once in the background and remembered.")
+            ns.Skin.Register(row.ranks, "checkbox")
             row.actionButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
             row.actionButton:SetSize(82, 22)
-            row.actionButton:SetPoint("RIGHT", row.remove, "LEFT", -4, 0)
+            row.actionButton:SetPoint("RIGHT", row.ranks, "LEFT", -6, 0)
             row.actionButton:SetScript("OnClick", function(self)
                 local parent = self:GetParent()
                 if parent.openTrackingSettings then parent:openTrackingSettings() end
@@ -6148,6 +6197,7 @@ local function updateSelectedTriggers()
 
         row.spellID = spellID
         row.remove:SetEnabled(not ns.isBuiltinTrigger(rule, spellID))
+        row.ranks:SetChecked(ns.TriggerTracksRanks(rule, spellID))
         row.spellName = info and info.name or (state == "pending" and L("Loading…") or L("Unknown ID"))
         row.icon:SetTexture(info and info.iconID or "Interface\\Icons\\INV_Misc_QuestionMark")
         row.rule = rule
@@ -6165,7 +6215,7 @@ local function updateSelectedTriggers()
             if isClickable then
                 row.title:SetPoint("RIGHT", row.actionButton, "LEFT", -6, 0)
             else
-                row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
+                row.title:SetPoint("RIGHT", row.ranks, "LEFT", -6, 0)
             end
             local hex = string.format("%02x%02x%02x", math.floor(color[1] * 255 + 0.5),
                 math.floor(color[2] * 255 + 0.5), math.floor(color[3] * 255 + 0.5))
@@ -6178,6 +6228,7 @@ local function updateSelectedTriggers()
             row.title:ClearAllPoints()
             row.title:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
             row.title:SetPoint("RIGHT", row, "RIGHT", -34, 0)
+            row.title:SetPoint("RIGHT", row.ranks, "LEFT", -6, 0)
             local note = state == "pending" and L("loading") or L("invalid")
             row.title:SetText(ns.memberRowText(row.spellName, spellID, note))
             row.title:SetTextColor(state == "pending" and 0.75 or 1, state == "pending" and 0.78 or 0.65, state == "pending" and 0.84 or 0.38)
@@ -6885,9 +6936,8 @@ function updateDetails()
         auraEditor.oneEffectLabel:Show()
         auraEditor.oneEffectCheck:SetChecked(auraRule.oneEffect == true)
         auraEditor.oneEffectCheck:SetEnabled(not auraRule.builtin)
-        auraEditor.allRanksCheck:Show()
-        auraEditor.allRanksLabel:Show()
-        auraEditor.allRanksCheck:SetChecked(auraRule.allRanks == true)
+        auraEditor.allRanksCheck:Hide()
+        auraEditor.allRanksLabel:Hide()
         auraEditor.iconButton:Hide()
         itemSourceText:Hide()
         triggerLabel:SetText(L("TRIGGERS"))
@@ -8469,6 +8519,27 @@ local function styleCreationOption(button, iconPath, title, description, y)
     creationView.importButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
     styleCreationOption(creationView.importButton, "Interface\\Icons\\INV_Misc_Note_01", "Import", "Paste a group someone shared with you.", -322)
     creationView.importButton:SetScript("OnClick", function() ns.ShareUI.openImport() end)
+    -- Paladins: one rule with every learned Seal (the Codex seal family).
+    creationView.sealsButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
+    styleCreationOption(creationView.sealsButton, "Interface\\Icons\\Spell_Holy_RighteousnessAura", "All Seals",
+        "Paladin: one aura rule with every Seal you know.", -408)
+    creationView.sealsButton:SetScript("OnClick", function()
+        local added, status, familyRuleID = ns.syncAuraTrackerSeals(nil, true)
+        for _, candidate in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+            if familyRuleID and tostring(candidate.id) == tostring(familyRuleID) then
+                selectRule(candidate, "auras")
+                break
+            end
+        end
+        if status ~= "ready" and status ~= "partially-mapped" then
+            setStatus(status == "combat-or-unavailable" and "Add all Seals after combat."
+                or status == "no-candidates" and "No matching learned Seals found."
+                or status == "manual-filter-required" and "Enter a localized name filter first."
+                or "Seals could not be added.", true)
+        end
+    end)
+    local _, classFile = UnitClass("player")
+    creationView.sealsButton:SetShown(classFile == "PALADIN")
 
     skillSearchBox = createEditBox(creationView, 330, 24)
     skillSearchBox:SetPoint("TOP", creationView, "TOP", 0, -60)
