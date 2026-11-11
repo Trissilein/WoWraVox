@@ -8071,6 +8071,13 @@ function ns.refreshTimeline(rule)
             handle.tex:SetVertexColor(0.85, 0.7, 0.35)
         end
         handle.border:SetVertexColor(0.05, 0.04, 0.02, 1)
+        -- Start/End labels sit under the line, node labels above it: a node next to an end never covers its label.
+        handle.label:ClearAllPoints()
+        if endpoint then
+            handle.label:SetPoint("TOP", handle, "BOTTOM", 0, -2)
+        else
+            handle.label:SetPoint("BOTTOM", handle, "TOP", 0, 2)
+        end
         local size = endpoint and 12 or 16
         handle.tex:SetSize(size, size)
         handle.border:SetSize(size + 4, size + 4)
@@ -8106,7 +8113,7 @@ function ns.refreshTimeline(rule)
     end
     timeline.secondsBox:SetShown(nodeSelected and seconds ~= nil)
     timeline.secondsUnit:SetShown(nodeSelected and seconds ~= nil)
-    timeline.frame:SetHeight(nodeSelected and 150 or 106)
+    timeline.frame:SetHeight(nodeSelected and 160 or 118)
 end
 
 function ns.layoutTimeline(y)
@@ -8120,10 +8127,10 @@ function ns.layoutTimeline(y)
     timeline.removeButton:ClearAllPoints()
     timeline.removeButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
     timeline.track:ClearAllPoints()
-    timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -42)
-    timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -42)
+    timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -54)
+    timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -54)
     timeline.percentLabel:ClearAllPoints()
-    timeline.percentLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -116)
+    timeline.percentLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -126)
     timeline.percentBox:ClearAllPoints()
     timeline.percentBox:SetPoint("LEFT", timeline.percentLabel, "RIGHT", 10, 0)
     timeline.percentUnit:ClearAllPoints()
