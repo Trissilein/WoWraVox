@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, "..");
 const readAddonFile = (name, pattern, replacement) =>
   fs.readFileSync(path.join(root, name), "utf8").replace(pattern, replacement);
 const defaults = readAddonFile("Defaults.lua", /^local _, ns = \.\.\.$/m, "local _, ns = addonName, addonNamespace");
+const markers = readAddonFile("Markers.lua", /^local _, ns = \.\.\.$/m, "local _, ns = addonName, addonNamespace");
 const ruleOutput = readAddonFile("RuleOutput.lua", /^local _, ns = \.\.\.$/m, "local _, ns = addonName, addonNamespace");
 const debugReport = readAddonFile("DebugReport.lua", /^local _, ns = \.\.\.$/m, "local _, ns = addonName, addonNamespace");
 const shareGroups = readAddonFile("ShareGroups.lua", /^local _, ns = \.\.\.$/m, "local _, ns = addonName, addonNamespace");
@@ -28,6 +29,7 @@ const program = [
   "local addonNamespace = {}",
   prelude,
   "do", defaults, "end",
+  "do", markers, "end",
   "do", ruleOutput, "end",
   "do", debugReport, "end",
   "do", shareGroups, "end",

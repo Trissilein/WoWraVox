@@ -10,6 +10,10 @@ local Share = ns.ShareGroups
 
 local TOKEN = "WVX1:"
 local VERSION = 1
+-- Version 2 adds intermediate timeline markers (Markers.lua). A group without them still exports as version 1,
+-- so older WoWraVox versions keep reading it.
+local MARKER_VERSION = 2
+local MAX_MARKERS = 8
 -- 8 KB: a full group (100 IDs, 100 cast pairs, 100 cues, seven 200-byte texts) stays near 5 KB. A lower limit keeps
 -- the cost of a hostile paste (decode, decompress) and the 200-byte chat chunks small. Read by ShareChat.
 local MAX_INPUT = 8192
@@ -206,6 +210,36 @@ local function sanitizeGroup(source, raw)
         out.categoryByAuraID = idMap(source.categoryByAuraID, function(cue) return isCue(cue, false) end)
         if not out.categoryByAuraID then return nil end
     end
+    if source.markers ~= nil then
+        local list = source.markers
+        if type(list) ~= "table" or countKeys(list) ~= #list or #list > MAX_MARKERS then return nil end
+        out.markers = {}
+        for i = 1, #list do
+            local m = list[i]
+            if type(m) ~= "table" or type(m.key) ~= "string" then return nil end
+            if not (m.key == "beforeExpire" or m.key:match("^m%d+$")) then return nil end
+            if type(m.at) ~= "number" or m.at ~= m.at or m.at < 0 or m.at > 100 then return nil end
+            if m.fromEnd ~= nil and (type(m.fromEnd) ~= "number" or m.fromEnd < 0 or m.fromEnd > 3600) then return nil end
+            if m.enabled ~= nil and type(m.enabled) ~= "boolean" then return nil end
+            if m.soundEnabled ~= nil and type(m.soundEnabled) ~= "boolean" then return nil end
+            if m.message ~= nil and type(m.message) ~= "string" then return nil end
+            if m.soundMediaName ~= nil and type(m.soundMediaName) ~= "string" then return nil end
+            if m.soundKitID ~= nil and not isID(m.soundKitID) then return nil end
+            if m.soundChannel ~= nil and not isChannel(m.soundChannel) then return nil end
+            if m.category ~= nil and not isCue(m.category, true) then return nil end
+            local screen
+            if m.screen ~= nil then
+                if type(m.screen) ~= "table" or type(m.screen.enabled) ~= "boolean" or type(m.screen.text) ~= "string" then return nil end
+                screen = { enabled = m.screen.enabled, text = raw and unescapeText(m.screen.text) or cleanText(m.screen.text) }
+            end
+            local function text(v) if v == nil then return nil end return raw and unescapeText(v) or cleanText(v) end
+            out.markers[i] = {
+                key = m.key, at = m.at, fromEnd = m.fromEnd, enabled = m.enabled, message = text(m.message),
+                soundEnabled = m.soundEnabled, soundMediaName = text(m.soundMediaName), soundKitID = m.soundKitID,
+                soundChannel = m.soundChannel, category = m.category, screen = screen,
+            }
+        end
+    end
     if source.screenProfiles ~= nil then
         local profiles = source.screenProfiles
         if type(profiles) ~= "table" then return nil end
@@ -301,6 +335,22 @@ local function pickGroup(rule)
             end
         end
     end
+    local markers = {}
+    for _, marker in ipairs(type(rule.markers) == "table" and rule.markers or {}) do
+        local key = marker.key
+        if type(key) == "string" and (key == "beforeExpire" or key:match("^m%d+$")) and #markers < MAX_MARKERS then
+            local p = type(rule.screenProfiles) == "table" and rule.screenProfiles[key] or nil
+            markers[#markers + 1] = {
+                key = key, at = marker.at, fromEnd = marker.fromEnd,
+                enabled = rule[key .. "Enabled"] == true, message = rule[key .. "Message"],
+                soundEnabled = rule[key .. "SoundEnabled"] == true, soundMediaName = rule[key .. "SoundMediaName"],
+                soundKitID = rule[key .. "SoundKitID"], soundChannel = rule[key .. "SoundChannel"],
+                category = key ~= "beforeExpire" and rule[key .. "Category"] or nil,
+                screen = type(p) == "table" and { enabled = p.enabled == true, text = type(p.text) == "string" and p.text or "" } or nil,
+            }
+        end
+    end
+    if #markers > 0 then group.markers = markers end
     return group
 end
 
@@ -310,7 +360,7 @@ local function encodePayload(api, payload)
     local packed = type(cbor) == "string" and api.CompressString(cbor) or nil
     local encoded = type(packed) == "string" and api.EncodeBase64(packed) or nil
     if type(encoded) ~= "string" or encoded == "" then return nil end
-    return TOKEN .. encoded
+    return "WVX" .. tostring(payload.v or VERSION) .. ":" .. encoded
 end
 
 local function exportRule(rule)
@@ -320,7 +370,8 @@ local function exportRule(rule)
     if type(api) ~= "table" then return false, ERR_CLIENT end
     local group = sanitizeGroup(pickGroup(rule), true)
     if not group then return false, ERR_INVALID end
-    local text = encodePayload(api, { v = VERSION, kind = "aura-group", class = playerClassToken(), group = group })
+    local version = group.markers and MARKER_VERSION or VERSION
+    local text = encodePayload(api, { v = version, kind = "aura-group", class = playerClassToken(), group = group })
     if not text then return false, ERR_INVALID end
     return true, text
 end
@@ -362,10 +413,10 @@ local function parseText(text)
     body = (body:gsub("%s+$", ""))
     local version = body:match("^WVX(%d+):")
     if not version then return nil, ERR_NOT_EXPORT end
-    if version ~= "1" then return nil, ERR_VERSION end
+    if version ~= "1" and version ~= "2" then return nil, ERR_VERSION end
     local api = C_EncodingUtil
     if type(api) ~= "table" then return nil, ERR_CLIENT end
-    local data = body:sub(#TOKEN + 1)
+    local data = body:sub(#("WVX" .. version .. ":") + 1)
     data = (data:gsub("%s", ""))
     local raw = api.DecodeBase64(data)
     if type(raw) ~= "string" or raw == "" then return nil, ERR_INVALID end
@@ -374,7 +425,8 @@ local function parseText(text)
     if #packed > MAX_DECODED then return nil, ERR_TOO_LARGE end
     local payload = api.DeserializeCBOR(packed)
     if type(payload) ~= "table" then return nil, ERR_INVALID end
-    if payload.v ~= VERSION then return nil, ERR_VERSION end
+    if payload.v ~= VERSION and payload.v ~= MARKER_VERSION then return nil, ERR_VERSION end
+    if tostring(payload.v) ~= version then return nil, ERR_VERSION end
     local kind = payload.kind
     if kind ~= "aura-group" and kind ~= "item-group" then return nil, ERR_INVALID end
     local class = payload.class
@@ -498,6 +550,35 @@ function Share.ToRule(group, meta)
                 rule.screenProfiles[key].text = p.text
             end
         end
+    end
+    if group.markers and ns.Markers then
+        ns.Markers.Normalize(rule, "auras")
+        for _, m in ipairs(group.markers) do
+            local key = m.key
+            if key ~= "beforeExpire" then
+                -- Imported m-keys may clash with nothing (a new rule has none) but keep them in step with Add's naming.
+                key = ns.Markers.Add(rule, m.at)
+            else
+                rule.markers[#rule.markers + 1] = { key = "beforeExpire", at = m.at }
+            end
+            for _, marker in ipairs(rule.markers) do
+                if marker.key == key then marker.at, marker.fromEnd = m.at, m.fromEnd end
+            end
+            rule[key .. "Enabled"] = m.enabled == true
+            rule[key .. "Message"] = m.message or ""
+            rule[key .. "SoundEnabled"] = m.soundEnabled == true
+            rule[key .. "SoundMediaName"] = m.soundMediaName
+            if m.soundKitID then rule[key .. "SoundKitID"] = m.soundKitID end
+            if m.soundChannel then rule[key .. "SoundChannel"] = m.soundChannel end
+            if key ~= "beforeExpire" then rule[key .. "Category"] = m.category or "none" end
+            if m.screen then
+                rule.screenProfiles = rule.screenProfiles or {}
+                rule.screenProfiles[key] = rule.screenProfiles[key] or {}
+                rule.screenProfiles[key].enabled = m.screen.enabled
+                rule.screenProfiles[key].text = m.screen.text
+            end
+        end
+        ns.Markers.Normalize(rule, "auras")
     end
     rule.name = uniqueName(rule.name)
     rule.enabled = true

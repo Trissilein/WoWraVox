@@ -733,6 +733,12 @@ function ns.normalizeRuleScreenProfiles(rule, category, settings)
         rule.expireScreenText = nil
         rule.beforeExpireScreenEnabled = nil
         rule.beforeExpireScreenText = nil
+        -- Intermediate timeline markers (m1, m2, ...) keep their own screen profile under their key.
+        for key, profile in pairs(rule.screenProfiles) do
+            if type(key) == "string" and key:match("^m%d+$") then
+                rule.screenProfiles[key] = ns.normalizeScreenProfile(profile, false, "", settings)
+            end
+        end
     else
         rule.screenProfiles.ready = ns.normalizeScreenProfile(
             rule.screenProfiles.ready, rule.screenEnabled, rule.screenText, settings)
@@ -775,6 +781,35 @@ function ns.normalizeNotificationSettings(rule, category)
         rule.readySoundEnabled = rule.readySoundEnabled == true
         rule.readySoundKitID = tonumber(rule.readySoundKitID) or DEFAULT_NOTIFICATION_SOUND_KIT
         rule.readySoundChannel = NOTIFICATION_SOUND_CHANNEL_SET[rule.readySoundChannel] and rule.readySoundChannel or "Master"
+    end
+    -- Timeline markers (Markers.lua). Their output fields stay flat on the rule under the marker key.
+    if ns.Markers then
+        ns.Markers.Normalize(rule, category)
+        local hasBeforeExpire = false
+        for _, marker in ipairs(rule.markers) do
+            local key = marker.key
+            if key == "beforeExpire" then
+                hasBeforeExpire = true
+                -- The Codex tracker still reads the percent fields; keep them in step with the marker.
+                rule.beforeExpireEnabled = true
+                if marker.fromEnd then
+                    rule.beforeExpirePercent, rule.beforeExpireSeconds = nil, math.max(1, math.min(60, math.floor(marker.fromEnd + 0.5)))
+                else
+                    rule.beforeExpirePercent, rule.beforeExpireSeconds = math.max(0, math.min(100, math.floor(100 - marker.at + 0.5))), nil
+                end
+            elseif key:match("^m%d+$") then
+                rule[key .. "Enabled"] = rule[key .. "Enabled"] == true
+                rule[key .. "Message"] = type(rule[key .. "Message"]) == "string" and rule[key .. "Message"] or ""
+                rule[key .. "SoundEnabled"] = rule[key .. "SoundEnabled"] == true
+                local mediaName = rule[key .. "SoundMediaName"]
+                rule[key .. "SoundMediaName"] = type(mediaName) == "string" and trim(mediaName) ~= "" and trim(mediaName) or nil
+                rule[key .. "SoundKitID"] = tonumber(rule[key .. "SoundKitID"]) or DEFAULT_NOTIFICATION_SOUND_KIT
+                rule[key .. "SoundChannel"] = NOTIFICATION_SOUND_CHANNEL_SET[rule[key .. "SoundChannel"]]
+                    and rule[key .. "SoundChannel"] or "Master"
+                rule[key .. "Category"] = NOTIFICATION_CUE_ALIASES[rule[key .. "Category"]] or "none"
+            end
+        end
+        if category == "auras" and not hasBeforeExpire then rule.beforeExpireEnabled = false end
     end
 end
 
@@ -2127,8 +2162,9 @@ function ns.hideScreenFramesForRule(rule)
 end
 
 function ns.playNotificationSound(rule, eventKey)
-    local prefix = (eventKey == "apply" or eventKey == "expire" or eventKey == "ready" or eventKey == "beforeExpire")
-        and eventKey or nil
+    local isKey = ns.Markers and ns.Markers.IsKey(eventKey)
+        or eventKey == "apply" or eventKey == "expire" or eventKey == "ready" or eventKey == "beforeExpire"
+    local prefix = isKey and eventKey or nil
     if not (rule and prefix and rule[prefix .. "SoundEnabled"]) then return false end
     local channel = NOTIFICATION_SOUND_CHANNEL_SET[rule[prefix .. "SoundChannel"]] and rule[prefix .. "SoundChannel"] or "Master"
     local mediaName = rule[prefix .. "SoundMediaName"]
@@ -2169,7 +2205,7 @@ local function notifyRule(rule, eventKey, message, spellID, sourceEvent, detecte
     local screenShown = false
     local native = ns.AuraSoundFallback
     -- Aura events can use {spell}: the name of the aura that fired.
-    if not ctx and (eventKey == "apply" or eventKey == "expire" or eventKey == "beforeExpire") and spellID then
+    if not ctx and eventKey ~= "ready" and spellID then
         ctx = ns._Aura.spellContext(spellID)
     end
     local ttsMessage = ns.formatRuleNotificationMessage(rule, message, ctx)
@@ -2304,7 +2340,7 @@ end
 -- rule announced one (own cast first, its readable debuff a moment later).
 ns._Aura.oneEffectApplyAt = setmetatable({}, { __mode = "k" })
 function ns._Aura.otherTriggerActive(rule, spellID, eventKind)
-    if eventKind == "beforeExpire" then return false end
+    if eventKind ~= "apply" and eventKind ~= "expire" then return false end
     if not rule.oneEffect then return false end
     for _, otherID in ipairs(rule.spellIDs) do
         if otherID ~= spellID and activeAuras[otherID] then return true end
@@ -2323,19 +2359,10 @@ local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
                 if configuredID == spellID then matches = true; break end
             end
             if matches then
-                local enabled, message
-                if eventKind == "apply" then
-                    enabled, message = rule.applyEnabled, rule.applyMessage
-                elseif eventKind == "expire" then
-                    enabled, message = rule.expireEnabled, rule.expireMessage
-                else
-                    enabled, message = rule.beforeExpireEnabled, rule.beforeExpireMessage
-                end
+                -- Any timeline marker key: apply, expire, beforeExpire, m1, m2, ...
+                local enabled, message = rule[eventKind .. "Enabled"], rule[eventKind .. "Message"]
                 local profile = ns.getRuleScreenProfile(rule, eventKind)
-                local soundEnabled
-                if eventKind == "apply" then soundEnabled = rule.applySoundEnabled
-                elseif eventKind == "expire" then soundEnabled = rule.expireSoundEnabled
-                else soundEnabled = rule.beforeExpireSoundEnabled end
+                local soundEnabled = rule[eventKind .. "SoundEnabled"]
                 if enabled or soundEnabled or (profile and profile.enabled) then
                     if eventKind ~= "apply" or ns._Aura.shouldAnnounceApply(rule, spellID, sourceEvent, castGUID) then
                         if eventKind == "apply" and rule.oneEffect then ns._Aura.oneEffectApplyAt[rule] = GetTime() end

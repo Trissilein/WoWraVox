@@ -247,7 +247,7 @@ end
 
 -- code, marker; or nil, error text. Offering the same text again refreshes the old offer.
 function Chat.MakeOffer(text, name)
-    if not plainString(text) or text == "" or text:sub(1, 5) ~= "WVX1:" or not text:match(TEXT_CHARS) then
+    if not plainString(text) or text == "" or not text:match("^WVX[12]:") or not text:match(TEXT_CHARS) then
         return nil, "The export data is invalid."
     end
     if #text > Chat.MAX_TOTAL then return nil, "The export is too large." end

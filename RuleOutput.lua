@@ -28,6 +28,18 @@ local EVENTS = {
     },
 }
 
+-- Intermediate timeline markers (m1, m2, ...) use the same field pattern under their own key.
+local function fieldsFor(eventKey)
+    if EVENTS[eventKey] then return EVENTS[eventKey] end
+    if type(eventKey) ~= "string" or not eventKey:match("^m%d+$") then return nil end
+    return {
+        category = eventKey .. "Category", enabled = eventKey .. "Enabled", message = eventKey .. "Message",
+        sound = eventKey .. "SoundEnabled", media = eventKey .. "SoundMediaName", kit = eventKey .. "SoundKitID",
+        channel = eventKey .. "SoundChannel", screenEnabled = eventKey .. "ScreenEnabled", screenText = eventKey .. "ScreenText",
+    }
+end
+output.FieldsFor = fieldsFor
+
 local VALID_NATIVE_STATUS = {
     registered = true, pending = true, failed = true, unavailable = true, suppressed = true,
 }
@@ -135,7 +147,7 @@ end
 
 function output.Decide(rule, eventKey, options)
     options = type(options) == "table" and options or {}
-    local fields = EVENTS[eventKey]
+    local fields = fieldsFor(eventKey)
     if type(rule) ~= "table" or not fields then
         return { valid = false, reason = "invalid-rule-or-event", native = { status = "suppressed" },
             tts = { status = "suppressed" }, media = { status = "suppressed" }, screen = { status = "suppressed" } }

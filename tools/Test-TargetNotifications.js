@@ -27,6 +27,10 @@ const ruleOutput = fs.readFileSync(path.join(root, "RuleOutput.lua"), "utf8").re
   /^local _, ns = \.\.\.$/m,
   "local _, ns = addonName, addonNamespace",
 );
+const markers = fs.readFileSync(path.join(root, "Markers.lua"), "utf8").replace(
+  /^local _, ns = \.\.\.$/m,
+  "local _, ns = addonName, addonNamespace",
+);
 const debugReport = fs.readFileSync(path.join(root, "DebugReport.lua"), "utf8").replace(
   /^local _, ns = ...$/m,
   "local _, ns = addonName, addonNamespace",
@@ -58,6 +62,9 @@ const program = [
 defaults,
 "end",
 "addonNamespace.RealDefaults = addonNamespace.Defaults",
+"do",
+markers,
+"end",
 "do",
 ruleOutput,
 "end",

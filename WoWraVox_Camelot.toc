@@ -20,6 +20,7 @@ Skin.lua
 SkillTracking.lua
 AuraPresets.lua
 AuraSoundFallback.lua
+Markers.lua
 RuleOutput.lua
 DebugReport.lua
 ShareGroups.lua

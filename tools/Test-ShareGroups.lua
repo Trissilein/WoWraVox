@@ -402,7 +402,7 @@ local headerCases = {
     { "", "Not a WoWraVox export." },
     { "hello", "Not a WoWraVox export." },
     { "WVX1 CBOR1", "Not a WoWraVox export." },
-    { "WVX2:CBOR1", "Unsupported export version." },
+    { "WVX3:CBOR1", "Unsupported export version." },
     { "WVX1:", "The export data is invalid." },
     { "WVX1:CBOR404", "The export data is invalid." },
 }
@@ -1267,3 +1267,29 @@ do
 end
 
 print("ALL PASS")
+
+-- Timeline markers: an intermediate marker travels as WVX2 and comes back with its output; plain groups stay WVX1
+do
+    local plainOK, plainText = Share.Export(sampleRule())
+    check("group without intermediate markers stays WVX1", plainOK and plainText:sub(1, 5) == "WVX1:")
+    local rule = sampleRule()
+    ns.normalizeNotificationSettings(rule, "auras")
+    local key = ns.Markers.Add(rule, 75.5)
+    rule[key .. "Enabled"] = true
+    rule[key .. "Message"] = "three quarters"
+    rule[key .. "SoundEnabled"] = true
+    rule[key .. "Category"] = "defensive"
+    rule.voiceID = 99
+    local ok, text = Share.Export(rule)
+    check("intermediate marker exports as WVX2", ok and text:sub(1, 5) == "WVX2:", tostring(text))
+    local okParse, group, meta = Share.Parse(text)
+    check("WVX2 parses", okParse and group.markers and #group.markers == 1 and group.markers[1].at == 75.5, tostring(group))
+    local imported = Share.ToRule(group, meta)
+    local found
+    for _, m in ipairs(imported.markers or {}) do if m.at == 75.5 then found = m end end
+    check("imported rule keeps the marker and its output", found ~= nil and imported[found.key .. "Message"] == "three quarters"
+        and imported[found.key .. "Enabled"] == true and imported[found.key .. "SoundEnabled"] == true
+        and imported[found.key .. "Category"] == "defensive")
+    local okBad = Share.Parse(craft({ name = "x", markers = { { key = "apply", at = 0 } } }, "MAGE"))
+    check("endpoint keys are not accepted as shared markers", not okBad)
+end

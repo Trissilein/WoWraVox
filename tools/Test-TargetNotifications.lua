@@ -2725,3 +2725,26 @@ do
     ns._Aura.secrecyCache = {}
     ns._Aura.clearActiveState()
 end
+
+-- Timeline markers: migration on normalize, and an intermediate marker announces through sayAura's generic path
+do
+    local rule = { spellIDs = { 1 }, beforeExpireEnabled = true, beforeExpirePercent = 20 }
+    ns.normalizeNotificationSettings(rule, "auras")
+    local keys = {}
+    for _, m in ipairs(rule.markers) do keys[#keys + 1] = m.key end
+    check("normalize builds markers apply/beforeExpire/expire", table.concat(keys, ",") == "apply,beforeExpire,expire"
+        and rule.markers[2].at == 80 and rule.beforeExpirePercent == 20 and rule.beforeExpireEnabled == true)
+    local key = ns.Markers.Add(rule, 50)
+    rule[key .. "Enabled"] = true
+    rule[key .. "Message"] = "half"
+    ns.normalizeNotificationSettings(rule, "auras")
+    check("intermediate marker fields normalized", rule[key .. "SoundEnabled"] == false and rule[key .. "Category"] == "none"
+        and rule[key .. "SoundChannel"] == "Master")
+    local fields = ns.RuleOutput.FieldsFor(key)
+    check("RuleOutput knows marker keys", fields and fields.message == key .. "Message" and not ns.RuleOutput.FieldsFor("bogus"))
+    local decision = ns.RuleOutput.Decide(rule, key, { values = rule, preview = true })
+    check("marker output decision speaks the marker text", decision.valid ~= false and decision.tts and decision.tts.text == "half")
+    ns.Markers.Remove(rule, "beforeExpire")
+    ns.normalizeNotificationSettings(rule, "auras")
+    check("removing the before-expiry marker switches the legacy warning off", rule.beforeExpireEnabled == false)
+end
