@@ -31,6 +31,16 @@ local function clampPercent(value)
     return math.max(0, math.min(100, value))
 end
 
+-- Inner nodes stay strictly between the ends: 0 % is the start and 100 % the end, so an inner node there would only
+-- duplicate them (and sit on top of their handle).
+Markers.INNER_MIN, Markers.INNER_MAX = 0.5, 99.5
+local function clampInner(value)
+    value = clampPercent(value)
+    if not value then return nil end
+    return math.max(Markers.INNER_MIN, math.min(Markers.INNER_MAX, value))
+end
+Markers.ClampInner = clampInner
+
 -- Builds rule.markers from the older fixed fields once, then keeps the list valid: endpoints present and
 -- pinned, positions clamped, keys unique, sorted by position. Idempotent.
 function Markers.Normalize(rule, category)
@@ -51,7 +61,7 @@ function Markers.Normalize(rule, category)
     for _, marker in ipairs(list) do
         if type(marker) == "table" and Markers.IsKey(marker.key) and not seen[marker.key] then
             seen[marker.key] = true
-            local at = clampPercent(marker.at) or 50
+            local at = clampInner(marker.at) or 50
             local fromEnd = tonumber(marker.fromEnd)
             clean[#clean + 1] = { key = marker.key, at = at, fromEnd = fromEnd and fromEnd >= 0 and fromEnd or nil }
         end
@@ -102,7 +112,7 @@ function Markers.Move(rule, key, at, seconds, duration)
             if tonumber(seconds) and duration and duration > 0 then
                 at = tonumber(seconds) / duration * 100
             end
-            marker.at = clampPercent(at) or marker.at
+            marker.at = clampInner(at) or marker.at
             marker.fromEnd = nil
         end
     end
@@ -119,8 +129,8 @@ function Markers.Add(rule, at)
     while used["m" .. n] do n = n + 1 end
     local key = "m" .. n
     rule.markers = rule.markers or {}
-    rule.markers[#rule.markers + 1] = { key = key, at = clampPercent(at) or 50 }
-    Markers.Move(rule, key, clampPercent(at) or 50)
+    rule.markers[#rule.markers + 1] = { key = key, at = clampInner(at) or 50 }
+    Markers.Move(rule, key, clampInner(at) or 50)
     return key
 end
 

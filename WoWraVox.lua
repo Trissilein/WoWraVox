@@ -7902,7 +7902,7 @@ local function buildTimelinePanel()
         if not (rule and left and width and width > 0) then return end
         local x = GetCursorPosition() / self:GetEffectiveScale()
         local at = math.floor(math.max(0, math.min(100, (x - left) / width * 100)) * 10 + 0.5) / 10
-        if at <= 0 or at >= 100 then return end
+        at = ns.Markers.ClampInner(at)
         saveDetails()
         local key = ns.Markers.Add(rule, at)
         rule[key .. "Enabled"] = true
@@ -8037,7 +8037,7 @@ local function handleFor(index)
         local left, width = timeline.track:GetLeft(), timeline.track:GetWidth()
         if not (left and width and width > 0) then return end
         local x = GetCursorPosition() / timeline.track:GetEffectiveScale()
-        local at = math.max(0, math.min(100, (x - left) / width * 100))
+        local at = ns.Markers.ClampInner((x - left) / width * 100)
         self.dragAt = at
         self:ClearAllPoints()
         self:SetPoint("CENTER", timeline.track, "LEFT", width * at / 100, 0)
@@ -8084,7 +8084,10 @@ function ns.refreshTimeline(rule)
         local size = endpoint and 12 or 16
         handle.tex:SetSize(size, size)
         handle.border:SetSize(size + 4, size + 4)
-        handle:SetFrameLevel(timeline.track:GetFrameLevel() + (isSelected and 3 or 1))
+        -- Inner nodes always lie above Start/End, so a node next to an end stays clickable.
+        handle:SetFrameLevel(timeline.track:GetFrameLevel() + (isSelected and 4 or endpoint and 1 or 2))
+        -- Start/End can also be picked by their label under the line (a node may sit on top of their diamond).
+        handle:SetHitRectInsets(0, 0, 0, endpoint and -18 or 0)
         handle:Show()
     end
     for index = #markers + 1, #timeline.handles do timeline.handles[index]:Hide() end
