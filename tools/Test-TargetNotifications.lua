@@ -2748,3 +2748,49 @@ do
     ns.normalizeNotificationSettings(rule, "auras")
     check("removing the before-expiry marker switches the legacy warning off", rule.beforeExpireEnabled == false)
 end
+
+-- Intermediate markers fire from MarkerTimers through sayAura; the readable duration is learned for later estimates
+do
+    local timers, deferred = {}, {}
+    C_Timer = {
+        After = function(_, callback) deferred[#deferred + 1] = callback end,
+        NewTimer = function(delay, callback)
+            local t = { delay = delay, cb = callback }
+            function t:Cancel() self.cancelled = true end
+            timers[#timers + 1] = t
+            return t
+        end,
+    }
+    WoWraVoxProfilesDB = WoWraVoxProfilesDB or {}
+    local rule = ns.newAuraRule()
+    rule.id = "rule-marker"
+    rule.enabled = true
+    rule.spellIDs = { 4242 }
+    ns.normalizeNotificationSettings(rule, "auras")
+    local key = ns.Markers.Add(rule, 50)
+    rule[key .. "Enabled"] = true
+    rule[key .. "Message"] = "Halfway"
+    WoWraVoxDB = WoWraVoxDB or {}
+    local savedAuras = WoWraVoxDB.auras
+    WoWraVoxDB.auras = { rule }
+    now = 100
+    ns.updateMarkerTimers(rule, 4242, "active", 120, 20, false)
+    check("50 % marker armed 10 s after the start", #timers == 1 and math.abs(timers[1].delay - 10) < 1e-6)
+    check("readable duration learned", WoWraVoxProfilesDB.auraDurations[4242] == 20)
+    for i = #ttsMessages, 1, -1 do ttsMessages[i] = nil end
+    C_VoiceChat = { SpeakText = function(_, message) table.insert(ttsMessages, message) end }
+    now = 110
+    timers[1].cb()
+    for _, callback in ipairs(deferred) do callback() end
+    ns._Aura.flushTTS()
+    check("marker speaks its own text", ttsMessages[#ttsMessages] == "Halfway", tostring(ttsMessages[#ttsMessages]))
+    -- Secret duration: the learned one is used and the marker still arms
+    timers = {}
+    ns.updateMarkerTimers(rule, 4242, "inactive", nil, nil, false)
+    now = 200
+    ns.updateMarkerTimers(rule, 4242, "active", nil, nil, false)
+    check("learned duration arms the marker when the duration is unreadable", #timers == 1 and math.abs(timers[1].delay - 10) < 1e-6)
+    ns.updateMarkerTimers(rule, 4242, "inactive", nil, nil, false)
+    check("aura gone cancels the marker", timers[1].cancelled == true)
+    WoWraVoxDB.auras = savedAuras
+end

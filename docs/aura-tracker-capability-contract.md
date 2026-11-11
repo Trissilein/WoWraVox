@@ -16,7 +16,7 @@ Stand: 2026-11-11. Dieser Vertrag trennt Quellcodebelege von noch offenen Live-T
 | Fähigkeit | Verhalten |
 |---|---|
 | Lesbare direkte Aura mit öffentlicher Ablaufzeit | Eigenen Countdown und konfigurierbare Vorwarnung erlauben. Vorwarnung je Aura-Instanz höchstens einmal; Refresh ersetzt Timer. |
-| Geheime Aura oder nicht lesbare Zeit | Zustand bleibt `unknown`, solange keine positive CDM-Aktivmeldung vorliegt. Keine Zeitrechnung, geschätzte Warnung oder Abwesenheitsannahme. |
+| Geheime Aura oder nicht lesbare Zeit | Zustand bleibt `unknown`, solange keine positive CDM-Aktivmeldung vorliegt. Keine Abwesenheitsannahme. Zwischenmarker der Zeitleiste dürfen mit geschätzter Dauer laufen (Regel-Override `durationOverride`, sonst die zuletzt lesbare Dauer aus `WoWraVoxProfilesDB.auraDurations`); sie gelten als „geschätzt“. 0 % und 100 % bleiben an echte Ereignisse gebunden (Entscheidung Ingo, 2026-11-11). |
 | CDM-Aktivmeldung ohne lesbare Zeit | Anwesenheit anzeigen; Ablauf und freie Vorwarnung als nicht verfügbar markieren. Blizzard-CDM bleibt bedienbar. |
 | CDM-Inaktivmeldung | Nur als Ende verwenden, wenn bestehende Aura-/Secrecy-Regeln das Ende bestätigen. Unbekanntheit nicht als Entfernung behandeln. |
 | Blizzard-`PandemicTime` | Erst anbinden, wenn der Client für die betreffende Aura reproduzierbar ein passendes Signal auslöst. Nie als frei wählbare Sekundenschwelle darstellen. |

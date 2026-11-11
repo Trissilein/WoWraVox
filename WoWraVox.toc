@@ -20,6 +20,7 @@ SkillTracking.lua
 AuraPresets.lua
 AuraSoundFallback.lua
 Markers.lua
+MarkerTimers.lua
 RuleOutput.lua
 DebugReport.lua
 ShareGroups.lua

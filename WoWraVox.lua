@@ -2431,6 +2431,63 @@ local function auraDurationObject(instanceID)
     return duration
 end
 
+-- Intermediate timeline markers (MarkerTimers.lua). The duration is the readable one, else the rule's override, else
+-- the last readable duration learned for this spell (WoWraVoxProfilesDB.auraDurations); the latter two are estimates.
+local markerTimers = ns.MarkerTimers and ns.MarkerTimers.Create({
+    now = function() return GetTime() end,
+    schedule = function(delay, callback)
+        local ok, timer = pcall(C_Timer.NewTimer, delay, callback)
+        return ok and timer or nil
+    end,
+    cancel = function(timer)
+        if timer and type(timer.Cancel) == "function" then pcall(timer.Cancel, timer) end
+    end,
+    emit = function(ruleID, spellID, markerKey)
+        for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+            if rule.id == ruleID then
+                sayAura(spellID, markerKey, "MARKER_TIMER", nil, rule)
+                return
+            end
+        end
+    end,
+})
+ns.markerTimers = markerTimers
+
+local function learnedDurations()
+    if type(WoWraVoxProfilesDB) ~= "table" then return nil end
+    WoWraVoxProfilesDB.auraDurations = type(WoWraVoxProfilesDB.auraDurations) == "table" and WoWraVoxProfilesDB.auraDurations or {}
+    return WoWraVoxProfilesDB.auraDurations
+end
+ns.learnedDurations = learnedDurations
+
+local function markerSignature(rule)
+    local parts = {}
+    for _, marker in ipairs(rule.markers or {}) do parts[#parts + 1] = marker.key .. "@" .. tostring(marker.at) .. "/" .. tostring(marker.fromEnd) end
+    return table.concat(parts, ",") .. "|" .. tostring(rule.durationOverride)
+end
+
+function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDuration, isBaseline)
+    if not (markerTimers and rule and rule.id) or presence == "unknown" then return end
+    if presence ~= "active" then
+        markerTimers:Update(rule.id, spellID, { active = false })
+        return
+    end
+    local store = learnedDurations()
+    if isPublicNumber(readableDuration) and readableDuration > 0 then ns.MarkerTimers.Learn(store, spellID, readableDuration) end
+    local duration, estimated = ns.MarkerTimers.DurationFor(rule, spellID, readableDuration, store)
+    local start
+    if isPublicNumber(expiration) and expiration > 0 and isPublicNumber(readableDuration) and readableDuration > 0 then
+        start = expiration - readableDuration
+    else
+        local current = markerTimers:Get(rule.id, spellID)
+        start = current and current.start or GetTime()
+    end
+    markerTimers:Update(rule.id, spellID, {
+        active = true, start = start, duration = duration, estimated = estimated,
+        markers = rule.markers, baseline = isBaseline == true, signature = markerSignature(rule),
+    })
+end
+
 local function updateAuraTrackerState(spellID, presence, aura, state, sourceEvent, isBaseline)
     if not auraTracker.stateManager then return end
     for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
@@ -2458,8 +2515,7 @@ local function updateAuraTrackerState(spellID, presence, aura, state, sourceEven
                 if durationOK and isPublicNumber(value) and value > 0 then duration = value end
             end
             local auraDurationObjectValue = aura and instanceID and auraDurationObject(instanceID) or nil
-            local warningCanRun = aura ~= nil and type(expiration) == "number" and expiration > 0
-                and (rule.beforeExpirePercent == nil or (type(duration) == "number" and duration > 0))
+            ns.updateMarkerTimers(rule, spellID, presence, expiration, duration, isBaseline)
             auraTracker.stateManager:Update(ruleID, spellID, {
                 presence = presence,
                 instanceID = instanceID or (state and state.auraInstanceID),
@@ -2471,7 +2527,7 @@ local function updateAuraTrackerState(spellID, presence, aura, state, sourceEven
                 durationObject = auraDurationObjectValue,
             }, {
                 baseline = isBaseline == true,
-                beforeExpireEnabled = ruleHasBeforeExpireOutput(rule) and warningCanRun,
+                beforeExpireEnabled = false, -- every intermediate marker, the old warning included, runs in MarkerTimers
                 warningPercent = rule.beforeExpirePercent,
             })
         end
