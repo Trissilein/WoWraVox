@@ -128,7 +128,8 @@ local showAddRuleView
 ns.Layout = ns.Layout or {}
 -- One fixed window, no tiers and no resizing: the editor grid below is computed for exactly this size.
 ns.Layout.maxWidth = 1408
-ns.Layout.maxHeight = 800 -- lower than most screens (in UI units), so the window keeps scale 1 instead of shrinking
+ns.Layout.maxHeight = 800 -- default height; the window can be dragged taller or shorter (minHeight..screen)
+ns.Layout.minHeight = 560
 ns.Layout.statusHeight = 32
 -- Horizontal grid of the editor. All COLn/visible values are VISIBLE edges (what the eye sees), x from the
 -- left edge of the panel. Chrome facts and their sources: docs/UI-ALIGNMENT.md section 1.
@@ -156,7 +157,7 @@ ns.Layout.refreshListPending = false
 ns.Layout.getWindowScale = function()
     local availableWidth = math.max(1, (UIParent:GetWidth() or ns.Layout.maxWidth) - 24)
     local availableHeight = math.max(1, (UIParent:GetHeight() or ns.Layout.maxHeight) - 24)
-    return math.min(1, availableWidth / ns.Layout.maxWidth, availableHeight / ns.Layout.maxHeight)
+    return math.min(1, availableWidth / ns.Layout.maxWidth, availableHeight / ns.Layout.minHeight)
 end
 
 -- Visible column edges / widths for an editor panel of the given width.
@@ -5819,7 +5820,7 @@ local function layoutSharedEditor(isAura)
         tabBar:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", ns.Layout.RIGHT, tabsY)
         tabBar:SetFrameLevel(ns.notificationPanels.apply.frame:GetFrameLevel() + 10)
         tabBar:Show()
-        local panelY = tabsY - 26
+        local panelY = tabsY - 30
         local key = ns.SelectedMarkerKey(selectedAura())
         local panel = key == "apply" and ns.notificationPanels.apply or key == "expire" and ns.notificationPanels.expire
             or ns.notificationPanels.beforeExpire
@@ -8074,7 +8075,7 @@ local function buildTimelinePanel()
     timeline.tabs = {}
     -- The tabs switch what the output panel below shows, so they sit on that panel's top edge.
     timeline.tabBar = CreateFrame("Frame", nil, auraEditor)
-    timeline.tabBar:SetHeight(28)
+    timeline.tabBar:SetHeight(30)
 
     timeline.addButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     timeline.addButton:SetSize(120, 24)
@@ -8194,9 +8195,15 @@ local function tabFor(index)
     tab:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     tab.text = tab:CreateFontString(nil, "OVERLAY", "WoWraVoxFontNormal")
     tab.text:SetPoint("CENTER", 0, 0)
+    -- Covers the panel's top border under the active tab, so tab and panel read as one shape.
+    tab.join = tab:CreateTexture(nil, "OVERLAY")
+    tab.join:SetColorTexture(0.09, 0.095, 0.105, 1)
+    tab.join:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", 1, 0)
+    tab.join:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -1, 0)
+    tab.join:SetHeight(7)
     tab:SetScript("OnClick", function(self) ns.SelectMarker(self.key) end)
-    tab:SetScript("OnEnter", function(self) if not self.selected then self:SetBackdropBorderColor(0.88, 0.68, 0.24, 0.9) end end)
-    tab:SetScript("OnLeave", function(self) if not self.selected then self:SetBackdropBorderColor(0.35, 0.29, 0.18, 0.9) end end)
+    tab:SetScript("OnEnter", function(self) if not self.selected then self.text:SetTextColor(1, 1, 1) end end)
+    tab:SetScript("OnLeave", function(self) if not self.selected then self.text:SetTextColor(0.62, 0.62, 0.62) end end)
     timeline.tabs[index] = tab
     return tab
 end
@@ -8254,20 +8261,23 @@ function ns.refreshTimeline(rule)
         tab.key, tab.selected = marker.key, isSelected
         tab.text:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
             or (tostring(number) .. "  ·  " .. timingText(marker)))
-        tab:SetWidth(tab.text:GetStringWidth() + 24)
+        tab:SetWidth(math.max(64, tab.text:GetStringWidth() + 32))
+        -- Inactive tabs sit on the panel's top edge; the active one is taller, panel-coloured and
+        -- runs into the panel (its join strip hides the border below it), like a file-folder tab.
+        local sink = isSelected and 7 or 0
         tab:ClearAllPoints()
-        if previousTab then
-            tab:SetPoint("BOTTOMLEFT", previousTab, "BOTTOMRIGHT", 4, 0)
-        else
-            tab:SetPoint("BOTTOMLEFT", timeline.tabBar, "BOTTOMLEFT", 0, 0)
-        end
+        tab:SetPoint("BOTTOMLEFT", previousTab or timeline.tabBar, previousTab and "BOTTOMRIGHT" or "BOTTOMLEFT",
+            previousTab and 2 or 14, -sink + (previousTab and previousTab.sink or 0))
+        tab.sink = sink
         previousTab = tab
-        -- The active tab takes the panel's own colour and reaches over its top border: it reads as part of it.
-        tab:SetHeight(isSelected and 30 or 26)
-        tab:SetFrameLevel(timeline.tabBar:GetFrameLevel() + (isSelected and 6 or 1))
-        tab:SetBackdropColor(isSelected and 0.09 or 0.05, isSelected and 0.095 or 0.05, isSelected and 0.105 or 0.06, 1)
-        tab:SetBackdropBorderColor(isSelected and 0.88 or 0.35, isSelected and 0.68 or 0.29, isSelected and 0.24 or 0.18, 1)
-        tab.text:SetTextColor(isSelected and 1 or 0.85, isSelected and 0.82 or 0.85, isSelected and 0.2 or 0.85)
+        tab:SetHeight((isSelected and 30 or 25) + sink)
+        tab.text:ClearAllPoints()
+        tab.text:SetPoint("CENTER", tab, "CENTER", 0, sink / 2)
+        tab.join:SetShown(isSelected)
+        tab:SetFrameLevel(ns.notificationPanels.apply.frame:GetFrameLevel() + (isSelected and 12 or 1))
+        tab:SetBackdropColor(isSelected and 0.09 or 0.035, isSelected and 0.095 or 0.037, isSelected and 0.105 or 0.045, 1)
+        tab:SetBackdropBorderColor(isSelected and 0.88 or 0.3, isSelected and 0.68 or 0.25, isSelected and 0.24 or 0.16, 1)
+        tab.text:SetTextColor(isSelected and 1 or 0.62, isSelected and 0.82 or 0.62, isSelected and 0.2 or 0.62)
         tab:Show()
     end
     for index = #markers + 1, #timeline.handles do timeline.handles[index]:Hide() end
@@ -8306,7 +8316,7 @@ function ns.refreshTimeline(rule)
         timeline.durationLabel, timeline.durationBox, timeline.durationHint, timeline.removeButton }) do
         region:SetShown(nodeSelected)
     end
-    timeline.frame:SetHeight(nodeSelected and 132 or 94)
+    timeline.frame:SetHeight(nodeSelected and 146 or 108)
 end
 
 function ns.layoutTimeline(y)
@@ -8323,7 +8333,7 @@ function ns.layoutTimeline(y)
     timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -48)
     timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -48)
     timeline.timingLabel:ClearAllPoints()
-    timeline.timingLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -102)
+    timeline.timingLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -114)
     timeline.anchorChoice:ClearAllPoints()
     timeline.anchorChoice:SetPoint("LEFT", timeline.timingLabel, "RIGHT", -6, -2)
     ns.Layout.setDropdownWidth(timeline.anchorChoice, 190)
@@ -9858,8 +9868,34 @@ function ns.createOptions()
     optionsFrame = CreateFrame("Frame", "WoWraVoxOptions", UIParent, "BackdropTemplate")
     stylePanel(optionsFrame, 0.035, 0.04, 0.05, false)
     optionsFrame:SetScale(ns.Layout.getWindowScale())
-    optionsFrame:SetSize(ns.Layout.maxWidth, ns.Layout.maxHeight)
+    -- Height is the user's: drag the grip bottom right; stored per account, limited to the screen.
+    local scale = optionsFrame:GetScale()
+    local screenHeight = ((UIParent:GetHeight() or ns.Layout.maxHeight) - 24) / scale
+    local savedHeight = type(WoWraVoxProfilesDB) == "table" and tonumber(WoWraVoxProfilesDB.windowHeight)
+    optionsFrame:SetSize(ns.Layout.maxWidth,
+        math.max(ns.Layout.minHeight, math.min(savedHeight or ns.Layout.maxHeight, screenHeight)))
     optionsFrame:SetPoint("CENTER")
+    optionsFrame:SetResizable(true)
+    if optionsFrame.SetResizeBounds then
+        optionsFrame:SetResizeBounds(ns.Layout.maxWidth, ns.Layout.minHeight, ns.Layout.maxWidth, math.max(ns.Layout.minHeight, screenHeight))
+    end
+    local grip = CreateFrame("Button", nil, optionsFrame)
+    grip:SetSize(18, 18)
+    grip:SetPoint("BOTTOMRIGHT", optionsFrame, "BOTTOMRIGHT", -4, 4)
+    grip:SetFrameLevel(optionsFrame:GetFrameLevel() + 50)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetScript("OnMouseDown", function(_, button)
+        if button == "LeftButton" then optionsFrame:StartSizing("BOTTOM") end
+    end)
+    grip:SetScript("OnMouseUp", function()
+        optionsFrame:StopMovingOrSizing()
+        if type(WoWraVoxProfilesDB) == "table" then
+            WoWraVoxProfilesDB.windowHeight = math.floor(optionsFrame:GetHeight() + 0.5)
+        end
+    end)
+    addHelpTooltip(grip, "Window height", "Drag to make the window taller or shorter.")
     optionsFrame:SetFrameStrata("DIALOG")
     optionsFrame:SetToplevel(true) -- the window clicked last sits on top of other DIALOG windows (e.g. TrisThreat)
     optionsFrame:SetClampedToScreen(true)
