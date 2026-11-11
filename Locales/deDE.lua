@@ -439,4 +439,9 @@ ns.Locales.deDE = {
     ["Click the line to add a node there. Drag a node to move it. Click a selected node again to remove it."] = "Klick auf die Linie fügt dort einen Knoten hinzu. Knoten zum Verschieben ziehen. Ein gewählter Knoten erneut angeklickt wird entfernt (mit Rückfrage).",
     ["s before end"] = "s vor Ende", ["Seconds before end"] = "Sekunden vor Ende",
     ["Position of the selected node in seconds before the end (expiration). Needs a known duration."] = "Position des gewählten Knotens in Sekunden vor dem Ende (Ablauf). Braucht eine bekannte Dauer.",
+    ["Timing"] = "Zeitpunkt", ["Percent of the duration"] = "Prozent der Dauer", ["Seconds after start"] = "Sekunden nach Start",
+    ["Seconds before end"] = "Sekunden vor Ende", ["s after start"] = "s nach Start",
+    ["seconds before the end need a duration"] = "Sekunden vor Ende brauchen eine Dauer",
+    ["Percent of the duration, seconds after the start (works without a known duration) or seconds before the end (needs a duration)."] = "Prozent der Dauer, Sekunden nach dem Start (geht ohne bekannte Dauer) oder Sekunden vor dem Ende (braucht eine Dauer).",
+    ["Percent or seconds, depending on the timing on the left. Decimals allowed."] = "Prozent oder Sekunden, je nach Zeitpunkt links. Kommazahlen erlaubt.",
 }

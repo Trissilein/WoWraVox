@@ -1293,3 +1293,18 @@ do
     local okBad = Share.Parse(craft({ name = "x", markers = { { key = "apply", at = 0 } } }, "MAGE"))
     check("endpoint keys are not accepted as shared markers", not okBad)
 end
+
+-- Node timing travels with the share
+do
+    local rule = sampleRule()
+    ns.normalizeNotificationSettings(rule, "auras")
+    local key = ns.Markers.Add(rule, 50)
+    ns.Markers.SetTiming(rule, key, "end", 2.5, 20)
+    rule[key .. "Enabled"] = true
+    local ok, text = Share.Export(rule)
+    local _, group, meta = Share.Parse(text)
+    local imported = Share.ToRule(group, meta)
+    local found
+    for _, m in ipairs(imported.markers) do if m.anchor == "end" then found = m end end
+    check("2.5 s before end survives export and import", ok and found and found.offset == 2.5)
+end

@@ -219,7 +219,8 @@ local function sanitizeGroup(source, raw)
             if type(m) ~= "table" or type(m.key) ~= "string" then return nil end
             if not (m.key == "beforeExpire" or m.key:match("^m%d+$")) then return nil end
             if type(m.at) ~= "number" or m.at ~= m.at or m.at < 0 or m.at > 100 then return nil end
-            if m.fromEnd ~= nil and (type(m.fromEnd) ~= "number" or m.fromEnd < 0 or m.fromEnd > 3600) then return nil end
+            if m.anchor ~= nil and m.anchor ~= "percent" and m.anchor ~= "start" and m.anchor ~= "end" then return nil end
+            if m.offset ~= nil and (type(m.offset) ~= "number" or m.offset ~= m.offset or m.offset < 0 or m.offset > 3600) then return nil end
             if m.enabled ~= nil and type(m.enabled) ~= "boolean" then return nil end
             if m.soundEnabled ~= nil and type(m.soundEnabled) ~= "boolean" then return nil end
             if m.message ~= nil and type(m.message) ~= "string" then return nil end
@@ -234,7 +235,7 @@ local function sanitizeGroup(source, raw)
             end
             local function text(v) if v == nil then return nil end return raw and unescapeText(v) or cleanText(v) end
             out.markers[i] = {
-                key = m.key, at = m.at, fromEnd = m.fromEnd, enabled = m.enabled, message = text(m.message),
+                key = m.key, at = m.at, anchor = m.anchor, offset = m.offset, enabled = m.enabled, message = text(m.message),
                 soundEnabled = m.soundEnabled, soundMediaName = text(m.soundMediaName), soundKitID = m.soundKitID,
                 soundChannel = m.soundChannel, category = m.category, screen = screen,
             }
@@ -341,7 +342,7 @@ local function pickGroup(rule)
         if type(key) == "string" and (key == "beforeExpire" or key:match("^m%d+$")) and #markers < MAX_MARKERS then
             local p = type(rule.screenProfiles) == "table" and rule.screenProfiles[key] or nil
             markers[#markers + 1] = {
-                key = key, at = marker.at, fromEnd = marker.fromEnd,
+                key = key, at = marker.at, anchor = marker.anchor, offset = marker.offset,
                 enabled = rule[key .. "Enabled"] == true, message = rule[key .. "Message"],
                 soundEnabled = rule[key .. "SoundEnabled"] == true, soundMediaName = rule[key .. "SoundMediaName"],
                 soundKitID = rule[key .. "SoundKitID"], soundChannel = rule[key .. "SoundChannel"],
@@ -562,7 +563,7 @@ function Share.ToRule(group, meta)
                 rule.markers[#rule.markers + 1] = { key = "beforeExpire", at = m.at }
             end
             for _, marker in ipairs(rule.markers) do
-                if marker.key == key then marker.at, marker.fromEnd = m.at, m.fromEnd end
+                if marker.key == key then marker.at, marker.anchor, marker.offset = m.at, m.anchor, m.offset end
             end
             rule[key .. "Enabled"] = m.enabled == true
             rule[key .. "Message"] = m.message or ""

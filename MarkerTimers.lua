@@ -43,12 +43,10 @@ function MarkerTimers.Create(api)
             return nil
         end
         local start, duration = info.start, info.duration
-        if not (finite(start) and finite(duration) and duration > 0) then
-            -- No usable window: keep what runs (a later update with a duration re-arms).
-            return run
-        end
+        if not finite(start) then return run end
+        if not (finite(duration) and duration > 0) then duration = nil end
         -- Same window (same start and duration within a frame): nothing to do.
-        if run and math.abs(run.start - start) < 0.05 and math.abs(run.duration - duration) < 0.05
+        if run and math.abs(run.start - start) < 0.05 and (run.duration or -1) == (duration or -1)
             and run.signature == info.signature then
             return run
         end
@@ -61,10 +59,12 @@ function MarkerTimers.Create(api)
         local Markers = ns.Markers
         for _, marker in ipairs(info.markers or {}) do
             if not Markers.IsEndpoint(marker.key) then
+                -- "s after start" needs no duration; percent and "s before end" do.
                 local offset = Markers.Seconds(marker, duration)
                 local fireAt = offset and start + offset
-                -- Nothing at or after the end: the real end event owns 100 %.
-                if fireAt and offset < duration then
+                -- Nothing at or after the end: the real end event owns 100 %. Without a known duration a
+                -- start-anchored node simply fires; if the effect is gone by then, the run was stopped already.
+                if fireAt and (not duration or offset < duration) then
                     local delay = fireAt - now
                     if delay >= 0 or (delay > -0.25 and not info.baseline) then
                         local captured, key = run.generation, marker.key

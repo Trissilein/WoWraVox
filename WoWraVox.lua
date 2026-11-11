@@ -793,8 +793,8 @@ function ns.normalizeNotificationSettings(rule, category)
                 hasBeforeExpire = true
                 -- The Codex tracker still reads the percent fields; keep them in step with the marker.
                 rule.beforeExpireEnabled = true
-                if marker.fromEnd then
-                    rule.beforeExpirePercent, rule.beforeExpireSeconds = nil, math.max(1, math.min(60, math.floor(marker.fromEnd + 0.5)))
+                if marker.anchor == "end" and marker.offset then
+                    rule.beforeExpirePercent, rule.beforeExpireSeconds = nil, math.max(1, math.min(60, math.floor(marker.offset + 0.5)))
                 else
                     rule.beforeExpirePercent, rule.beforeExpireSeconds = math.max(0, math.min(100, math.floor(100 - marker.at + 0.5))), nil
                 end
@@ -2464,7 +2464,7 @@ ns.learnedDurations = learnedDurations
 
 local function markerSignature(rule)
     local parts = {}
-    for _, marker in ipairs(rule.markers or {}) do parts[#parts + 1] = marker.key .. "@" .. tostring(marker.at) .. "/" .. tostring(marker.fromEnd) end
+    for _, marker in ipairs(rule.markers or {}) do parts[#parts + 1] = marker.key .. "@" .. tostring(marker.at) .. "/" .. tostring(marker.anchor) .. tostring(marker.offset) end
     return table.concat(parts, ",") .. "|" .. tostring(rule.durationOverride)
 end
 
@@ -7796,10 +7796,17 @@ local function buildAuraNotificationPanel(eventKey, title)
 end
 
 do
--- Timeline of an aura rule (Markers.lua): a track 0..100 % with one handle per node. Click a handle to edit that
--- node's output below; drag an inner node; type its position in percent or in seconds after the start.
+-- Timeline of an aura rule (Markers.lua): a line 0..100 % with one diamond per node, tabs (Start, 1, 2, ..., End)
+-- underneath. Click a diamond or a tab to edit that node's output below; click the line to add a node; drag inner
+-- nodes; give a node its timing as a percentage, seconds after the start or seconds before the end.
 local timeline = {}
 ns.timeline = timeline
+
+local ANCHOR_CHOICES = {
+    { value = "percent", label = "Percent of the duration", unit = "%" },
+    { value = "start", label = "Seconds after start", unit = "s after start" },
+    { value = "end", label = "Seconds before end", unit = "s before end" },
+}
 
 function ns.SelectedMarkerKey(rule)
     rule = rule or selectedAura()
@@ -7832,7 +7839,7 @@ local function formatNumber(value)
     return text
 end
 
--- Inner nodes are numbered 1, 2, 3 ... from left to right; the number is shown on the line and in the panel title.
+-- Inner nodes are numbered 1, 2, 3 ... from left to right; the number is shown on the line, the tab and the title.
 local function markerNumber(rule, key)
     local n = 0
     for _, marker in ipairs(rule and rule.markers or {}) do
@@ -7844,11 +7851,15 @@ local function markerNumber(rule, key)
 end
 ns.markerNumber = markerNumber
 
+local function timingText(marker)
+    return ns.Markers.TimingText(marker, formatNumber)
+end
+
 local function markerTitle(marker, rule)
-    if marker.key == "apply" then return L("Start") .. " (0 %)" end
-    if marker.key == "expire" then return L("End") .. " (100 %)" end
+    if marker.key == "apply" then return L("Start") end
+    if marker.key == "expire" then return L("End") end
     local number = markerNumber(rule or selectedAura(), marker.key)
-    return L("Node") .. " " .. tostring(number or "?") .. "  ·  " .. formatNumber(marker.at) .. " %"
+    return L("Node") .. " " .. tostring(number or "?") .. "  ·  " .. timingText(marker)
 end
 ns.markerTitle = markerTitle
 
@@ -7859,19 +7870,17 @@ local function findMarker(rule, key)
 end
 ns.findMarker = findMarker
 
-local function applyMarkerPosition(fromSeconds)
+local function applyTiming(anchor)
     local rule = selectedAura()
     if not rule or editorLoading then return end
     local key = ns.SelectedMarkerKey(rule)
     if ns.Markers.IsEndpoint(key) then return end
-    local duration = timelineDuration(rule)
-    if fromSeconds then
-        local before = tonumber((timeline.secondsBox:GetText():gsub(",", ".")))
-        if before and duration then ns.Markers.Move(rule, key, nil, math.max(0, duration - before), duration) end
-    else
-        local percent = tonumber((timeline.percentBox:GetText():gsub(",", ".")))
-        if percent then ns.Markers.Move(rule, key, percent) end
-    end
+    local value = tonumber((timeline.valueBox:GetText():gsub(",", ".")))
+    local selectedNode = findMarker(rule, key)
+    local current = selectedNode and selectedNode.anchor or "percent"
+    -- Switching the anchor keeps the spot on the line: the value is recomputed, not reused.
+    if anchor and anchor ~= current then value = nil end
+    ns.Markers.SetTiming(rule, key, anchor or current, value, timelineDuration(rule))
     updateDetails()
 end
 
@@ -7883,9 +7892,19 @@ local function applyDurationOverride()
     updateDetails()
 end
 
+local function addNodeAt(rule, at)
+    saveDetails()
+    local key = ns.Markers.Add(rule, at)
+    rule[key .. "Enabled"] = true
+    rule[key .. "Message"] = ""
+    ns.normalizeNotificationSettings(rule, "auras")
+    selectedMarkerKey = key
+    updateDetails()
+end
+
 local function buildTimelinePanel()
     local frame = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
-    frame:SetHeight(150)
+    frame:SetHeight(166)
     stylePanel(frame, 0.09, 0.095, 0.105)
     timeline.frame = frame
     timeline.heading = makeSectionLabel(frame, L("Timeline"), 12, -8)
@@ -7901,15 +7920,7 @@ local function buildTimelinePanel()
         local left, width = self:GetLeft(), self:GetWidth()
         if not (rule and left and width and width > 0) then return end
         local x = GetCursorPosition() / self:GetEffectiveScale()
-        local at = math.floor(math.max(0, math.min(100, (x - left) / width * 100)) * 10 + 0.5) / 10
-        at = ns.Markers.ClampInner(at)
-        saveDetails()
-        local key = ns.Markers.Add(rule, at)
-        rule[key .. "Enabled"] = true
-        rule[key .. "Message"] = ""
-        ns.normalizeNotificationSettings(rule, "auras")
-        selectedMarkerKey = key
-        updateDetails()
+        addNodeAt(rule, ns.Markers.ClampInner(math.floor((x - left) / width * 1000 + 0.5) / 10))
     end)
     addHelpTooltip(track, "Timeline", "Click the line to add a node there. Drag a node to move it. Click a selected node again to remove it.")
     StaticPopupDialogs["WOWRAVOX_REMOVE_NODE"] = StaticPopupDialogs["WOWRAVOX_REMOVE_NODE"] or {
@@ -7935,20 +7946,14 @@ local function buildTimelinePanel()
     line:SetPoint("LEFT", track, "LEFT", 0, 0)
     line:SetPoint("RIGHT", track, "RIGHT", 0, 0)
     timeline.handles = {}
+    timeline.tabs = {}
 
     timeline.addButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     timeline.addButton:SetSize(120, 24)
     timeline.addButton:SetText("+ " .. L("New node"))
     timeline.addButton:SetScript("OnClick", function()
         local rule = selectedAura()
-        if not rule then return end
-        saveDetails()
-        local key = ns.Markers.Add(rule, 90)
-        rule[key .. "Enabled"] = true
-        rule[key .. "Message"] = ""
-        ns.normalizeNotificationSettings(rule, "auras")
-        selectedMarkerKey = key
-        updateDetails()
+        if rule then addNodeAt(rule, 90) end
     end)
     timeline.removeButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     timeline.removeButton:SetSize(120, 24)
@@ -7957,33 +7962,30 @@ local function buildTimelinePanel()
         local rule = selectedAura()
         if not rule then return end
         local key = ns.SelectedMarkerKey(rule)
-        if ns.Markers.Remove(rule, key) then
-            ns.normalizeNotificationSettings(rule, "auras")
-            selectedMarkerKey = "apply"
-            updateDetails()
-        end
+        StaticPopup_Show("WOWRAVOX_REMOVE_NODE", markerTitle(findMarker(rule, key) or { key = key, at = 0 }, rule),
+            nil, { rule = rule, key = key })
     end)
     ns.Skin.Register(timeline.addButton, "button")
     ns.Skin.Register(timeline.removeButton, "button")
 
-    timeline.percentLabel = createLabel(frame, "Position", "GameFontNormal")
-    timeline.percentBox = createEditBox(frame, 70, 28)
-    timeline.percentUnit = createLabel(frame, "%", "GameFontHighlight")
-    timeline.secondsBox = createEditBox(frame, 70, 28)
-    timeline.secondsUnit = createLabel(frame, "s before end", "GameFontHighlight")
+    timeline.timingLabel = createLabel(frame, "Timing", "GameFontNormal")
+    timeline.anchorChoice = createScreenChoiceDropdown(frame, 190, ANCHOR_CHOICES,
+        function(choice) return choice.value end,
+        function(choice) return L(choice.label) end,
+        function(value) applyTiming(value) end)
+    timeline.valueBox = createEditBox(frame, 70, 28)
+    timeline.valueUnit = createLabel(frame, "%", "GameFontHighlight")
     timeline.durationLabel = createLabel(frame, "Duration", "GameFontNormal")
     timeline.durationBox = createEditBox(frame, 70, 28)
     timeline.durationHint = createLabel(frame, "", "GameFontHighlight")
     timeline.durationHint:SetTextColor(0.72, 0.72, 0.72)
-    for _, box in ipairs({ timeline.percentBox, timeline.secondsBox, timeline.durationBox }) do box:SetMaxLetters(10) end
-    timeline.percentBox:HookScript("OnEditFocusLost", function() applyMarkerPosition(false) end)
-    timeline.secondsBox:HookScript("OnEditFocusLost", function() applyMarkerPosition(true) end)
-    -- The track takes clicks; keep it above the line texture but below the handles.
+    for _, box in ipairs({ timeline.valueBox, timeline.durationBox }) do box:SetMaxLetters(10) end
+    timeline.valueBox:HookScript("OnEditFocusLost", function() applyTiming(nil) end)
     timeline.durationBox:HookScript("OnEditFocusLost", applyDurationOverride)
     addHelpTooltip(timeline.addButton, "New node", "Adds a notification moment between start and end. Drag it on the line or type its position.")
     addHelpTooltip(timeline.removeButton, "Remove node", "Removes the selected node. Start and end stay; switch their outputs off instead.")
-    addHelpTooltip(timeline.percentBox, "Position", "Position of the selected node: 0 % = start, 100 % = end. Decimals allowed.")
-    addHelpTooltip(timeline.secondsBox, "Seconds before end", "Position of the selected node in seconds before the end (expiration). Needs a known duration.")
+    addHelpTooltip(timeline.anchorChoice, "Timing", "Percent of the duration, seconds after the start (works without a known duration) or seconds before the end (needs a duration).")
+    addHelpTooltip(timeline.valueBox, "Timing", "Percent or seconds, depending on the timing on the left. Decimals allowed.")
     addHelpTooltip(timeline.durationBox, "Duration", "Duration in seconds. Empty uses the last readable duration of this effect. In combat a hidden duration is estimated from it; the end (100 %) always waits for the real end of the effect.")
 end
 
@@ -8023,10 +8025,10 @@ local function handleFor(index)
         local rule = selectedAura()
         if not rule then return end
         if dragging and self.moved and self.dragAt then
-            ns.Markers.Move(rule, self.key, math.floor(self.dragAt * 10 + 0.5) / 10)
+            ns.Markers.Move(rule, self.key, math.floor(self.dragAt * 10 + 0.5) / 10, nil, timelineDuration(rule))
             updateDetails()
         elseif self.wasSelected and not ns.Markers.IsEndpoint(self.key) then
-            StaticPopup_Show("WOWRAVOX_REMOVE_NODE", ns.markerTitle(ns.findMarker(rule, self.key) or { key = self.key, at = 0 }),
+            StaticPopup_Show("WOWRAVOX_REMOVE_NODE", markerTitle(findMarker(rule, self.key) or { key = self.key, at = 0 }, rule),
                 nil, { rule = rule, key = self.key })
         end
     end)
@@ -8041,31 +8043,60 @@ local function handleFor(index)
         self.dragAt = at
         self:ClearAllPoints()
         self:SetPoint("CENTER", timeline.track, "LEFT", width * at / 100, 0)
-        self.label:SetText(formatNumber(at) .. "%")
+        -- Show the value in the node's own timing while dragging.
+        local marker = findMarker(selectedAura(), self.key)
+        local duration = timelineDuration(selectedAura())
+        if marker and marker.anchor == "start" and duration then
+            self.label:SetText("+" .. formatNumber(duration * at / 100) .. " s")
+        elseif marker and marker.anchor == "end" and duration then
+            self.label:SetText("-" .. formatNumber(duration * (100 - at) / 100) .. " s")
+        else
+            self.label:SetText(formatNumber(at) .. " %")
+        end
     end)
     timeline.handles[index] = handle
     return handle
 end
 
+local function tabFor(index)
+    local tab = timeline.tabs[index]
+    if tab then return tab end
+    tab = CreateFrame("Button", nil, timeline.frame, "BackdropTemplate")
+    tab:SetHeight(24)
+    tab:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
+    tab.text = tab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    tab.text:SetPoint("CENTER", 0, 0)
+    tab:SetScript("OnClick", function(self) ns.SelectMarker(self.key) end)
+    tab:SetScript("OnEnter", function(self) if not self.selected then self:SetBackdropBorderColor(0.88, 0.68, 0.24, 0.9) end end)
+    tab:SetScript("OnLeave", function(self) if not self.selected then self:SetBackdropBorderColor(0.35, 0.29, 0.18, 0.9) end end)
+    timeline.tabs[index] = tab
+    return tab
+end
+
 function ns.refreshTimeline(rule)
     if not timeline.frame then return end
+    local duration, estimated = timelineDuration(rule)
+    if rule and rule.markers then ns.Markers.Resolve(rule, duration) end
     local markers = rule and rule.markers or {}
     local selected = ns.SelectedMarkerKey(rule)
     local width = math.max(1, timeline.track:GetWidth())
+    local previousTab
     for index, marker in ipairs(markers) do
+        local endpoint = ns.Markers.IsEndpoint(marker.key)
+        local number = not endpoint and markerNumber(rule, marker.key) or nil
+        local isSelected = marker.key == selected
+
         local handle = handleFor(index)
         handle.key = marker.key
         handle:ClearAllPoints()
         handle:SetPoint("CENTER", timeline.track, "LEFT", width * marker.at / 100, 0)
-        local endpoint = ns.Markers.IsEndpoint(marker.key)
-        local number = not endpoint and markerNumber(rule, marker.key) or nil
         handle.number:SetText(number and tostring(number) or "")
-        local labelText = formatNumber(marker.at) .. " %"
-        local lineDuration = timelineDuration(rule)
-        local fromStart = lineDuration and ns.Markers.Seconds(marker, lineDuration)
-        if fromStart then labelText = labelText .. "  ·  -" .. formatNumber(lineDuration - fromStart) .. " s" end
+        local labelText = timingText(marker)
+        if marker.anchor == "percent" and duration then
+            local seconds = ns.Markers.Seconds(marker, duration)
+            if seconds then labelText = labelText .. "  ·  -" .. formatNumber(duration - seconds) .. " s" end
+        end
         handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End") or labelText)
-        local isSelected = marker.key == selected
         if isSelected then
             handle.tex:SetVertexColor(1, 0.82, 0.2)
         elseif endpoint then
@@ -8089,18 +8120,42 @@ function ns.refreshTimeline(rule)
         -- Start/End can also be picked by their label under the line (a node may sit on top of their diamond).
         handle:SetHitRectInsets(0, 0, 0, endpoint and -18 or 0)
         handle:Show()
+
+        -- Tabs in line order: Start, 1 · 90 %, 2 · -2 s, ..., End.
+        local tab = tabFor(index)
+        tab.key, tab.selected = marker.key, isSelected
+        tab.text:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
+            or (tostring(number) .. "  ·  " .. timingText(marker)))
+        tab:SetWidth(tab.text:GetStringWidth() + 24)
+        tab:ClearAllPoints()
+        if previousTab then
+            tab:SetPoint("LEFT", previousTab, "RIGHT", 6, 0)
+        else
+            tab:SetPoint("TOPLEFT", timeline.frame, "TOPLEFT", ns.Layout.PAD, -100)
+        end
+        previousTab = tab
+        tab:SetBackdropColor(isSelected and 0.32 or 0.12, isSelected and 0.25 or 0.12, isSelected and 0.08 or 0.13, 0.95)
+        tab:SetBackdropBorderColor(isSelected and 1 or 0.35, isSelected and 0.82 or 0.29, isSelected and 0.2 or 0.18, 0.9)
+        tab.text:SetTextColor(isSelected and 1 or 0.85, isSelected and 0.82 or 0.85, isSelected and 0.2 or 0.85)
+        tab:Show()
     end
     for index = #markers + 1, #timeline.handles do timeline.handles[index]:Hide() end
+    for index = #markers + 1, #timeline.tabs do timeline.tabs[index]:Hide() end
+
     local marker = findMarker(rule, selected)
-    local endpoint = not marker or ns.Markers.IsEndpoint(selected)
-    local duration, estimated = timelineDuration(rule)
-    timeline.percentBox:SetText(marker and formatNumber(marker.at) or "")
-    local fromStart = marker and duration and ns.Markers.Seconds(marker, duration)
-    local seconds = fromStart and (duration - fromStart)
-    timeline.secondsBox:SetText(seconds and formatNumber(seconds) or "")
-    timeline.percentBox:SetEnabled(not endpoint)
-    timeline.secondsBox:SetEnabled(not endpoint and duration ~= nil)
-    timeline.removeButton:SetEnabled(not endpoint)
+    local nodeSelected = marker ~= nil and not ns.Markers.IsEndpoint(selected)
+    if nodeSelected then
+        local anchor = marker.anchor or "percent"
+        timeline.anchorChoice.screenValue = anchor
+        UIDropDownMenu_SetSelectedValue(timeline.anchorChoice, anchor)
+        for _, choice in ipairs(ANCHOR_CHOICES) do
+            if choice.value == anchor then
+                UIDropDownMenu_SetText(timeline.anchorChoice, L(choice.label))
+                timeline.valueUnit:SetText(L(choice.unit))
+            end
+        end
+        timeline.valueBox:SetText(formatNumber(anchor == "percent" and marker.at or marker.offset))
+    end
     timeline.durationBox:SetText(rule and rule.durationOverride and formatNumber(rule.durationOverride) or "")
     local learnedText
     if rule and rule.durationOverride then
@@ -8111,16 +8166,16 @@ function ns.refreshTimeline(rule)
         learnedText = L("unknown until the effect was seen once")
     end
     if duration and estimated then learnedText = learnedText .. " · " .. L("estimated in combat") end
+    if nodeSelected and marker.anchor == "end" and not duration then
+        learnedText = L("seconds before the end need a duration")
+    end
     timeline.durationHint:SetText(learnedText)
     -- The property row belongs to the selected node: shown only for an inner node, never as empty fields.
-    local nodeSelected = not endpoint
-    for _, region in ipairs({ timeline.percentLabel, timeline.percentBox, timeline.percentUnit, timeline.durationLabel,
-        timeline.durationBox, timeline.durationHint, timeline.removeButton }) do
+    for _, region in ipairs({ timeline.timingLabel, timeline.anchorChoice, timeline.valueBox, timeline.valueUnit,
+        timeline.durationLabel, timeline.durationBox, timeline.durationHint, timeline.removeButton }) do
         region:SetShown(nodeSelected)
     end
-    timeline.secondsBox:SetShown(nodeSelected and seconds ~= nil)
-    timeline.secondsUnit:SetShown(nodeSelected and seconds ~= nil)
-    timeline.frame:SetHeight(nodeSelected and 160 or 118)
+    timeline.frame:SetHeight(nodeSelected and 172 or 134)
 end
 
 function ns.layoutTimeline(y)
@@ -8134,25 +8189,19 @@ function ns.layoutTimeline(y)
     timeline.removeButton:ClearAllPoints()
     timeline.removeButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
     timeline.track:ClearAllPoints()
-    timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -54)
-    timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -54)
-    timeline.percentLabel:ClearAllPoints()
-    timeline.percentLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -126)
-    timeline.percentBox:ClearAllPoints()
-    timeline.percentBox:SetPoint("LEFT", timeline.percentLabel, "RIGHT", 10, 0)
-    timeline.percentUnit:ClearAllPoints()
-    timeline.percentUnit:SetPoint("LEFT", timeline.percentBox, "RIGHT", 4, 0)
-    timeline.secondsBox:ClearAllPoints()
-    timeline.secondsBox:SetPoint("LEFT", timeline.percentUnit, "RIGHT", 14, 0)
-    timeline.secondsUnit:ClearAllPoints()
-    timeline.secondsUnit:SetPoint("LEFT", timeline.secondsBox, "RIGHT", 4, 0)
+    timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -48)
+    timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -48)
+    timeline.timingLabel:ClearAllPoints()
+    timeline.timingLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -142)
+    timeline.anchorChoice:ClearAllPoints()
+    timeline.anchorChoice:SetPoint("LEFT", timeline.timingLabel, "RIGHT", -6, -2)
+    ns.Layout.setDropdownWidth(timeline.anchorChoice, 190)
+    timeline.valueBox:ClearAllPoints()
+    timeline.valueBox:SetPoint("LEFT", timeline.anchorChoice, "RIGHT", -4, 2)
+    timeline.valueUnit:ClearAllPoints()
+    timeline.valueUnit:SetPoint("LEFT", timeline.valueBox, "RIGHT", 6, 0)
     timeline.durationLabel:ClearAllPoints()
-    timeline.durationLabel:SetPoint("LEFT", timeline.secondsUnit, "RIGHT", 24, 0)
-    ns.refreshTimeline(selectedAura())
-    if not timeline.secondsUnit:IsShown() then
-        timeline.durationLabel:ClearAllPoints()
-        timeline.durationLabel:SetPoint("LEFT", timeline.percentUnit, "RIGHT", 24, 0)
-    end
+    timeline.durationLabel:SetPoint("LEFT", timeline.valueUnit, "RIGHT", 24, 0)
     timeline.durationBox:ClearAllPoints()
     timeline.durationBox:SetPoint("LEFT", timeline.durationLabel, "RIGHT", 10, 0)
     timeline.durationHint:ClearAllPoints()

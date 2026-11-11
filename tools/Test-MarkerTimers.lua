@@ -81,3 +81,16 @@ check("override beats learned", d == 15 and est == true)
 d, est = ns.MarkerTimers.DurationFor({}, 7, nil, store)
 check("learned when nothing else", d == 12.35 and est == true)
 check("unknown gives nil", ns.MarkerTimers.DurationFor({}, 99, nil, store) == nil)
+
+-- "2 s after start" runs without a known duration; percent nodes wait for one
+T:Reset()
+fired = {}
+local r2 = {}
+ns.Markers.Normalize(r2, "auras")
+local s2 = ns.Markers.Add(r2, 50)
+ns.Markers.SetTiming(r2, s2, "start", 2)
+local p2 = ns.Markers.Add(r2, 80)
+clock = 600
+T:Update("r2", 5, { active = true, start = 600, duration = nil, markers = r2.markers })
+run(605)
+check("start-anchored node fires without a duration, percent node does not", table.concat(fired, ",") == s2)
