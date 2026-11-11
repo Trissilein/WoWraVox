@@ -128,7 +128,7 @@ local showAddRuleView
 ns.Layout = ns.Layout or {}
 -- One fixed window, no tiers and no resizing: the editor grid below is computed for exactly this size.
 ns.Layout.maxWidth = 1408
-ns.Layout.maxHeight = 943
+ns.Layout.maxHeight = 800 -- lower than most screens (in UI units), so the window keeps scale 1 instead of shrinking
 ns.Layout.statusHeight = 32
 -- Horizontal grid of the editor. All COLn/visible values are VISIBLE edges (what the eye sees), x from the
 -- left edge of the panel. Chrome facts and their sources: docs/UI-ALIGNMENT.md section 1.
