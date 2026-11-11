@@ -5766,7 +5766,14 @@ local function layoutSharedEditor(isAura)
         auraEditor.skillLearnButton:SetShown(selectedAura() ~= nil and selectedAura().builtin ~= true)
         auraEditor.skillLearningStatus:Hide()
         ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
-        local panelY = messageY - ns.layoutTimeline(messageY) - 6
+        local tabsY = messageY - ns.layoutTimeline(messageY) - 6
+        local tabBar = ns.timeline.tabBar
+        tabBar:ClearAllPoints()
+        tabBar:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", ns.Layout.PAD, tabsY)
+        tabBar:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", ns.Layout.RIGHT, tabsY)
+        tabBar:SetFrameLevel(ns.notificationPanels.apply.frame:GetFrameLevel() + 10)
+        tabBar:Show()
+        local panelY = tabsY - 26
         local key = ns.SelectedMarkerKey(selectedAura())
         local panel = key == "apply" and ns.notificationPanels.apply or key == "expire" and ns.notificationPanels.expire
             or ns.notificationPanels.beforeExpire
@@ -5794,6 +5801,7 @@ local function layoutSharedEditor(isAura)
         ns.setNotificationPanelShown(ns.notificationPanels.expire, false)
         ns.setNotificationPanelShown(ns.notificationPanels.beforeExpire, false)
         if ns.timeline.frame then ns.timeline.frame:Hide() end
+        if ns.timeline.tabBar then ns.timeline.tabBar:Hide() end
         ns.setNotificationPanelShown(ns.notificationPanels.ready, true)
         layoutNotificationPanel(ns.notificationPanels.ready, messageY)
         voiceY = messageY - ns.notificationPanels.ready.frame:GetHeight() - 6
@@ -7998,6 +8006,9 @@ local function buildTimelinePanel()
     line:SetPoint("RIGHT", track, "RIGHT", 0, 0)
     timeline.handles = {}
     timeline.tabs = {}
+    -- The tabs switch what the output panel below shows, so they sit on that panel's top edge.
+    timeline.tabBar = CreateFrame("Frame", nil, auraEditor)
+    timeline.tabBar:SetHeight(28)
 
     timeline.addButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     timeline.addButton:SetSize(120, 24)
@@ -8112,8 +8123,8 @@ end
 local function tabFor(index)
     local tab = timeline.tabs[index]
     if tab then return tab end
-    tab = CreateFrame("Button", nil, timeline.frame, "BackdropTemplate")
-    tab:SetHeight(24)
+    tab = CreateFrame("Button", nil, timeline.tabBar, "BackdropTemplate")
+    tab:SetHeight(28)
     tab:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     tab.text = tab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     tab.text:SetPoint("CENTER", 0, 0)
@@ -8180,13 +8191,16 @@ function ns.refreshTimeline(rule)
         tab:SetWidth(tab.text:GetStringWidth() + 24)
         tab:ClearAllPoints()
         if previousTab then
-            tab:SetPoint("LEFT", previousTab, "RIGHT", 6, 0)
+            tab:SetPoint("BOTTOMLEFT", previousTab, "BOTTOMRIGHT", 4, 0)
         else
-            tab:SetPoint("TOPLEFT", timeline.frame, "TOPLEFT", ns.Layout.PAD, -100)
+            tab:SetPoint("BOTTOMLEFT", timeline.tabBar, "BOTTOMLEFT", 0, 0)
         end
         previousTab = tab
-        tab:SetBackdropColor(isSelected and 0.32 or 0.12, isSelected and 0.25 or 0.12, isSelected and 0.08 or 0.13, 0.95)
-        tab:SetBackdropBorderColor(isSelected and 1 or 0.35, isSelected and 0.82 or 0.29, isSelected and 0.2 or 0.18, 0.9)
+        -- The active tab takes the panel's own colour and reaches over its top border: it reads as part of it.
+        tab:SetHeight(isSelected and 30 or 26)
+        tab:SetFrameLevel(timeline.tabBar:GetFrameLevel() + (isSelected and 6 or 1))
+        tab:SetBackdropColor(isSelected and 0.09 or 0.05, isSelected and 0.095 or 0.05, isSelected and 0.105 or 0.06, 1)
+        tab:SetBackdropBorderColor(isSelected and 0.88 or 0.35, isSelected and 0.68 or 0.29, isSelected and 0.24 or 0.18, 1)
         tab.text:SetTextColor(isSelected and 1 or 0.85, isSelected and 0.82 or 0.85, isSelected and 0.2 or 0.85)
         tab:Show()
     end
@@ -8226,7 +8240,7 @@ function ns.refreshTimeline(rule)
         timeline.durationLabel, timeline.durationBox, timeline.durationHint, timeline.removeButton }) do
         region:SetShown(nodeSelected)
     end
-    timeline.frame:SetHeight(nodeSelected and 172 or 134)
+    timeline.frame:SetHeight(nodeSelected and 132 or 94)
 end
 
 function ns.layoutTimeline(y)
@@ -8243,7 +8257,7 @@ function ns.layoutTimeline(y)
     timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -48)
     timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -48)
     timeline.timingLabel:ClearAllPoints()
-    timeline.timingLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -142)
+    timeline.timingLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -102)
     timeline.anchorChoice:ClearAllPoints()
     timeline.anchorChoice:SetPoint("LEFT", timeline.timingLabel, "RIGHT", -6, -2)
     ns.Layout.setDropdownWidth(timeline.anchorChoice, 190)
