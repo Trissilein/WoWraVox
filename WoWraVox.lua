@@ -129,7 +129,8 @@ ns.Layout = ns.Layout or {}
 -- One fixed window, no tiers and no resizing: the editor grid below is computed for exactly this size.
 ns.Layout.maxWidth = 1408
 ns.Layout.maxHeight = 800 -- default height; the window can be dragged taller or shorter (minHeight..screen)
-ns.Layout.minHeight = 400
+ns.Layout.minHeight = 480
+ns.Layout.minWidth = 1180 -- below this the editor columns get cramped
 ns.Layout.statusHeight = 32
 -- Horizontal grid of the editor. All COLn/visible values are VISIBLE edges (what the eye sees), x from the
 -- left edge of the panel. Chrome facts and their sources: docs/UI-ALIGNMENT.md section 1.
@@ -157,7 +158,7 @@ ns.Layout.refreshListPending = false
 ns.Layout.getWindowScale = function()
     local availableWidth = math.max(1, (UIParent:GetWidth() or ns.Layout.maxWidth) - 24)
     local availableHeight = math.max(1, (UIParent:GetHeight() or ns.Layout.maxHeight) - 24)
-    return math.min(1, availableWidth / ns.Layout.maxWidth, availableHeight / ns.Layout.minHeight)
+    return math.min(1, availableWidth / ns.Layout.minWidth, availableHeight / ns.Layout.minHeight)
 end
 
 -- Visible column edges / widths for an editor panel of the given width.
@@ -9908,16 +9909,20 @@ function ns.createOptions()
     optionsFrame = CreateFrame("Frame", "WoWraVoxOptions", UIParent, "BackdropTemplate")
     stylePanel(optionsFrame, 0.035, 0.04, 0.05, false)
     optionsFrame:SetScale(ns.Layout.getWindowScale())
-    -- Height is the user's: drag the grip bottom right; stored per account, limited to the screen.
+    -- Size is the user's: drag the grip bottom right (any direction); kept per account, between
+    -- minWidth x minHeight and the screen.
     local scale = optionsFrame:GetScale()
-    local screenHeight = ((UIParent:GetHeight() or ns.Layout.maxHeight) - 4) / scale
-    local savedHeight = type(WoWraVoxProfilesDB) == "table" and tonumber(WoWraVoxProfilesDB.windowHeight)
-    optionsFrame:SetSize(ns.Layout.maxWidth,
-        math.max(ns.Layout.minHeight, math.min(savedHeight or ns.Layout.maxHeight, screenHeight)))
+    local screenW = ((UIParent:GetWidth() or ns.Layout.maxWidth) - 4) / scale
+    local screenH = ((UIParent:GetHeight() or ns.Layout.maxHeight) - 4) / scale
+    local db = type(WoWraVoxProfilesDB) == "table" and WoWraVoxProfilesDB or {}
+    optionsFrame:SetSize(
+        math.max(ns.Layout.minWidth, math.min(tonumber(db.windowWidth) or ns.Layout.maxWidth, screenW)),
+        math.max(ns.Layout.minHeight, math.min(tonumber(db.windowHeight) or ns.Layout.maxHeight, screenH)))
     optionsFrame:SetPoint("CENTER")
     optionsFrame:SetResizable(true)
     if optionsFrame.SetResizeBounds then
-        optionsFrame:SetResizeBounds(ns.Layout.maxWidth, ns.Layout.minHeight, ns.Layout.maxWidth, math.max(ns.Layout.minHeight, screenHeight))
+        optionsFrame:SetResizeBounds(ns.Layout.minWidth, ns.Layout.minHeight,
+            math.max(ns.Layout.minWidth, screenW), math.max(ns.Layout.minHeight, screenH))
     end
     local grip = CreateFrame("Button", nil, optionsFrame)
     grip:SetSize(18, 18)
@@ -9927,15 +9932,24 @@ function ns.createOptions()
     grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
     grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
     grip:SetScript("OnMouseDown", function(_, button)
-        if button == "LeftButton" then optionsFrame:StartSizing("BOTTOM") end
+        if button ~= "LeftButton" then return end
+        -- A centred frame would grow on both sides at half the cursor speed: pin its top-left corner first.
+        local left, top = optionsFrame:GetLeft(), optionsFrame:GetTop()
+        if left and top then
+            optionsFrame:ClearAllPoints()
+            optionsFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT",
+                left * optionsFrame:GetScale() / UIParent:GetScale(), top * optionsFrame:GetScale() / UIParent:GetScale())
+        end
+        optionsFrame:StartSizing("BOTTOMRIGHT")
     end)
     grip:SetScript("OnMouseUp", function()
         optionsFrame:StopMovingOrSizing()
         if type(WoWraVoxProfilesDB) == "table" then
+            WoWraVoxProfilesDB.windowWidth = math.floor(optionsFrame:GetWidth() + 0.5)
             WoWraVoxProfilesDB.windowHeight = math.floor(optionsFrame:GetHeight() + 0.5)
         end
     end)
-    addHelpTooltip(grip, "Window height", "Drag to make the window taller or shorter.")
+    addHelpTooltip(grip, "Window size", "Drag to resize the window. It stops at a minimum size so everything stays readable.")
     optionsFrame:SetFrameStrata("DIALOG")
     optionsFrame:SetToplevel(true) -- the window clicked last sits on top of other DIALOG windows (e.g. TrisThreat)
     optionsFrame:SetClampedToScreen(true)
