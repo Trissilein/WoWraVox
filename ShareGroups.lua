@@ -36,7 +36,7 @@ local ERR_EMPTY = "This rule has no item to share yet."
 local ERR_MEMBERS = "Only rules with up to 4 items can be shared."
 
 local TEXT_FIELDS = { "name", "applyMessage", "expireMessage", "applySoundMediaName", "expireSoundMediaName" }
-local BOOL_FIELDS = { "applyEnabled", "expireEnabled", "oneEffect", "applySoundEnabled", "expireSoundEnabled" }
+local BOOL_FIELDS = { "applyEnabled", "expireEnabled", "oneEffect", "applySoundEnabled", "expireSoundEnabled", "allRanks" }
 local ID_FIELDS = { "applySoundKitID", "expireSoundKitID" }
 local CUE_FIELDS = { "alertCategory", "expireCategory" }
 local CHANNEL_FIELDS = { "applySoundChannel", "expireSoundChannel" }

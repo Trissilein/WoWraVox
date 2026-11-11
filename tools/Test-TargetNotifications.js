@@ -35,6 +35,10 @@ const markerTimers = fs.readFileSync(path.join(root, "MarkerTimers.lua"), "utf8"
   /^local _, ns = \.\.\.$/m,
   "local _, ns = addonName, addonNamespace",
 );
+const spellRanks = fs.readFileSync(path.join(root, "SpellRanks.lua"), "utf8").replace(
+  /^local _, ns = \.\.\.$/m,
+  "local _, ns = addonName, addonNamespace",
+);
 const debugReport = fs.readFileSync(path.join(root, "DebugReport.lua"), "utf8").replace(
   /^local _, ns = ...$/m,
   "local _, ns = addonName, addonNamespace",
@@ -71,6 +75,9 @@ markers,
 "end",
 "do",
 markerTimers,
+"end",
+"do",
+spellRanks,
 "end",
 "do",
 ruleOutput,

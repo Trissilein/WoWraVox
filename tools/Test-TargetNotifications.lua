@@ -2794,3 +2794,19 @@ do
     check("aura gone cancels the marker", timers[1].cancelled == true)
     WoWraVoxDB.auras = savedAuras
 end
+
+-- Spell ranks: a rule that tracks all ranks matches another rank of its spell; without the flag only the ID itself
+do
+    local savedDB = WoWraVoxProfilesDB
+    WoWraVoxProfilesDB = { spellRanks = { ["Lay on Hands|135928"] = { 633, 2800, 10310 } } }
+    ns.SpellRanks.Reset()
+    ns.SpellRanks.api.name = function(id) return (id == 633 or id == 2800 or id == 10310) and "Lay on Hands" or nil end
+    ns.SpellRanks.api.icon = function() return 135928 end
+    check("all ranks: rank 2 matches a rule with rank 1", ns.RuleSpellMatches({ allRanks = true }, 633, 2800))
+    check("without all ranks only the exact ID matches", not ns.RuleSpellMatches({ allRanks = false }, 633, 2800)
+        and ns.RuleSpellMatches({ allRanks = false }, 633, 633))
+    local rule = { spellIDs = { 633 } }
+    ns.normalizeNotificationSettings(rule, "auras")
+    check("all ranks follows the flavor by default", rule.allRanks == (ns.isForever == true))
+    WoWraVoxProfilesDB = savedDB
+end

@@ -444,4 +444,6 @@ ns.Locales.deDE = {
     ["seconds before the end need a duration"] = "Sekunden vor Ende brauchen eine Dauer",
     ["Percent of the duration, seconds after the start (works without a known duration) or seconds before the end (needs a duration)."] = "Prozent der Dauer, Sekunden nach dem Start (geht ohne bekannte Dauer) oder Sekunden vor dem Ende (braucht eine Dauer).",
     ["Percent or seconds, depending on the timing on the left. Decimals allowed."] = "Prozent oder Sekunden, je nach Zeitpunkt links. Kommazahlen erlaubt.",
+    ["Track all ranks"] = "Alle Ränge erfassen",
+    ["Every rank of a spell you added counts as that spell (Lay on Hands rank 1, 2 and 3). The ranks are found once in the background and remembered."] = "Jeder Rang eines eingetragenen Zaubers zählt als dieser Zauber (Handauflegung Rang 1, 2 und 3). Die Ränge werden einmal im Hintergrund gesucht und gemerkt.",
 }

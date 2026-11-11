@@ -21,6 +21,7 @@ AuraPresets.lua
 AuraSoundFallback.lua
 Markers.lua
 MarkerTimers.lua
+SpellRanks.lua
 RuleOutput.lua
 DebugReport.lua
 ShareGroups.lua

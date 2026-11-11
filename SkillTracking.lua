@@ -559,7 +559,7 @@ function tracking.OnCast(spellID, castGUID, rules)
     if castGUID ~= nil and issecretvalue and issecretvalue(castGUID) then castGUID = nil end
     if not publicInteger(spellID) or type(rules) ~= "table" then return end
     for _, rule in ipairs(rules) do
-        if rule.spellID == spellID then
+        if rule.spellID == spellID or (rule.allRanks and ns.SpellRanks and ns.SpellRanks.SameFamily(rule.spellID, spellID)) then
             if not isActiveRule(rule) then
                 addDebug(rule, "UNIT_SPELLCAST_SUCCEEDED", "cast-ignored-rule-inactive", nil, nil)
             else

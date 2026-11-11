@@ -783,6 +783,11 @@ function ns.normalizeNotificationSettings(rule, category)
         rule.readySoundKitID = tonumber(rule.readySoundKitID) or DEFAULT_NOTIFICATION_SOUND_KIT
         rule.readySoundChannel = NOTIFICATION_SOUND_CHANNEL_SET[rule.readySoundChannel] and rule.readySoundChannel or "Master"
     end
+    -- Spell ranks (SpellRanks.lua): on by default in WoW Forever, where spells come in ranks.
+    if category ~= "items" then
+        if rule.allRanks == nil then rule.allRanks = ns.isForever == true end
+        rule.allRanks = rule.allRanks == true
+    end
     -- Timeline markers (Markers.lua). Their output fields stay flat on the rule under the marker key.
     if ns.Markers then
         ns.Markers.Normalize(rule, category)
@@ -2350,6 +2355,24 @@ function ns._Aura.otherTriggerActive(rule, spellID, eventKind)
     return eventKind == "apply" and lastApply ~= nil and GetTime() - lastApply < 3
 end
 
+-- A configured ID matches a spell ID directly, or as another rank of the same spell when the rule tracks all ranks.
+function ns.RuleSpellMatches(rule, configuredID, spellID)
+    if configuredID == spellID then return true end
+    return rule and rule.allRanks == true and ns.SpellRanks ~= nil and ns.SpellRanks.SameFamily(configuredID, spellID)
+end
+
+-- True when an intermediate timeline node of the rule has some output switched on.
+function ns.ruleHasMarkerOutput(rule)
+    for _, marker in ipairs(rule.markers or {}) do
+        local key = marker.key
+        if key ~= "apply" and key ~= "expire" and key ~= "ready" then
+            local profile = type(rule.screenProfiles) == "table" and rule.screenProfiles[key] or nil
+            if rule[key .. "Enabled"] or rule[key .. "SoundEnabled"] or (profile and profile.enabled) then return true end
+        end
+    end
+    return false
+end
+
 local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
     for _, rule in ipairs(WoWraVoxDB.auras) do
         if (not targetRule or targetRule == rule) and rule.enabled
@@ -2357,7 +2380,7 @@ local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
             and not ns._Aura.otherTriggerActive(rule, spellID, eventKind) then
             local matches = false
             for _, configuredID in ipairs(rule.spellIDs) do
-                if configuredID == spellID then matches = true; break end
+                if ns.RuleSpellMatches(rule, configuredID, spellID) then matches = true; break end
             end
             if matches then
                 -- Any timeline marker key: apply, expire, beforeExpire, m1, m2, ...
@@ -2498,7 +2521,7 @@ local function updateAuraTrackerState(spellID, presence, aura, state, sourceEven
         local matches = false
         if ruleID and rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
             for _, configuredID in ipairs(rule.spellIDs or {}) do
-                if configuredID == spellID then matches = true; break end
+                if ns.RuleSpellMatches(rule, configuredID, spellID) then matches = true; break end
             end
         end
         if matches then
@@ -3077,7 +3100,13 @@ auraTracker.scanSeals = scanAuraTrackerSeals
 auraTracker.createUI = createAuraTrackerUI
 end
 
+local rebuildAuraWatchesInner
 local function rebuildAuraWatches()
+    rebuildAuraWatchesInner()
+    -- Families asked for during the rebuild that are not known yet: one background scan, then rebuild once more.
+    if ns.SpellRanks then ns.SpellRanks.RunScan() end
+end
+function rebuildAuraWatchesInner()
     wipe(auraWatchBySpellID)
     local tracker = auraTracker.config()
     local validRuleIDs = {}
@@ -3119,10 +3148,12 @@ local function rebuildAuraWatches()
             and (rule.applyEnabled or rule.expireEnabled or rule.applySoundEnabled or rule.expireSoundEnabled
             or rule.beforeExpireEnabled or rule.beforeExpireSoundEnabled
             or ns._Aura.hasApplyCue(rule) or (rule.expireCategory or "none") ~= "none"
-            or applyScreen.enabled or expireScreen.enabled or beforeExpireScreen.enabled or trackerSelected)
+            or applyScreen.enabled or expireScreen.enabled or beforeExpireScreen.enabled or trackerSelected
+            or ns.ruleHasMarkerOutput(rule))
         if ruleActive then
             activeRuleIDs[ruleID] = true
-            for _, spellID in ipairs(rule.spellIDs) do
+            local watchIDs = rule.allRanks and ns.SpellRanks and ns.SpellRanks.Expand(rule.spellIDs) or rule.spellIDs
+            for _, spellID in ipairs(watchIDs) do
                 local _, status = getSpellInfo(spellID)
                 if status == "valid" then auraWatchBySpellID[spellID] = true end
             end
@@ -3148,14 +3179,14 @@ local function rebuildAuraWatches()
             or rule.beforeExpireEnabled or rule.beforeExpireSoundEnabled
             or ns._Aura.hasApplyCue(rule) or (rule.expireCategory or "none") ~= "none"
             or applyScreen.enabled or expireScreen.enabled or beforeExpireScreen.enabled
-            or trackerIDs[tostring(rule.id)] == true)
+            or trackerIDs[tostring(rule.id)] == true or ns.ruleHasMarkerOutput(rule))
         if not ruleActive then
             ns._Aura.eventStates[rule] = nil
         else
             for spellID in pairs(states) do
                 local configured = false
                 for _, configuredID in ipairs(rule.spellIDs or {}) do
-                    if configuredID == spellID then configured = true; break end
+                    if ns.RuleSpellMatches(rule, configuredID, spellID) then configured = true; break end
                 end
                 if not configured or not auraWatchBySpellID[spellID] then states[spellID] = nil end
             end
@@ -3385,7 +3416,7 @@ function ns._Aura.handleCast(unit, castGUID, castSpellID)
             local announced = false
             for _, rawAuraID in ipairs(rule.spellIDs or {}) do
                 local auraID = ns._Aura.validIntegerID(rawAuraID)
-                if auraID and ns._Aura.castIDFor(rule, auraID) == castSpellID and not announced then
+                if auraID and ns.RuleSpellMatches(rule, ns._Aura.castIDFor(rule, auraID), castSpellID) and not announced then
                     announced = true
                     table.insert(identityMatches, tostring(rule.id or "?") .. ":" .. tostring(auraID))
                     if ns._Aura.addonCanSpeak(auraID, rule) then
@@ -6846,6 +6877,9 @@ function updateDetails()
         auraEditor.oneEffectLabel:Show()
         auraEditor.oneEffectCheck:SetChecked(auraRule.oneEffect == true)
         auraEditor.oneEffectCheck:SetEnabled(not auraRule.builtin)
+        auraEditor.allRanksCheck:Show()
+        auraEditor.allRanksLabel:Show()
+        auraEditor.allRanksCheck:SetChecked(auraRule.allRanks == true)
         auraEditor.iconButton:Hide()
         itemSourceText:Hide()
         triggerLabel:SetText(L("TRIGGERS"))
@@ -6886,6 +6920,8 @@ function updateDetails()
         auraEditor.heading:SetText(L(itemRule and "ITEM RULE" or "SPELL COOLDOWN"))
         auraEditor.oneEffectCheck:Hide()
         auraEditor.oneEffectLabel:Hide()
+        auraEditor.allRanksCheck:Hide()
+        auraEditor.allRanksLabel:Hide()
         auraEditor.iconButton:SetShown(itemRule ~= nil)
         -- Item rules list their members in the trigger panel; spell cooldown rules show their trigger row there.
         triggerLabel:SetShown(itemRule ~= nil)
@@ -7248,6 +7284,12 @@ auraEditor.oneEffectCheck:SetSize(24, 24)
 auraEditor.oneEffectCheck:SetPoint("TOPLEFT", auraEditor.rulePanel, "TOPLEFT", 90, -87)
 auraEditor.oneEffectLabel = createLabel(auraEditor.rulePanel, "Treat triggers as one effect", "GameFontNormalSmall")
 auraEditor.oneEffectLabel:SetPoint("LEFT", auraEditor.oneEffectCheck, "RIGHT", 4, 0)
+-- Spell ranks: every rank of a configured spell counts as that spell (SpellRanks.lua).
+auraEditor.allRanksCheck = CreateFrame("CheckButton", nil, auraEditor.rulePanel, "UICheckButtonTemplate")
+auraEditor.allRanksCheck:SetSize(24, 24)
+auraEditor.allRanksCheck:SetPoint("LEFT", auraEditor.oneEffectLabel, "RIGHT", 18, 0)
+auraEditor.allRanksLabel = createLabel(auraEditor.rulePanel, "Track all ranks", "GameFontNormalSmall")
+auraEditor.allRanksLabel:SetPoint("LEFT", auraEditor.allRanksCheck, "RIGHT", 4, 0)
 
     auraEditor.specFilter = CreateFrame("Frame", nil, auraEditor.rulePanel, "UIDropDownMenuTemplate")
     ns.Layout.setDropdownWidth(auraEditor.specFilter, 138)
@@ -7696,6 +7738,15 @@ ns.Layout.buildPanelHeader = function(panel, title)
         layoutSharedEditor(selectedCategory == "auras")
     end)
     addHelpTooltip(panel.headerButton, title, "Click to expand or collapse this panel.")
+end
+
+-- A finished rank scan (SpellRanks.lua) can add IDs to watch: rebuild and re-read the current auras.
+if ns.SpellRanks then
+    ns.SpellRanks.OnScanned(function()
+        rebuildAuraWatches()
+        syncAllAuras(true)
+        if updateDetails and selectedCategory == "auras" then pcall(updateDetails) end
+    end)
 end
 
 local function buildAuraNotificationPanel(eventKey, title)
@@ -8983,6 +9034,17 @@ auraEditor.oneEffectCheck:SetScript("OnClick", function(self)
     rebuildAuraWatches()
     syncAllAuras(true)
 end)
+auraEditor.allRanksCheck:SetScript("OnClick", function(self)
+    if editorLoading or not selectedAura() then return end
+    saveDetails()
+    local checked = self:GetChecked()
+    selectedAuraRule.allRanks = checked == true or checked == 1
+    rebuildAuraWatches()
+    syncAllAuras(true)
+end)
+addHelpTooltip(auraEditor.allRanksCheck, "Track all ranks",
+    "Every rank of a spell you added counts as that spell (Lay on Hands rank 1, 2 and 3). The ranks are found once in the background and remembered.")
+ns.Skin.Register(auraEditor.allRanksCheck, "checkbox")
 addHelpTooltip(auraEditor.oneEffectCheck, "Treat triggers as one effect",
     "Announces when the first trigger appears and when the last one is gone. Use it for an effect that applies several auras, such as Bloodlust and its Sated debuff.")
 for _, panel in pairs(ns.notificationPanels) do
