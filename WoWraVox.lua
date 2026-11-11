@@ -129,7 +129,7 @@ ns.Layout = ns.Layout or {}
 -- One fixed window, no tiers and no resizing: the editor grid below is computed for exactly this size.
 ns.Layout.maxWidth = 1408
 ns.Layout.maxHeight = 800 -- default height; the window can be dragged taller or shorter (minHeight..screen)
-ns.Layout.minHeight = 560
+ns.Layout.minHeight = 400
 ns.Layout.statusHeight = 32
 -- Horizontal grid of the editor. All COLn/visible values are VISIBLE edges (what the eye sees), x from the
 -- left edge of the panel. Chrome facts and their sources: docs/UI-ALIGNMENT.md section 1.
@@ -5813,14 +5813,16 @@ local function layoutSharedEditor(isAura)
         auraEditor.skillLearnButton:SetShown(selectedAura() ~= nil and selectedAura().builtin ~= true)
         auraEditor.skillLearningStatus:Hide()
         ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
-        local tabsY = messageY - ns.layoutTimeline(messageY) - 6
+        -- One box: tabs on its top edge, the timeline strip, then the selected node's fields, no gaps between.
+        local tabsY = messageY - 12
         local tabBar = ns.timeline.tabBar
         tabBar:ClearAllPoints()
         tabBar:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", ns.Layout.PAD, tabsY)
         tabBar:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", ns.Layout.RIGHT, tabsY)
         tabBar:SetFrameLevel(ns.notificationPanels.apply.frame:GetFrameLevel() + 10)
         tabBar:Show()
-        local panelY = tabsY - 30
+        local timelineY = tabsY - 30
+        local panelY = timelineY - ns.layoutTimeline(timelineY)
         local key = ns.SelectedMarkerKey(selectedAura())
         local panel = key == "apply" and ns.notificationPanels.apply or key == "expire" and ns.notificationPanels.expire
             or ns.notificationPanels.beforeExpire
@@ -5829,7 +5831,7 @@ local function layoutSharedEditor(isAura)
         end
         ns.setNotificationPanelShown(panel, true)
         layoutNotificationPanel(panel, panelY)
-        voiceY = panelY - panel.frame:GetHeight() - 6
+        voiceY = panelY - panel.frame:GetHeight() - 12
     else
         auraEditor.skillTriggerLabel:ClearAllPoints()
         auraEditor.skillTriggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -22)
@@ -7833,6 +7835,11 @@ local function buildAuraNotificationPanel(eventKey, title)
     panel.frame = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
     panel.frame:SetHeight(162)
     stylePanel(panel.frame, 0.09, 0.095, 0.105)
+    if eventKey ~= "ready" then -- the three aura node panels hang under the timeline: no top edge
+        panel.frame.lines[1]:Hide()
+        panel.frame.corners[1]:Hide()
+        panel.frame.corners[2]:Hide()
+    end
     panel.heading = makeSectionLabel(panel.frame, title, 12, -8)
     ns.Layout.buildPanelHeader(panel, title)
     if false and eventKey == "beforeExpire" then -- positions are edited on the timeline now
@@ -8034,6 +8041,15 @@ local function buildTimelinePanel()
     stylePanel(frame, 0.09, 0.095, 0.105)
     timeline.frame = frame
     timeline.heading = makeSectionLabel(frame, L("Timeline"), 12, -8)
+    -- Joined to the node panel below: no bottom edge, a soft divider instead.
+    frame.lines[2]:Hide()
+    frame.corners[3]:Hide()
+    frame.corners[4]:Hide()
+    local divider = frame:CreateTexture(nil, "ARTWORK")
+    divider:SetColorTexture(0.52, 0.41, 0.2, 0.45)
+    divider:SetHeight(1)
+    divider:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 12, 0)
+    divider:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, 0)
 
     local track = CreateFrame("Frame", nil, frame)
     track:SetHeight(34)
@@ -9894,7 +9910,7 @@ function ns.createOptions()
     optionsFrame:SetScale(ns.Layout.getWindowScale())
     -- Height is the user's: drag the grip bottom right; stored per account, limited to the screen.
     local scale = optionsFrame:GetScale()
-    local screenHeight = ((UIParent:GetHeight() or ns.Layout.maxHeight) - 24) / scale
+    local screenHeight = ((UIParent:GetHeight() or ns.Layout.maxHeight) - 4) / scale
     local savedHeight = type(WoWraVoxProfilesDB) == "table" and tonumber(WoWraVoxProfilesDB.windowHeight)
     optionsFrame:SetSize(ns.Layout.maxWidth,
         math.max(ns.Layout.minHeight, math.min(savedHeight or ns.Layout.maxHeight, screenHeight)))
