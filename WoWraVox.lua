@@ -7880,6 +7880,42 @@ local function buildTimelinePanel()
     local track = CreateFrame("Frame", nil, frame)
     track:SetHeight(26)
     timeline.track = track
+    -- Clicking the line itself adds a node at that spot.
+    track:EnableMouse(true)
+    track:SetScript("OnMouseUp", function(self, button)
+        if button ~= "LeftButton" then return end
+        local rule = selectedAura()
+        local left, width = self:GetLeft(), self:GetWidth()
+        if not (rule and left and width and width > 0) then return end
+        local x = GetCursorPosition() / self:GetEffectiveScale()
+        local at = math.floor(math.max(0, math.min(100, (x - left) / width * 100)) * 10 + 0.5) / 10
+        if at <= 0 or at >= 100 then return end
+        saveDetails()
+        local key = ns.Markers.Add(rule, at)
+        rule[key .. "Enabled"] = true
+        rule[key .. "Message"] = ""
+        ns.normalizeNotificationSettings(rule, "auras")
+        selectedMarkerKey = key
+        updateDetails()
+    end)
+    addHelpTooltip(track, "Timeline", "Click the line to add a node there. Drag a node to move it. Click a selected node again to remove it.")
+    StaticPopupDialogs["WOWRAVOX_REMOVE_NODE"] = StaticPopupDialogs["WOWRAVOX_REMOVE_NODE"] or {
+        text = L("Remove %s?"),
+        button1 = YES or "Yes",
+        button2 = NO or "No",
+        OnAccept = function(_, data)
+            if not (data and data.rule) then return end
+            if ns.Markers.Remove(data.rule, data.key) then
+                ns.normalizeNotificationSettings(data.rule, "auras")
+                if selectedMarkerKey == data.key then selectedMarkerKey = "apply" end
+                updateDetails()
+            end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
     local line = track:CreateTexture(nil, "BACKGROUND")
     line:SetColorTexture(0.35, 0.29, 0.18, 0.95)
     line:SetHeight(4)
@@ -7929,6 +7965,7 @@ local function buildTimelinePanel()
     for _, box in ipairs({ timeline.percentBox, timeline.secondsBox, timeline.durationBox }) do box:SetMaxLetters(10) end
     timeline.percentBox:HookScript("OnEditFocusLost", function() applyMarkerPosition(false) end)
     timeline.secondsBox:HookScript("OnEditFocusLost", function() applyMarkerPosition(true) end)
+    -- The track takes clicks; keep it above the line texture but below the handles.
     timeline.durationBox:HookScript("OnEditFocusLost", applyDurationOverride)
     addHelpTooltip(timeline.addButton, "New node", "Adds a notification moment between start and end. Drag it on the line or type its position.")
     addHelpTooltip(timeline.removeButton, "Remove node", "Removes the selected node. Start and end stay; switch their outputs off instead.")
@@ -7948,21 +7985,32 @@ local function handleFor(index)
     handle.label = handle:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     handle.label:SetPoint("TOP", handle, "BOTTOM", 0, -1)
     handle:RegisterForClicks("LeftButtonUp")
+    -- Press: select (and arm a drag for inner nodes). Release without moving on a node that was already
+    -- selected: ask whether to remove it. Release after moving: the node takes the new position.
     handle:SetScript("OnMouseDown", function(self)
+        self.wasSelected = self.key == ns.SelectedMarkerKey()
+        self.downX = GetCursorPosition()
+        self.dragAt, self.moved = nil, false
         ns.SelectMarker(self.key)
         if self.key and not ns.Markers.IsEndpoint(self.key) then self.dragging = true end
     end)
     handle:SetScript("OnMouseUp", function(self)
-        if not self.dragging then return end
+        local dragging = self.dragging
         self.dragging = false
         local rule = selectedAura()
-        if rule and self.dragAt then
+        if not rule then return end
+        if dragging and self.moved and self.dragAt then
             ns.Markers.Move(rule, self.key, math.floor(self.dragAt * 10 + 0.5) / 10)
             updateDetails()
+        elseif self.wasSelected and not ns.Markers.IsEndpoint(self.key) then
+            StaticPopup_Show("WOWRAVOX_REMOVE_NODE", ns.markerTitle(ns.findMarker(rule, self.key) or { key = self.key, at = 0 }),
+                nil, { rule = rule, key = self.key })
         end
     end)
     handle:SetScript("OnUpdate", function(self)
         if not self.dragging then return end
+        if not self.moved and math.abs(GetCursorPosition() - (self.downX or 0)) < 3 then return end
+        self.moved = true
         local left, width = timeline.track:GetLeft(), timeline.track:GetWidth()
         if not (left and width and width > 0) then return end
         local x = GetCursorPosition() / timeline.track:GetEffectiveScale()

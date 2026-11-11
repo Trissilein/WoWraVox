@@ -435,4 +435,6 @@ ns.Locales.deDE = {
     ["Position of the selected node: 0 % = start, 100 % = end. Decimals allowed."] = "Position des gewählten Knotens: 0 % = Start, 100 % = Ende. Kommazahlen erlaubt.",
     ["Position of the selected node in seconds after the start. Needs a known duration."] = "Position des gewählten Knotens in Sekunden nach dem Start. Braucht eine bekannte Dauer.",
     ["Duration in seconds. Empty uses the last readable duration of this effect. In combat a hidden duration is estimated from it; the end (100 %) always waits for the real end of the effect."] = "Dauer in Sekunden. Leer nutzt die zuletzt lesbare Dauer dieses Effekts. Im Kampf wird eine verborgene Dauer daraus geschätzt; das Ende (100 %) wartet immer auf das echte Ende des Effekts.",
+    ["Remove %s?"] = "%s entfernen?",
+    ["Click the line to add a node there. Drag a node to move it. Click a selected node again to remove it."] = "Klick auf die Linie fügt dort einen Knoten hinzu. Knoten zum Verschieben ziehen. Ein gewählter Knoten erneut angeklickt wird entfernt (mit Rückfrage).",
 }
