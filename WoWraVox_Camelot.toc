@@ -24,6 +24,9 @@ RuleOutput.lua
 DebugReport.lua
 ShareGroups.lua
 ShareChat.lua
+AuraTrackerState.lua
+AuraTrackerFamily.lua
+AuraTrackerView.lua
 WoWraVox.lua
 WoWraVoxTooltip.lua
 Simulation.lua

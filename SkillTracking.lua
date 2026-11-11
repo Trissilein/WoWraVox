@@ -736,6 +736,12 @@ local function addLearningResult(session, kind, triggerType, spellID, event, sou
         session.resultSeen[key] = true
     end
     if #session.results >= tracking.maxLearningResults then return end
+    local castSpellID
+    if session.mode == "aura" and kind == "candidateAura" and event == "Aura gained"
+        and publicInteger(session.lastCastSpellID) and session.lastCastAt then
+        local sinceCast = GetTime() - session.lastCastAt
+        if sinceCast >= 0 and sinceCast <= 5 then castSpellID = session.lastCastSpellID end
+    end
     local result = {
         kind = kind,
         triggerType = triggerType,
@@ -745,6 +751,7 @@ local function addLearningResult(session, kind, triggerType, spellID, event, sou
         source = source,
         elapsed = elapsed or 0,
         relatedAuraID = relatedAuraID,
+        castSpellID = castSpellID,
     }
     table.insert(session.results, result)
     session.selected = result
@@ -1216,7 +1223,7 @@ function tracking.CreateLearningWindow()
         local result = session and session.selected
         if session and session.mode == "aura" then
             if result and result.kind == "candidateAura" and tracking.addAuraID
-                and tracking.addAuraID(session.rule, result.spellID) then
+                and tracking.addAuraID(session.rule, result.spellID, result.castSpellID, result.name) then
                 if tracking.learning == session then tracking.FinishLearning(text("Learning complete.")) end
                 frame:Hide()
             end
@@ -1276,10 +1283,12 @@ function tracking.RenderLearningResults(session)
     frame.useButton:SetEnabled(session.selected ~= nil and session.selected.triggerType ~= nil)
     if session.mode == "aura" then
         frame.useButton:Hide()
-        frame.addAuraButton:SetText(text("Add to this aura"))
+        local sealFamily = tracking.isSealFamilyRule and tracking.isSealFamilyRule(session.rule) == true
+        frame.addAuraButton:SetText(text(sealFamily and "Confirm seal mapping" or "Add to this aura"))
         frame.addAuraButton:ClearAllPoints()
         frame.addAuraButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, 12)
-        frame.addAuraButton:SetEnabled(session.selected ~= nil and session.selected.kind == "candidateAura")
+        frame.addAuraButton:SetEnabled(session.selected ~= nil and session.selected.kind == "candidateAura"
+            and (not sealFamily or publicInteger(session.selected.castSpellID)))
     else
         frame.useButton:Show()
         frame.addAuraButton:SetText(text("Create Aura Rule"))

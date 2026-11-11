@@ -2398,6 +2398,12 @@ do
     icon = withIcon(104) -- the matching configured aura is a later linked alias
     icon:TriggerAuraAppliedAlert()
     check("CDM (a): a later linked aura alias is matched", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    setup(dpRule({ DP_ALT }))
+    WoWraVoxDB.auras[1].castByAuraID = { [DP_ALT] = DP }
+    icon = withIcon(102) -- the CDM exposes cast ID; the rule tracks its separately mapped aura ID
+    icon:TriggerAuraAppliedAlert()
+    check("CDM (a): verified cast mapping resolves the configured aura ID",
+        list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
     Enum.CooldownViewerCategory = { HiddenPassive = 10, TrackedBuff = 11, TrackedBar = 12 }
     local cooldownSets = { [10] = { 105 }, [11] = {}, [12] = {} }
     infos[105] = { spellID = DP_ALT, hasAura = true, selfAura = true, isKnown = true }

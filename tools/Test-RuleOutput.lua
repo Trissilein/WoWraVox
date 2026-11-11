@@ -142,6 +142,15 @@ check("ready ignores aura category and keeps legacy outputs", readyDecision.nati
     and readyDecision.native.reason == "no-category" and readyDecision.tts.play
     and readyDecision.media.play and readyDecision.screen.show)
 
+local warningDecision = output.Decide(rule({ beforeExpireEnabled = true, beforeExpireMessage = "Soon",
+    beforeExpireSoundEnabled = true, beforeExpireSoundKitID = 1,
+    beforeExpireScreenEnabled = true, beforeExpireScreenText = "Ending soon" }), "beforeExpire",
+    { spellID = 112, native = native })
+check("before-expire uses independent TTS, sound, and screen fields", warningDecision.valid
+    and warningDecision.native.status == "suppressed" and warningDecision.tts.play
+    and warningDecision.media.play and warningDecision.screen.show
+    and warningDecision.screen.text == "Ending soon")
+
 -- Per-effect cues (rule.categoryByAuraID): ns._Aura.cueFor decides the application category of one trigger.
 ns._Aura = {
     cueFor = function(r, spellID)

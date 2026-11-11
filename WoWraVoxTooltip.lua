@@ -389,7 +389,8 @@ local function hookCDMFrame(frame)
     if type(frame.HookScript) == "function" then
         pcall(frame.HookScript, frame, "OnEnter", function(self)
             if not enabled() then return end
-            local spellID = cdmSpellID(self)
+            local spellIDs = cdmSpellIDs(self)
+            local spellID = spellIDs and spellIDs[1]
             if not spellID then return end
             if ns.ObserveSpell then ns.ObserveSpell(spellID, "Seen aura/spell") end
             addID(GameTooltip, "WoWraVox Spell-ID", spellID)
@@ -424,6 +425,26 @@ end
 local function hookCDMViewers()
     hookCDMViewer("BuffIconCooldownViewer")
     hookCDMViewer("BuffBarCooldownViewer")
+end
+
+function ns.AuraCDM.RefreshSignals()
+    if InCombatLockdown and InCombatLockdown() then return 0 end
+    local count = 0
+    for _, name in ipairs({ "BuffIconCooldownViewer", "BuffBarCooldownViewer" }) do
+        local viewer = _G[name]
+        local pool = viewer and viewer.itemFramePool
+        if pool and type(pool.EnumerateActive) == "function" then
+            pcall(function()
+                for frame in pool:EnumerateActive() do
+                    if cdmFrameActive(frame) == true then
+                        signalCDMFrame(frame, true, "manual-refresh")
+                        count = count + 1
+                    end
+                end
+            end)
+        end
+    end
+    return count
 end
 
 hookCDMViewers()

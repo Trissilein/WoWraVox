@@ -272,3 +272,43 @@ if lateCallback then lateCallback(reused) end
 check("100 rule resets reuse one frame and stale callbacks stay silent",
     cyclesStayedPooled and frameSerial == allocationsAfterFirstBind and tracking.durationFrames[newRule] == nil
     and reused.rule == nil and #notices == noticesBeforeStale)
+
+-- Aura learning exposes the recent cast ID only inside the five-second correlation window.
+local previousAuraAPI = C_UnitAuras
+local previousAuraWindow = tracking.learningWindow
+local previousRenderLearningResults = tracking.RenderLearningResults
+local auraRows = {
+    HELPFUL = { { auraInstanceID = 1, spellId = 9001 } },
+    HARMFUL = {},
+}
+C_UnitAuras = { GetAuraDataByIndex = function(_, index, filter) return auraRows[filter][index] end }
+tracking.learningWindow = { Hide = function() end, Show = function() end }
+tracking.RenderLearningResults = function() end
+tracking.StartAuraLearning({ id = "seal-family", name = "All Seals", spellIDs = { 9001 } })
+tracking.ObserveLearningCast(7002, "seal-cast-guid")
+now = 1
+auraRows.HELPFUL[2] = { auraInstanceID = 2, spellId = 9002 }
+tracking.ObserveLearningAuras({ isFullUpdate = true })
+local learnedAura
+for _, result in ipairs(tracking.learning.results) do
+    if result.kind == "candidateAura" and result.spellID == 9002 then learnedAura = result; break end
+end
+check("learning mode records candidate aura and matching recent cast ID",
+    learnedAura ~= nil and learnedAura.castSpellID == 7002)
+tracking.CancelLearning("test complete", true)
+auraRows = { HELPFUL = { { auraInstanceID = 1, spellId = 9001 } }, HARMFUL = {} }
+tracking.StartAuraLearning({ id = "seal-family", name = "All Seals", spellIDs = { 9001 } })
+tracking.ObserveLearningCast(7002, "seal-cast-guid")
+now = 7
+auraRows.HELPFUL[2] = { auraInstanceID = 2, spellId = 9002 }
+tracking.ObserveLearningAuras({ isFullUpdate = true })
+local lateAura
+for _, result in ipairs(tracking.learning.results) do
+    if result.kind == "candidateAura" and result.spellID == 9002 then lateAura = result; break end
+end
+check("learning mode leaves late aura cast mapping unknown",
+    lateAura ~= nil and lateAura.castSpellID == nil)
+tracking.CancelLearning("test complete", true)
+C_UnitAuras = previousAuraAPI
+tracking.learningWindow = previousAuraWindow
+tracking.RenderLearningResults = previousRenderLearningResults

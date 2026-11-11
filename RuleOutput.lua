@@ -14,6 +14,11 @@ local EVENTS = {
         sound = "expireSoundEnabled", media = "expireSoundMediaName", kit = "expireSoundKitID",
         channel = "expireSoundChannel", screenEnabled = "expireScreenEnabled", screenText = "expireScreenText",
     },
+    beforeExpire = {
+        enabled = "beforeExpireEnabled", message = "beforeExpireMessage",
+        sound = "beforeExpireSoundEnabled", media = "beforeExpireSoundMediaName", kit = "beforeExpireSoundKitID",
+        channel = "beforeExpireSoundChannel", screenEnabled = "beforeExpireScreenEnabled", screenText = "beforeExpireScreenText",
+    },
     ready = {
         -- Ready cues use the legacy ready output path; alertCategory is only
         -- registered for aura apply/expire and must not suppress this output.
@@ -48,7 +53,7 @@ end
 -- The category of one event. Application: the group's cue, else the effect's own (ns._Aura.cueFor, the same
 -- resolution AuraSoundFallback registers with). Expiration and ready keep their group value.
 local function eventCategory(rule, values, fields, eventKey, spellID)
-    local category = value(values, rule, fields.category)
+    local category = fields.category and value(values, rule, fields.category) or "none"
     category = type(category) == "string" and category or "none"
     if eventKey ~= "apply" or category ~= "none" or not publicSpellID(spellID) then return category end
     local callback = ns._Aura and ns._Aura.cueFor
