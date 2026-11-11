@@ -7866,8 +7866,8 @@ local function applyMarkerPosition(fromSeconds)
     if ns.Markers.IsEndpoint(key) then return end
     local duration = timelineDuration(rule)
     if fromSeconds then
-        local seconds = tonumber((timeline.secondsBox:GetText():gsub(",", ".")))
-        if seconds then ns.Markers.Move(rule, key, nil, seconds, duration) end
+        local before = tonumber((timeline.secondsBox:GetText():gsub(",", ".")))
+        if before and duration then ns.Markers.Move(rule, key, nil, math.max(0, duration - before), duration) end
     else
         local percent = tonumber((timeline.percentBox:GetText():gsub(",", ".")))
         if percent then ns.Markers.Move(rule, key, percent) end
@@ -7970,7 +7970,7 @@ local function buildTimelinePanel()
     timeline.percentBox = createEditBox(frame, 70, 28)
     timeline.percentUnit = createLabel(frame, "%", "GameFontHighlight")
     timeline.secondsBox = createEditBox(frame, 70, 28)
-    timeline.secondsUnit = createLabel(frame, "s after start", "GameFontHighlight")
+    timeline.secondsUnit = createLabel(frame, "s before end", "GameFontHighlight")
     timeline.durationLabel = createLabel(frame, "Duration", "GameFontNormal")
     timeline.durationBox = createEditBox(frame, 70, 28)
     timeline.durationHint = createLabel(frame, "", "GameFontHighlight")
@@ -7983,7 +7983,7 @@ local function buildTimelinePanel()
     addHelpTooltip(timeline.addButton, "New node", "Adds a notification moment between start and end. Drag it on the line or type its position.")
     addHelpTooltip(timeline.removeButton, "Remove node", "Removes the selected node. Start and end stay; switch their outputs off instead.")
     addHelpTooltip(timeline.percentBox, "Position", "Position of the selected node: 0 % = start, 100 % = end. Decimals allowed.")
-    addHelpTooltip(timeline.secondsBox, "Seconds after start", "Position of the selected node in seconds after the start. Needs a known duration.")
+    addHelpTooltip(timeline.secondsBox, "Seconds before end", "Position of the selected node in seconds before the end (expiration). Needs a known duration.")
     addHelpTooltip(timeline.durationBox, "Duration", "Duration in seconds. Empty uses the last readable duration of this effect. In combat a hidden duration is estimated from it; the end (100 %) always waits for the real end of the effect.")
 end
 
@@ -8060,8 +8060,11 @@ function ns.refreshTimeline(rule)
         local endpoint = ns.Markers.IsEndpoint(marker.key)
         local number = not endpoint and markerNumber(rule, marker.key) or nil
         handle.number:SetText(number and tostring(number) or "")
-        handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
-            or (formatNumber(marker.at) .. " %"))
+        local labelText = formatNumber(marker.at) .. " %"
+        local lineDuration = timelineDuration(rule)
+        local fromStart = lineDuration and ns.Markers.Seconds(marker, lineDuration)
+        if fromStart then labelText = labelText .. "  ·  -" .. formatNumber(lineDuration - fromStart) .. " s" end
+        handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End") or labelText)
         local isSelected = marker.key == selected
         if isSelected then
             handle.tex:SetVertexColor(1, 0.82, 0.2)
@@ -8089,7 +8092,8 @@ function ns.refreshTimeline(rule)
     local endpoint = not marker or ns.Markers.IsEndpoint(selected)
     local duration, estimated = timelineDuration(rule)
     timeline.percentBox:SetText(marker and formatNumber(marker.at) or "")
-    local seconds = marker and duration and ns.Markers.Seconds(marker, duration)
+    local fromStart = marker and duration and ns.Markers.Seconds(marker, duration)
+    local seconds = fromStart and (duration - fromStart)
     timeline.secondsBox:SetText(seconds and formatNumber(seconds) or "")
     timeline.percentBox:SetEnabled(not endpoint)
     timeline.secondsBox:SetEnabled(not endpoint and duration ~= nil)
