@@ -2421,6 +2421,10 @@ local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
                 if ns.RuleSpellMatches(rule, configuredID, spellID) then matches = true; break end
             end
             if matches then
+                -- Applied again (refresh, or recast while the old window still runs): nodes count from now.
+                if eventKind == "apply" and ns.markerTimers and rule.id then
+                    ns.markerTimers:Restart(rule.id, spellID, GetTime())
+                end
                 -- Any timeline marker key: apply, expire, beforeExpire, m1, m2, ...
                 local enabled, message = rule[eventKind .. "Enabled"], rule[eventKind .. "Message"]
                 local profile = ns.getRuleScreenProfile(rule, eventKind)
@@ -2544,6 +2548,10 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
     else
         local current = markerTimers:Get(rule.id, spellID)
         start = current and current.start or GetTime()
+    end
+    -- One effect per rule (e.g. Paladin seals): a newly started trigger voids the nodes still pending for the others.
+    if rule.oneEffect and not markerTimers:Get(rule.id, spellID) then
+        markerTimers:StopOthers(rule.id, spellID)
     end
     markerTimers:Update(rule.id, spellID, {
         active = true, start = start, duration = duration, estimated = estimated,
@@ -8026,6 +8034,41 @@ local function applyDurationOverride()
     updateDetails()
 end
 
+function ns.timeline.beginEdit(handle)
+    local rule = selectedAura()
+    local marker = rule and findMarker(rule, handle.key)
+    if not marker or ns.Markers.IsEndpoint(marker.key) then return end
+    ns.SelectMarker(marker.key)
+    local box = timeline.nodeEdit
+    if not box then
+        box = createEditBox(timeline.frame, 84, 24)
+        box:SetMaxLetters(10)
+        box:SetJustifyH("CENTER")
+        box:SetScript("OnEscapePressed", function(self) self:ClearFocus() self:Hide() end)
+        box:SetScript("OnEditFocusLost", function(self) self:Hide() end)
+        box:SetScript("OnEnterPressed", function(self)
+            local current = selectedAura()
+            local node = current and findMarker(current, self.key)
+            local value = tonumber((self:GetText():gsub(",", ".")))
+            self:Hide()
+            if node and value then
+                ns.Markers.SetTiming(current, node.key, node.anchor or "percent", value, timelineDuration(current))
+                updateDetails()
+            end
+        end)
+        timeline.nodeEdit = box
+    end
+    local anchor = marker.anchor or "percent"
+    box.key = marker.key
+    box:ClearAllPoints()
+    box:SetPoint("CENTER", handle.label, "CENTER", 0, 0)
+    box:SetFrameLevel(timeline.frame:GetFrameLevel() + 30)
+    box:SetText(formatNumber(anchor == "percent" and marker.at or marker.offset))
+    box:Show()
+    box:SetFocus()
+    box:HighlightText()
+end
+
 local function addNodeAt(rule, at)
     saveDetails()
     local key = ns.Markers.Add(rule, at)
@@ -8156,6 +8199,12 @@ local function handleFor(index)
     handle.label = handle:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlight")
     handle.label:SetPoint("TOP", handle, "BOTTOM", 0, -2)
     handle:RegisterForClicks("LeftButtonUp")
+    -- Clicking a node's value text types a new value right there (in the node's own unit).
+    handle.labelHit = CreateFrame("Button", nil, handle)
+    handle.labelHit:SetPoint("TOPLEFT", handle.label, "TOPLEFT", -4, 3)
+    handle.labelHit:SetPoint("BOTTOMRIGHT", handle.label, "BOTTOMRIGHT", 4, -3)
+    handle.labelHit:SetScript("OnClick", function() if handle.key then ns.timeline.beginEdit(handle) end end)
+    addHelpTooltip(handle.labelHit, "Node value", "Click to type an exact value (in the unit this node uses).")
     -- Press: select (and arm a drag for inner nodes). Release without moving on a node that was already
     -- selected: ask whether to remove it. Release after moving: the node takes the new position.
     handle:SetScript("OnMouseDown", function(self)
@@ -8192,12 +8241,12 @@ local function handleFor(index)
         -- Show the value in the node's own timing while dragging.
         local marker = findMarker(selectedAura(), self.key)
         local duration = timelineDuration(selectedAura())
-        if marker and marker.anchor == "start" and duration then
-            self.label:SetText("+" .. formatNumber(duration * at / 100) .. " s")
-        elseif marker and marker.anchor == "end" and duration then
-            self.label:SetText("-" .. formatNumber(duration * (100 - at) / 100) .. " s")
-        else
+        if not duration then
             self.label:SetText(formatNumber(at) .. " %")
+        elseif marker and marker.anchor == "start" then
+            self.label:SetText("+" .. formatNumber(duration * at / 100) .. " s  ·  " .. formatNumber(at) .. " %")
+        else
+            self.label:SetText(formatNumber(at) .. " %  ·  -" .. formatNumber(duration * (100 - at) / 100) .. " s")
         end
     end)
     timeline.handles[index] = handle

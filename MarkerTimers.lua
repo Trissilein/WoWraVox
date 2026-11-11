@@ -53,7 +53,7 @@ function MarkerTimers.Create(api)
         stop(run)
         generation = generation + 1
         run = { start = start, duration = duration, timers = {}, generation = generation, signature = info.signature,
-            estimated = info.estimated == true }
+            estimated = info.estimated == true, info = info }
         runs[id] = run
         local now = api.now()
         local Markers = ns.Markers
@@ -79,6 +79,28 @@ function MarkerTimers.Create(api)
             end
         end
         return run
+    end
+
+    -- The effect was applied (or refreshed) again just now: its nodes count from `start`, the old timers are void.
+    -- Without a running window yet, nothing is scheduled; the next Update starts one.
+    function manager:Restart(ruleID, spellID, start)
+        local run = runs[tostring(ruleID) .. "|" .. tostring(spellID)]
+        if not (run and run.info and finite(start)) then return false end
+        local info = {}
+        for key, value in pairs(run.info) do info[key] = value end
+        info.start, info.baseline = start, false
+        self:Update(ruleID, spellID, info)
+        return true
+    end
+
+    function manager:StopOthers(ruleID, keepSpellID)
+        local prefix, keep = tostring(ruleID) .. "|", tostring(ruleID) .. "|" .. tostring(keepSpellID)
+        for id, run in pairs(runs) do
+            if id ~= keep and id:sub(1, #prefix) == prefix then
+                stop(run)
+                runs[id] = nil
+            end
+        end
     end
 
     function manager:Stop(ruleID, spellID)

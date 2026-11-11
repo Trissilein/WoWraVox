@@ -424,6 +424,7 @@ ns.Locales.deDE = {
     ["Aura tracker layout and seal-family settings stay local and are not included in shared rules."] = "Aura-Tracker-Layout und Siegel-Familie bleiben lokal und werden nicht in geteilte Regeln übernommen.",
     ["CDM"] = "CDM", ["Aura state is unknown."] = "Aura-Status ist unbekannt.",
     ["Runtime only available in Blizzard CDM."] = "Laufzeit ist nur im Blizzard-CDM verfügbar.",
+    ["Node value"] = "Knotenwert", ["Click to type an exact value (in the unit this node uses)."] = "Klicken, um einen genauen Wert einzutippen (in der Einheit dieses Knotens).",
     ["Window size"] = "Fenstergröße", ["Drag to resize the window. It stops at a minimum size so everything stays readable."] = "Ziehen ändert die Fenstergröße. Ab einer Mindestgröße ist Schluss, damit alles lesbar bleibt.",
     ["Timeline"] = "Zeitleiste",["Start"] = "Start", ["End"] = "Ende", ["Node"] = "Knoten",
     ["New node"] = "Neuer Knoten", ["Remove node"] = "Knoten entfernen", ["Position"] = "Position",

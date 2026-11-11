@@ -94,3 +94,30 @@ clock = 600
 T:Update("r2", 5, { active = true, start = 600, duration = nil, markers = r2.markers })
 run(605)
 check("start-anchored node fires without a duration, percent node does not", table.concat(fired, ",") == s2)
+
+-- A new trigger of a one-effect rule voids the old one's pending nodes
+T:Reset(); fired = {}; queue = {}
+local r3 = {}
+ns.Markers.Normalize(r3, "auras")
+ns.Markers.Add(r3, 90)
+clock = 1000
+T:Update("r3", 21, { active = true, start = 1000, duration = 30, markers = r3.markers })
+clock = 1010
+T:Update("r3", 22, { active = true, start = 1010, duration = 30, markers = r3.markers })
+T:StopOthers("r3", 22)
+check("StopOthers removes the old run", T:Get("r3", 21) == nil and T:Get("r3", 22) ~= nil)
+run(1030)
+check("old trigger's 90 % never fires", #fired == 0)
+run(1037)
+check("new trigger's 90 % fires at its own time", #fired == 1)
+
+-- Re-applied: the nodes count from the new start
+T:Reset(); fired = {}; queue = {}
+clock = 2000
+T:Update("r3", 21, { active = true, start = 2000, duration = 30, markers = r3.markers })
+clock = 2020
+check("Restart reports success", T:Restart("r3", 21, 2020) == true)
+run(2027)
+check("nothing at the old 90 %", #fired == 0)
+run(2047)
+check("fires at the new 90 %", #fired == 1)
