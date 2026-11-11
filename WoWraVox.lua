@@ -8222,7 +8222,7 @@ local function tabFor(index)
         tab.active = trio("uiframe-activetab-left", "_uiframe-activetab-center", "uiframe-activetab-right")
         trio("uiframe-tab-left", "_uiframe-tab-center", "uiframe-tab-right", true)
     else
-        tab:SetBackdrop({ bgFile = "Interface\Buttons\WHITE8X8", edgeFile = "Interface\Buttons\WHITE8X8", edgeSize = 1 })
+        tab:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     end
     tab.text = tab:CreateFontString(nil, "OVERLAY", "WoWraVoxFontNormal")
     tab:SetScript("OnClick", function(self) ns.SelectMarker(self.key) end)
