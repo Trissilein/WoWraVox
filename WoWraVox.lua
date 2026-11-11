@@ -2993,7 +2993,8 @@ local function createAuraTrackerUI()
     frame.manualSealFilter = locale ~= "enUS" and locale ~= "deDE"
     local _, classFile = UnitClass("player")
     frame.isPaladin = classFile == "PALADIN"
-    frame.sealFilter = createEditBox(frame, 128, 22)
+    -- createEditBox is a local defined further down the file; reach it through ns at run time.
+    frame.sealFilter = ns.createEditBox(frame, 128, 22)
     frame.sealFilter:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 10, 36)
     frame.sealFilter:SetText(auraTrackerConfig().sealNameFilter or "")
     frame.sealFilter:SetTextInsets(5, 5, 0, 0)
@@ -4362,6 +4363,7 @@ local function createEditBox(parent, width, height)
     ns.Skin.Register(box, "editbox")
     return box
 end
+ns.createEditBox = createEditBox
 
 local function createVoiceDropdown(parent, point, relativeTo, x, y, onChange)
     local dropdown = CreateFrame("Frame", nil, parent, "UIDropDownMenuTemplate")
