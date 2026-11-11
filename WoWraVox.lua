@@ -52,6 +52,7 @@ local auraEditor
 local creationView
 local selectedCategory = "auras"
 local selectedAuraRule
+local selectedMarkerKey = "apply" -- the timeline node whose output the editor shows
 local selectedItemRule
 local selectedSkillRule
 local listRows = {}
@@ -2431,6 +2432,7 @@ local function auraDurationObject(instanceID)
     return duration
 end
 
+do
 -- Intermediate timeline markers (MarkerTimers.lua). The duration is the readable one, else the rule's override, else
 -- the last readable duration learned for this spell (WoWraVoxProfilesDB.auraDurations); the latter two are estimates.
 local markerTimers = ns.MarkerTimers and ns.MarkerTimers.Create({
@@ -2486,6 +2488,7 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
         active = true, start = start, duration = duration, estimated = estimated,
         markers = rule.markers, baseline = isBaseline == true, signature = markerSignature(rule),
     })
+end
 end
 
 local function updateAuraTrackerState(spellID, presence, aura, state, sourceEvent, isBaseline)
@@ -4440,6 +4443,7 @@ local function selectRule(rule, category)
     addRuleMode = false
     selectedCategory = category
     if category == "auras" then
+        if selectedAuraRule ~= rule then selectedMarkerKey = "apply" end
         selectedAuraRule = rule
     elseif category == "items" then
         selectedItemRule = rule
@@ -5729,12 +5733,16 @@ local function layoutSharedEditor(isAura)
         auraEditor.skillLearnButton:SetShown(selectedAura() ~= nil and selectedAura().builtin ~= true)
         auraEditor.skillLearningStatus:Hide()
         ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
-        layoutNotificationPanel(ns.notificationPanels.beforeExpire, messageY)
-        local applyY = messageY - ns.notificationPanels.beforeExpire.frame:GetHeight() - 6
-        layoutNotificationPanel(ns.notificationPanels.apply, applyY)
-        local expireY = applyY - ns.notificationPanels.apply.frame:GetHeight() - 6
-        layoutNotificationPanel(ns.notificationPanels.expire, expireY)
-        voiceY = expireY - ns.notificationPanels.expire.frame:GetHeight() - 6
+        local panelY = messageY - ns.layoutTimeline(messageY) - 6
+        local key = ns.SelectedMarkerKey(selectedAura())
+        local panel = key == "apply" and ns.notificationPanels.apply or key == "expire" and ns.notificationPanels.expire
+            or ns.notificationPanels.beforeExpire
+        for _, candidate in ipairs({ ns.notificationPanels.apply, ns.notificationPanels.expire, ns.notificationPanels.beforeExpire }) do
+            if candidate ~= panel then ns.setNotificationPanelShown(candidate, false) end
+        end
+        ns.setNotificationPanelShown(panel, true)
+        layoutNotificationPanel(panel, panelY)
+        voiceY = panelY - panel.frame:GetHeight() - 6
     else
         auraEditor.skillTriggerLabel:ClearAllPoints()
         auraEditor.skillTriggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -22)
@@ -5751,6 +5759,8 @@ local function layoutSharedEditor(isAura)
         auraEditor.skillLearningStatus:SetShown(isSkill)
         ns.setNotificationPanelShown(ns.notificationPanels.apply, false)
         ns.setNotificationPanelShown(ns.notificationPanels.expire, false)
+        ns.setNotificationPanelShown(ns.notificationPanels.beforeExpire, false)
+        if ns.timeline.frame then ns.timeline.frame:Hide() end
         ns.setNotificationPanelShown(ns.notificationPanels.ready, true)
         layoutNotificationPanel(ns.notificationPanels.ready, messageY)
         voiceY = messageY - ns.notificationPanels.ready.frame:GetHeight() - 6
@@ -6715,25 +6725,12 @@ function saveDetails()
     if editorLoading or addRuleMode then return end
     local auraRule = selectedAura()
     if auraRule and ruleNameBox then
-        local beforeProfile = ns.getRuleScreenProfile(auraRule, "beforeExpire")
-        local beforeExpireSignature = table.concat({
-            tostring(auraRule.beforeExpireEnabled == true), tostring(auraRule.beforeExpirePercent),
-            tostring(auraRule.beforeExpireSeconds),
-            tostring(auraRule.beforeExpireSoundEnabled == true), tostring(beforeProfile and beforeProfile.enabled == true),
-        }, ":")
         auraRule.name = trim(ruleNameBox:GetText())
         saveNotificationPanel(ns.notificationPanels.apply, auraRule, "apply")
         saveNotificationPanel(ns.notificationPanels.expire, auraRule, "expire")
-        saveNotificationPanel(ns.notificationPanels.beforeExpire, auraRule, "beforeExpire")
-        local afterProfile = ns.getRuleScreenProfile(auraRule, "beforeExpire")
-        local afterSignature = table.concat({
-            tostring(auraRule.beforeExpireEnabled == true), tostring(auraRule.beforeExpirePercent),
-            tostring(auraRule.beforeExpireSeconds),
-            tostring(auraRule.beforeExpireSoundEnabled == true), tostring(afterProfile and afterProfile.enabled == true),
-        }, ":")
-        if beforeExpireSignature ~= afterSignature then
-            rebuildAuraWatches()
-            syncAllAuras(true)
+        local nodePanel = ns.notificationPanels.beforeExpire
+        if nodePanel.loadedKey and not ns.Markers.IsEndpoint(nodePanel.loadedKey) and ns.findMarker(auraRule, nodePanel.loadedKey) then
+            saveNotificationPanel(nodePanel, auraRule, nodePanel.loadedKey)
         end
     else
         local readyRule = selectedItem() or selectedSkill()
@@ -6867,7 +6864,15 @@ function updateDetails()
         testItemButton:Hide()
         loadNotificationPanel(ns.notificationPanels.apply, auraRule, "apply")
         loadNotificationPanel(ns.notificationPanels.expire, auraRule, "expire")
-        loadNotificationPanel(ns.notificationPanels.beforeExpire, auraRule, "beforeExpire")
+        local nodeKey = ns.SelectedMarkerKey(auraRule)
+        local nodePanel = ns.notificationPanels.beforeExpire
+        nodePanel.loadedKey = nil
+        if not ns.Markers.IsEndpoint(nodeKey) then
+            nodePanel.eventKey, nodePanel.key, nodePanel.screen.eventKey = nodeKey, nodeKey, nodeKey
+            loadNotificationPanel(nodePanel, auraRule, nodeKey)
+            nodePanel.loadedKey = nodeKey
+            nodePanel.heading:SetText(ns.markerTitle(ns.findMarker(auraRule, nodeKey)))
+        end
         layoutSharedEditor(true)
         if not keepTriggerQuery then triggerInputBox:SetText("") end
         updateSelectedTriggers()
@@ -7702,7 +7707,7 @@ local function buildAuraNotificationPanel(eventKey, title)
     stylePanel(panel.frame, 0.09, 0.095, 0.105)
     panel.heading = makeSectionLabel(panel.frame, title, 12, -8)
     ns.Layout.buildPanelHeader(panel, title)
-    if eventKey == "beforeExpire" then
+    if false and eventKey == "beforeExpire" then -- positions are edited on the timeline now
         panel.warningLabel = createLabel(panel.frame, L("Warn at remaining duration"), "GameFontNormalSmall")
         panel.warningValue = createLabel(panel.frame, "5%", "GameFontHighlightSmall")
         panel.warningPercent = makeVolumeSlider(panel.frame, "TOPLEFT", panel.frame, ns.Layout.FIELD_X, -108,
@@ -7744,7 +7749,7 @@ local function buildAuraNotificationPanel(eventKey, title)
     panel.soundTest:SetScript("OnClick", function()
         saveDetails()
         local rule = selectedRule()
-        if rule and ns.playNotificationSound(rule, eventKey) then
+        if rule and ns.playNotificationSound(rule, panel.eventKey) then
             setStatus("Sound test sent to WoW. Check audio in game.")
         else
             setStatus("Sound test could not be sent to WoW.", true)
@@ -7788,10 +7793,270 @@ local function buildAuraNotificationPanel(eventKey, title)
     return panel
 end
 
+do
+-- Timeline of an aura rule (Markers.lua): a track 0..100 % with one handle per node. Click a handle to edit that
+-- node's output below; drag an inner node; type its position in percent or in seconds after the start.
+local timeline = {}
+ns.timeline = timeline
+
+function ns.SelectedMarkerKey(rule)
+    rule = rule or selectedAura()
+    if rule and type(rule.markers) == "table" then
+        for _, marker in ipairs(rule.markers) do
+            if marker.key == selectedMarkerKey then return selectedMarkerKey end
+        end
+    end
+    selectedMarkerKey = "apply"
+    return selectedMarkerKey
+end
+
+function ns.SelectMarker(key)
+    if key == selectedMarkerKey then return end
+    saveDetails()
+    selectedMarkerKey = key
+    updateDetails()
+end
+
+local function timelineDuration(rule)
+    if not (rule and ns.MarkerTimers) then return nil, true end
+    local spellID = rule.spellIDs and rule.spellIDs[1]
+    return ns.MarkerTimers.DurationFor(rule, spellID, nil, ns.learnedDurations and ns.learnedDurations())
+end
+ns.timelineDuration = timelineDuration
+
+local function formatNumber(value)
+    if not value then return "" end
+    local text = string.format("%.2f", value):gsub("0+$", ""):gsub("%.$", "")
+    return text
+end
+
+local function markerTitle(marker)
+    if marker.key == "apply" then return L("Start") end
+    if marker.key == "expire" then return L("End") end
+    return L("Node") .. " " .. formatNumber(marker.at) .. " %"
+end
+ns.markerTitle = markerTitle
+
+local function findMarker(rule, key)
+    for _, marker in ipairs(rule and rule.markers or {}) do
+        if marker.key == key then return marker end
+    end
+end
+ns.findMarker = findMarker
+
+local function applyMarkerPosition(fromSeconds)
+    local rule = selectedAura()
+    if not rule or editorLoading then return end
+    local key = ns.SelectedMarkerKey(rule)
+    if ns.Markers.IsEndpoint(key) then return end
+    local duration = timelineDuration(rule)
+    if fromSeconds then
+        local seconds = tonumber((timeline.secondsBox:GetText():gsub(",", ".")))
+        if seconds then ns.Markers.Move(rule, key, nil, seconds, duration) end
+    else
+        local percent = tonumber((timeline.percentBox:GetText():gsub(",", ".")))
+        if percent then ns.Markers.Move(rule, key, percent) end
+    end
+    updateDetails()
+end
+
+local function applyDurationOverride()
+    local rule = selectedAura()
+    if not rule or editorLoading then return end
+    local value = tonumber((timeline.durationBox:GetText():gsub(",", ".")))
+    rule.durationOverride = value and value > 0 and value or nil
+    updateDetails()
+end
+
+local function buildTimelinePanel()
+    local frame = CreateFrame("Frame", nil, auraEditor, "BackdropTemplate")
+    frame:SetHeight(132)
+    stylePanel(frame, 0.09, 0.095, 0.105)
+    timeline.frame = frame
+    timeline.heading = makeSectionLabel(frame, L("Timeline"), 12, -8)
+
+    local track = CreateFrame("Frame", nil, frame)
+    track:SetHeight(26)
+    timeline.track = track
+    local line = track:CreateTexture(nil, "BACKGROUND")
+    line:SetColorTexture(0.35, 0.29, 0.18, 0.95)
+    line:SetHeight(4)
+    line:SetPoint("LEFT", track, "LEFT", 0, 0)
+    line:SetPoint("RIGHT", track, "RIGHT", 0, 0)
+    timeline.handles = {}
+
+    timeline.addButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    timeline.addButton:SetSize(120, 24)
+    timeline.addButton:SetText("+ " .. L("New node"))
+    timeline.addButton:SetScript("OnClick", function()
+        local rule = selectedAura()
+        if not rule then return end
+        saveDetails()
+        local key = ns.Markers.Add(rule, 90)
+        rule[key .. "Enabled"] = true
+        rule[key .. "Message"] = ""
+        ns.normalizeNotificationSettings(rule, "auras")
+        selectedMarkerKey = key
+        updateDetails()
+    end)
+    timeline.removeButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    timeline.removeButton:SetSize(120, 24)
+    timeline.removeButton:SetText(L("Remove node"))
+    timeline.removeButton:SetScript("OnClick", function()
+        local rule = selectedAura()
+        if not rule then return end
+        local key = ns.SelectedMarkerKey(rule)
+        if ns.Markers.Remove(rule, key) then
+            ns.normalizeNotificationSettings(rule, "auras")
+            selectedMarkerKey = "apply"
+            updateDetails()
+        end
+    end)
+    ns.Skin.Register(timeline.addButton, "button")
+    ns.Skin.Register(timeline.removeButton, "button")
+
+    timeline.percentLabel = createLabel(frame, "Position", "GameFontNormalSmall")
+    timeline.percentBox = createEditBox(frame, 64, 24)
+    timeline.percentUnit = createLabel(frame, "%", "GameFontHighlightSmall")
+    timeline.secondsBox = createEditBox(frame, 64, 24)
+    timeline.secondsUnit = createLabel(frame, "s after start", "GameFontHighlightSmall")
+    timeline.durationLabel = createLabel(frame, "Duration", "GameFontNormalSmall")
+    timeline.durationBox = createEditBox(frame, 64, 24)
+    timeline.durationHint = createLabel(frame, "", "GameFontHighlightSmall")
+    timeline.durationHint:SetTextColor(0.72, 0.72, 0.72)
+    for _, box in ipairs({ timeline.percentBox, timeline.secondsBox, timeline.durationBox }) do box:SetMaxLetters(10) end
+    timeline.percentBox:HookScript("OnEditFocusLost", function() applyMarkerPosition(false) end)
+    timeline.secondsBox:HookScript("OnEditFocusLost", function() applyMarkerPosition(true) end)
+    timeline.durationBox:HookScript("OnEditFocusLost", applyDurationOverride)
+    addHelpTooltip(timeline.addButton, "New node", "Adds a notification moment between start and end. Drag it on the line or type its position.")
+    addHelpTooltip(timeline.removeButton, "Remove node", "Removes the selected node. Start and end stay; switch their outputs off instead.")
+    addHelpTooltip(timeline.percentBox, "Position", "Position of the selected node: 0 % = start, 100 % = end. Decimals allowed.")
+    addHelpTooltip(timeline.secondsBox, "Seconds after start", "Position of the selected node in seconds after the start. Needs a known duration.")
+    addHelpTooltip(timeline.durationBox, "Duration", "Duration in seconds. Empty uses the last readable duration of this effect. In combat a hidden duration is estimated from it; the end (100 %) always waits for the real end of the effect.")
+end
+
+local function handleFor(index)
+    local handle = timeline.handles[index]
+    if handle then return handle end
+    handle = CreateFrame("Button", nil, timeline.track)
+    handle:SetSize(14, 22)
+    handle.tex = handle:CreateTexture(nil, "ARTWORK")
+    handle.tex:SetAllPoints()
+    handle.tex:SetTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+    handle.label = handle:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    handle.label:SetPoint("TOP", handle, "BOTTOM", 0, -1)
+    handle:RegisterForClicks("LeftButtonUp")
+    handle:SetScript("OnMouseDown", function(self)
+        ns.SelectMarker(self.key)
+        if self.key and not ns.Markers.IsEndpoint(self.key) then self.dragging = true end
+    end)
+    handle:SetScript("OnMouseUp", function(self)
+        if not self.dragging then return end
+        self.dragging = false
+        local rule = selectedAura()
+        if rule and self.dragAt then
+            ns.Markers.Move(rule, self.key, math.floor(self.dragAt * 10 + 0.5) / 10)
+            updateDetails()
+        end
+    end)
+    handle:SetScript("OnUpdate", function(self)
+        if not self.dragging then return end
+        local left, width = timeline.track:GetLeft(), timeline.track:GetWidth()
+        if not (left and width and width > 0) then return end
+        local x = GetCursorPosition() / timeline.track:GetEffectiveScale()
+        local at = math.max(0, math.min(100, (x - left) / width * 100))
+        self.dragAt = at
+        self:ClearAllPoints()
+        self:SetPoint("CENTER", timeline.track, "LEFT", width * at / 100, 0)
+        self.label:SetText(formatNumber(at) .. "%")
+    end)
+    timeline.handles[index] = handle
+    return handle
+end
+
+function ns.refreshTimeline(rule)
+    if not timeline.frame then return end
+    local markers = rule and rule.markers or {}
+    local selected = ns.SelectedMarkerKey(rule)
+    local width = math.max(1, timeline.track:GetWidth())
+    for index, marker in ipairs(markers) do
+        local handle = handleFor(index)
+        handle.key = marker.key
+        handle:ClearAllPoints()
+        handle:SetPoint("CENTER", timeline.track, "LEFT", width * marker.at / 100, 0)
+        handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
+            or (formatNumber(marker.at) .. "%"))
+        local isSelected = marker.key == selected
+        handle.tex:SetVertexColor(isSelected and 1 or 0.6, isSelected and 0.82 or 0.6, isSelected and 0.2 or 0.6)
+        handle:SetFrameLevel(timeline.track:GetFrameLevel() + (isSelected and 3 or 1))
+        handle:Show()
+    end
+    for index = #markers + 1, #timeline.handles do timeline.handles[index]:Hide() end
+    local marker = findMarker(rule, selected)
+    local endpoint = not marker or ns.Markers.IsEndpoint(selected)
+    local duration, estimated = timelineDuration(rule)
+    timeline.percentBox:SetText(marker and formatNumber(marker.at) or "")
+    local seconds = marker and duration and ns.Markers.Seconds(marker, duration)
+    timeline.secondsBox:SetText(seconds and formatNumber(seconds) or "")
+    timeline.percentBox:SetEnabled(not endpoint)
+    timeline.secondsBox:SetEnabled(not endpoint and duration ~= nil)
+    timeline.removeButton:SetEnabled(not endpoint)
+    timeline.durationBox:SetText(rule and rule.durationOverride and formatNumber(rule.durationOverride) or "")
+    local learnedText
+    if rule and rule.durationOverride then
+        learnedText = L("set by you")
+    elseif duration then
+        learnedText = string.format(L("learned: %s s"), formatNumber(duration))
+    else
+        learnedText = L("unknown until the effect was seen once")
+    end
+    if duration and estimated then learnedText = learnedText .. " · " .. L("estimated in combat") end
+    timeline.durationHint:SetText(learnedText)
+end
+
+function ns.layoutTimeline(y)
+    local frame = timeline.frame
+    if not frame then return 0 end
+    frame:ClearAllPoints()
+    frame:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 0, y)
+    frame:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", 0, y)
+    timeline.addButton:ClearAllPoints()
+    timeline.addButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT, -6)
+    timeline.removeButton:ClearAllPoints()
+    timeline.removeButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
+    timeline.track:ClearAllPoints()
+    timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 24, -44)
+    timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 24, -44)
+    timeline.percentLabel:ClearAllPoints()
+    timeline.percentLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD, -100)
+    timeline.percentBox:ClearAllPoints()
+    timeline.percentBox:SetPoint("LEFT", timeline.percentLabel, "RIGHT", 10, 0)
+    timeline.percentUnit:ClearAllPoints()
+    timeline.percentUnit:SetPoint("LEFT", timeline.percentBox, "RIGHT", 4, 0)
+    timeline.secondsBox:ClearAllPoints()
+    timeline.secondsBox:SetPoint("LEFT", timeline.percentUnit, "RIGHT", 14, 0)
+    timeline.secondsUnit:ClearAllPoints()
+    timeline.secondsUnit:SetPoint("LEFT", timeline.secondsBox, "RIGHT", 4, 0)
+    timeline.durationLabel:ClearAllPoints()
+    timeline.durationLabel:SetPoint("LEFT", timeline.secondsUnit, "RIGHT", 24, 0)
+    timeline.durationBox:ClearAllPoints()
+    timeline.durationBox:SetPoint("LEFT", timeline.durationLabel, "RIGHT", 10, 0)
+    timeline.durationHint:ClearAllPoints()
+    timeline.durationHint:SetPoint("LEFT", timeline.durationBox, "RIGHT", 8, 0)
+    timeline.durationHint:SetPoint("RIGHT", frame, "RIGHT", ns.Layout.RIGHT, 0)
+    timeline.durationHint:SetJustifyH("LEFT")
+    frame:Show()
+    ns.refreshTimeline(selectedAura())
+    return frame:GetHeight()
+end
+ns.buildTimelinePanel = buildTimelinePanel
+end
+
 local function buildMessageControls()
-    local applyPanel = buildAuraNotificationPanel("apply", L("Application"))
-    local expirePanel = buildAuraNotificationPanel("expire", L("Expiration"))
-    buildAuraNotificationPanel("beforeExpire", L("Before expiry"))
+    ns.buildTimelinePanel()
+    local applyPanel = buildAuraNotificationPanel("apply", L("Start"))
+    local expirePanel = buildAuraNotificationPanel("expire", L("End"))
+    buildAuraNotificationPanel("beforeExpire", L("Node"))
     local readyPanel = buildAuraNotificationPanel("ready", "Ready")
     applyEnabledCheck, applyMessageBox, testApplyButton = applyPanel.ttsEnabled, applyPanel.ttsMessage, applyPanel.ttsTest
     expireEnabledCheck, expireMessageBox, testExpireButton = expirePanel.ttsEnabled, expirePanel.ttsMessage, expirePanel.ttsTest
@@ -8473,7 +8738,7 @@ local function wireScreenRow(row, helpText)
     row.text:HookScript("OnTextChanged", updatePreviewButtons)
     row.enabled:SetScript("OnClick", function()
         saveDetails()
-        ns.Layout.setPanelExpanded(ns.notificationPanels[row.eventKey], true)
+        ns.Layout.setPanelExpanded(ns.notificationPanels[row.eventKey] or ns.notificationPanels.beforeExpire, true)
         showScreenRow(row, true)
         layoutSharedEditor(selectedCategory == "auras")
         if selectedAura() then
@@ -8578,6 +8843,16 @@ for _, panel in pairs(ns.notificationPanels) do
     addHelpTooltip(panel.soundTest, "Test notification", "Play the selected sound on the selected channel.")
 end
 
+ns.notificationPanels.beforeExpire.ttsTest:SetScript("OnClick", function()
+    saveDetails()
+    local rule = selectedAuraRule
+    local key = ns.notificationPanels.beforeExpire.eventKey
+    if rule and not playTTS(rule.voiceID, ns.formatRuleNotificationMessage(rule, rule[key .. "Message"], ns.previewContext(rule)), rule.volume, rule.speechSpeed) then
+        setStatus("TTS test could not be sent to WoW.", true)
+    else
+        setStatus("TTS test sent to WoW. Check audio in game.")
+    end
+end)
 testApplyButton:SetScript("OnClick", function()
     saveDetails()
     if selectedAuraRule and not playTTS(selectedAuraRule.voiceID, ns.formatRuleNotificationMessage(selectedAuraRule, selectedAuraRule.applyMessage, ns.previewContext(selectedAuraRule)), selectedAuraRule.volume, selectedAuraRule.speechSpeed) then
