@@ -8187,23 +8187,45 @@ local function handleFor(index)
     return handle
 end
 
+-- Tabs use Blizzard's own tab art (the TabSystem atlases, drawn rotated because our tabs hang
+-- above their panel). Without the atlases (older client) a flat backdrop tab is used instead.
+local function tabAtlasOK()
+    return C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo("uiframe-tab-left") ~= nil
+        and C_Texture.GetAtlasInfo("uiframe-activetab-left") ~= nil
+end
+
 local function tabFor(index)
     local tab = timeline.tabs[index]
     if tab then return tab end
     tab = CreateFrame("Button", nil, timeline.tabBar, "BackdropTemplate")
-    tab:SetHeight(28)
-    tab:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
+    tab:SetHeight(32)
+    tab.art = tabAtlasOK()
+    tab.pieces = {}
+    local function piece(atlas, tile, blend)
+        local t = tab:CreateTexture(nil, blend and "HIGHLIGHT" or "BACKGROUND")
+        t:SetAtlas(atlas, true)
+        if tile then t:SetHorizTile(true) end
+        if blend then t:SetBlendMode("ADD") t:SetAlpha(0.4) end
+        t:SetRotation(math.pi)
+        return t
+    end
+    if tab.art then
+        local function trio(left, mid, right, blend)
+            local l, m, r = piece(left, false, blend), piece(mid, true, blend), piece(right, false, blend)
+            r:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", -6, 0) -- rotated: art "right" cap is the visual left
+            l:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", 0, 0)
+            m:SetPoint("LEFT", r, "RIGHT")
+            m:SetPoint("RIGHT", l, "LEFT")
+            return { l, m, r }
+        end
+        tab.normal = trio("uiframe-tab-left", "_uiframe-tab-center", "uiframe-tab-right")
+        tab.active = trio("uiframe-activetab-left", "_uiframe-activetab-center", "uiframe-activetab-right")
+        trio("uiframe-tab-left", "_uiframe-tab-center", "uiframe-tab-right", true)
+    else
+        tab:SetBackdrop({ bgFile = "Interface\Buttons\WHITE8X8", edgeFile = "Interface\Buttons\WHITE8X8", edgeSize = 1 })
+    end
     tab.text = tab:CreateFontString(nil, "OVERLAY", "WoWraVoxFontNormal")
-    tab.text:SetPoint("CENTER", 0, 0)
-    -- Covers the panel's top border under the active tab, so tab and panel read as one shape.
-    tab.join = tab:CreateTexture(nil, "OVERLAY")
-    tab.join:SetColorTexture(0.09, 0.095, 0.105, 1)
-    tab.join:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", 1, 0)
-    tab.join:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -1, 0)
-    tab.join:SetHeight(7)
     tab:SetScript("OnClick", function(self) ns.SelectMarker(self.key) end)
-    tab:SetScript("OnEnter", function(self) if not self.selected then self.text:SetTextColor(1, 1, 1) end end)
-    tab:SetScript("OnLeave", function(self) if not self.selected then self.text:SetTextColor(0.62, 0.62, 0.62) end end)
     timeline.tabs[index] = tab
     return tab
 end
@@ -8261,23 +8283,25 @@ function ns.refreshTimeline(rule)
         tab.key, tab.selected = marker.key, isSelected
         tab.text:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
             or (tostring(number) .. "  ·  " .. timingText(marker)))
-        tab:SetWidth(math.max(64, tab.text:GetStringWidth() + 32))
-        -- Inactive tabs sit on the panel's top edge; the active one is taller, panel-coloured and
-        -- runs into the panel (its join strip hides the border below it), like a file-folder tab.
-        local sink = isSelected and 7 or 0
+        tab:SetWidth(math.max(70, tab.text:GetStringWidth() + 40))
         tab:ClearAllPoints()
         tab:SetPoint("BOTTOMLEFT", previousTab or timeline.tabBar, previousTab and "BOTTOMRIGHT" or "BOTTOMLEFT",
-            previousTab and 2 or 14, -sink + (previousTab and previousTab.sink or 0))
-        tab.sink = sink
+            previousTab and 1 or 14, 0)
         previousTab = tab
-        tab:SetHeight((isSelected and 30 or 25) + sink)
+        tab:SetHeight(32)
+        -- Like Blizzard's tabs: the selected one uses the "active" art and bright text; the others sit lower.
+        if tab.art then
+            for _, t in ipairs(tab.normal) do t:SetShown(not isSelected) end
+            for _, t in ipairs(tab.active) do t:SetShown(isSelected) end
+        else
+            tab:SetBackdropColor(isSelected and 0.09 or 0.035, isSelected and 0.095 or 0.037, isSelected and 0.105 or 0.045, 1)
+            tab:SetBackdropBorderColor(isSelected and 0.88 or 0.3, isSelected and 0.68 or 0.25, isSelected and 0.24 or 0.16, 1)
+        end
         tab.text:ClearAllPoints()
-        tab.text:SetPoint("CENTER", tab, "CENTER", 0, sink / 2)
-        tab.join:SetShown(isSelected)
+        tab.text:SetPoint("CENTER", tab, "CENTER", 0, isSelected and 0 or -3)
+        tab.text:SetFontObject(isSelected and "WoWraVoxFontHighlight" or "WoWraVoxFontNormal")
         tab:SetFrameLevel(ns.notificationPanels.apply.frame:GetFrameLevel() + (isSelected and 12 or 1))
-        tab:SetBackdropColor(isSelected and 0.09 or 0.035, isSelected and 0.095 or 0.037, isSelected and 0.105 or 0.045, 1)
-        tab:SetBackdropBorderColor(isSelected and 0.88 or 0.3, isSelected and 0.68 or 0.25, isSelected and 0.24 or 0.16, 1)
-        tab.text:SetTextColor(isSelected and 1 or 0.62, isSelected and 0.82 or 0.62, isSelected and 0.2 or 0.62)
+        tab:SetEnabled(not isSelected)
         tab:Show()
     end
     for index = #markers + 1, #timeline.handles do timeline.handles[index]:Hide() end
