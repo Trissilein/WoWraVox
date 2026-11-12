@@ -4520,6 +4520,21 @@ local function createEditBox(parent, width, height)
 end
 ns.createEditBox = createEditBox
 
+-- Grey hint inside an empty edit box (shows the syntax, e.g. "{spell} ended"); gone as soon as something is typed.
+function ns.addPlaceholder(box, text)
+    local hint = box:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlight")
+    hint:SetPoint("LEFT", box, "LEFT", 8, 0)
+    hint:SetPoint("RIGHT", box, "RIGHT", -6, 0)
+    hint:SetJustifyH("LEFT")
+    hint:SetTextColor(0.5, 0.5, 0.5)
+    hint:SetText(L(text))
+    local function refresh() hint:SetShown((box:GetText() or "") == "") end
+    box:HookScript("OnTextChanged", refresh)
+    box.placeholder = hint
+    refresh()
+    return hint
+end
+
 local function createVoiceDropdown(parent, point, relativeTo, x, y, onChange)
     local dropdown = CreateFrame("Frame", nil, parent, "UIDropDownMenuTemplate")
     dropdown:SetPoint(point, relativeTo, point, x, y)
@@ -8723,26 +8738,32 @@ local function buildMessageControls()
     applyEnabledCheck, applyMessageBox, testApplyButton = applyPanel.ttsEnabled, applyPanel.ttsMessage, applyPanel.ttsTest
     expireEnabledCheck, expireMessageBox, testExpireButton = expirePanel.ttsEnabled, expirePanel.ttsMessage, expirePanel.ttsTest
     readyLabel, readyMessageBox, testItemButton = readyPanel.ttsLabel, readyPanel.ttsMessage, readyPanel.ttsTest
-    -- Round "?" next to the Ready heading (item rules only): explains the {item}/{slot} wildcards.
-    local help = CreateFrame("Button", nil, readyPanel.frame)
-    help:SetSize(18, 18)
-    help:SetPoint("LEFT", readyPanel.heading, "RIGHT", 8, 0)
-    help:SetFrameLevel(readyPanel.headerButton:GetFrameLevel() + 2)
-    help.bg = help:CreateTexture(nil, "BACKGROUND")
-    help.bg:SetAllPoints(help)
-    help.bg:SetColorTexture(0.2, 0.21, 0.25, 1)
-    help.mask = help:CreateMaskTexture()
-    help.mask:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask","CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
-    help.mask:SetAllPoints(help)
-    help.bg:AddMaskTexture(help.mask)
-    help.mark = help:CreateFontString(nil, "OVERLAY", "WoWraVoxFontNormalSmall")
-    help.mark:SetPoint("CENTER", help, "CENTER", 0, 0)
-    help.mark:SetText("?")
-    help:Hide()
+    -- Round "?" next to a panel heading: explains the wildcards. The Ready panel (item rules only) keeps its own.
     -- The default tooltip font draws { } almost like [ ]: lines with braces use Arial Narrow. WoW's standard fonts
     -- have no italics, so the example is set apart by its light-blue colour instead.
+    local function wildcardHelp(panel, lines, hidden)
+        local help = CreateFrame("Button", nil, panel.frame)
+        help:SetSize(18, 18)
+        help:SetPoint("LEFT", panel.heading, "RIGHT", 8, 0)
+        help:SetFrameLevel(panel.headerButton:GetFrameLevel() + 2)
+        help.bg = help:CreateTexture(nil, "BACKGROUND")
+        help.bg:SetAllPoints(help)
+        help.bg:SetColorTexture(0.2, 0.21, 0.25, 1)
+        help.mask = help:CreateMaskTexture()
+        help.mask:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask","CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+        help.mask:SetAllPoints(help)
+        help.bg:AddMaskTexture(help.mask)
+        help.mark = help:CreateFontString(nil, "OVERLAY", "WoWraVoxFontNormalSmall")
+        help.mark:SetPoint("CENTER", help, "CENTER", 0, 0)
+        help.mark:SetText("?")
+        if hidden then help:Hide() end
+        addHelpTooltip(help, "Wildcards", nil, lines)
+        ns.Skin.Register(help, "helpButton", { hide = { help.bg, help.mark } })
+        return help
+    end
     local braceFont = { "Fonts\\ARIALN.TTF", 13, "" }
-    addHelpTooltip(help, "Wildcards", nil, {
+    local exampleColor = { r = 0.624, g = 0.878, b = 1 }
+    ns.itemHelpButton = wildcardHelp(readyPanel, {
         { text = "Type them with curly braces: {item} and {slot}.", font = braceFont },
         { text = "{item} - name of the item that became ready", font = braceFont },
         { text = "{slot} - its slot, for example Trinket 1", font = braceFont },
@@ -8750,9 +8771,28 @@ local function buildMessageControls()
         { text = "{item} ready  =>  Blazebinder's Hoof ready", r = 0.624, g = 0.878, b = 1, font = braceFont },
         { text = "Trinket ready  =>  stays the same", r = 0.624, g = 0.878, b = 1 },
         { text = "Works in the spoken text and the on-screen text." },
-    })
-    ns.Skin.Register(help, "helpButton", { hide = { help.bg, help.mark } })
-    ns.itemHelpButton = help
+    }, true)
+    -- Aura nodes: {spell} is the name of the spell that fired (in a group, the spell of that track).
+    local auraWildcardLines = {
+        { text = "Type it with curly braces: {spell}.", font = braceFont },
+        { text = "{spell} - name of the spell that triggered the node", font = braceFont },
+        { text = "Example:", r = 1, g = 0.82, b = 0.2 },
+        { text = "{spell} ended  =>  Seal of Wisdom ended", r = exampleColor.r, g = exampleColor.g, b = exampleColor.b, font = braceFont },
+        { text = "Without {spell} the text stays as you typed it. In a group, {spell} makes one text fit every spell." },
+        { text = "Works in the spoken text and the on-screen text." },
+    }
+    for _, key in ipairs({ "apply", "expire", "beforeExpire" }) do
+        wildcardHelp(ns.notificationPanels[key], auraWildcardLines, false)
+    end
+    ns.addPlaceholder(applyPanel.ttsMessage, "e.g. {spell} gained")
+    ns.addPlaceholder(expirePanel.ttsMessage, "e.g. {spell} ended")
+    ns.addPlaceholder(ns.notificationPanels.beforeExpire.ttsMessage, "e.g. {spell} ending soon")
+    ns.addPlaceholder(readyPanel.ttsMessage, "e.g. {item} ready")
+    for _, key in ipairs({ "apply", "expire", "beforeExpire", "ready" }) do
+        local screenBox = ns.notificationPanels[key].screen and ns.notificationPanels[key].screen.text
+        local hints = { apply = "e.g. {spell} gained", expire = "e.g. {spell} ended", ready = "e.g. {item} ready" }
+        if screenBox then ns.addPlaceholder(screenBox, hints[key] or "e.g. {spell} ending soon") end
+    end
     -- Source hint ("Choose an equipped item" / "Spellbook · ID n") sits in the Ready heading row, right-aligned.
     itemSourceText:SetParent(readyPanel.frame)
     itemSourceText:SetJustifyH("RIGHT")

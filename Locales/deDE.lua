@@ -455,4 +455,10 @@ ns.Locales.deDE = {
     ["Spells"] = "Zauber", ["Link to group"] = "Mit Gruppe verknüpfen", ["duration unknown"] = "Laufzeit unbekannt",
     ["Shows one track per spell. The group line moves a node for every spell; dragging on a spell's track moves it for that spell only (marked blue). Seconds always belong to that spell's own duration."] = "Zeigt eine Spur pro Zauber. Die Gruppenlinie verschiebt einen Knoten für alle Zauber; Ziehen auf der Spur eines Zaubers verschiebt ihn nur für diesen (blau markiert). Sekunden gehören immer zur eigenen Laufzeit des Zaubers.",
     ["This spell has its own timing for the node. Linking it again makes it follow the group node."] = "Dieser Zauber hat für den Knoten eine eigene Zeit. Verknüpfen lässt ihn dem Gruppen-Knoten wieder folgen.",
+    ["Type it with curly braces: {spell}."] = "Mit geschweiften Klammern tippen: {spell}.",
+    ["{spell} - name of the spell that triggered the node"] = "{spell} - Name des Zaubers, der den Knoten ausgelöst hat",
+    ["{spell} ended  =>  Seal of Wisdom ended"] = "{spell} vorbei  =>  Siegel der Weisheit vorbei",
+    ["Without {spell} the text stays as you typed it. In a group, {spell} makes one text fit every spell."] = "Ohne {spell} bleibt der Text, wie du ihn getippt hast. In einer Gruppe passt mit {spell} ein Text für jeden Zauber.",
+    ["e.g. {spell} gained"] = "z. B. {spell} erhalten", ["e.g. {spell} ended"] = "z. B. {spell} vorbei",
+    ["e.g. {spell} ending soon"] = "z. B. {spell} gleich vorbei", ["e.g. {item} ready"] = "z. B. {item} bereit",
 }
