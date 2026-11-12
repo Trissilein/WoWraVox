@@ -456,10 +456,11 @@ end
 
 function ns.AuraCDM.Probe()
     local lines = { "combat=" .. tostring(InCombatLockdown and InCombatLockdown()) }
-    for _, name in ipairs({ "BuffIconCooldownViewer", "BuffBarCooldownViewer" }) do
+    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer", "BuffIconCooldownViewer", "BuffBarCooldownViewer" }) do
         local viewer = _G[name]
+        if not viewer then lines[#lines + 1] = name .. " missing" end
         -- every child of the viewer, shown or not: where do the lit buffs live?
-        pcall(function()
+        local childrenOK, childrenError = pcall(function()
             local children = { viewer:GetChildren() }
             local out = { name:sub(1, 8) .. " children=" .. #children .. " shown=" .. tostring(viewer:IsShown()) }
             for index, child in ipairs(children) do
@@ -475,6 +476,7 @@ function ns.AuraCDM.Probe()
             end
             for _, line in ipairs(out) do lines[#lines + 1] = line end
         end)
+        if not childrenOK then lines[#lines + 1] = name:sub(1, 8) .. " children error: " .. tostring(childrenError) end
         local pool = viewer and viewer.itemFramePool
         if pool and type(pool.EnumerateActive) == "function" then
             pcall(function()
@@ -484,6 +486,11 @@ function ns.AuraCDM.Probe()
                     local function add(label, fn)
                         local ok, value = pcall(fn)
                         parts[#parts + 1] = label .. "=" .. (ok and probeValue(value) or "error")
+                    end
+                    for _, method in ipairs({ "GetCooldownID", "GetSpellID", "GetAuraSpellID", "GetBaseSpellID" }) do
+                        if type(frame[method]) == "function" then
+                            add((method:gsub("^Get", "")), function() return frame[method](frame) end)
+                        end
                     end
                     add("active", function() return frame.isActive end)
                     add("inst", function() return frame.auraInstanceID end)
