@@ -2283,6 +2283,7 @@ do
     local combat, secrecyLevel, live, selfBuff, infos = true, 2, {}, {}, {}
     local spoken, tts = {}, {}
     local hookCalls, loaders = {}, {}
+    local deferTimers = nil
 
     issecretvalue = function(value) return value == hiddenValue end
     C_Secrets = { ShouldAurasBeSecret = function() return combat end, GetSpellAuraSecrecy = function() return secrecyLevel end }
@@ -2291,7 +2292,17 @@ do
         GetSpellInfo = function(spellID) return { name = "Spell " .. spellID, iconID = 1 } end }
     C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return live[spellID] end }
     C_Timer = { After = function(_, callback) table.insert(timerCallbacks, callback) end,
-        NewTimer = function() return { Cancel = function() end } end }
+        NewTimer = function(_, callback)
+            -- Default: the grace delay of a deferred end passes at once; a test sets deferTimers to hold them back.
+            if deferTimers then
+                local timer = { callback = callback }
+                function timer:Cancel() self.cancelled = true end
+                table.insert(deferTimers, timer)
+                return timer
+            end
+            callback()
+            return { Cancel = function() end }
+        end }
     ns.AuraSoundFallback.Refresh = function() end
     ns.AuraSoundFallback.LogAura = function() end
     ns.DebugReport.NoteNotify = function(_, eventKey, _, spellID, source)
@@ -2496,6 +2507,21 @@ do
     icon:TriggerAuraRemovedAlert()
     icon:TriggerAuraRemovedAlert()
     check("CDM (b): a repeated end announces nothing more", #spoken == 4, list(spoken))
+
+    -- a refresh: the icon goes dark and lights up again within the grace delay -> neither end nor new start
+    setup(dpRule())
+    icon = withIcon(101)
+    icon:TriggerAuraAppliedAlert()
+    deferTimers = {}
+    icon:TriggerAuraRemovedAlert()
+    check("CDM (b): the end waits for the grace delay", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    icon:TriggerAuraAppliedAlert()
+    for _, timer in ipairs(deferTimers) do if not timer.cancelled then timer.callback() end end
+    check("CDM (b): a refresh announces neither an end nor a new start", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    icon:TriggerAuraRemovedAlert()
+    for _, timer in ipairs(deferTimers) do if not timer.cancelled then timer.callback() end end
+    check("CDM (b): an end that stays dark is announced after the delay", #spoken == 2 and spoken[2] == "expire:408459@CDM_SIGNAL", list(spoken))
+    deferTimers = nil
 
     -- the same buff in both viewers: one announcement per transition
     setup(dpRule())

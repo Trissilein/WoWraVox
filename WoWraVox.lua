@@ -3143,6 +3143,10 @@ function ns._Aura.handleCast(unit, castGUID, castSpellID)
                 local auraID = ns._Aura.validIntegerID(rawAuraID)
                 if auraID and ns.RuleSpellMatches(rule, ns._Aura.castIDFor(rule, auraID), castSpellID) and not announced then
                     announced = true
+                    -- Own recast = refresh: the timeline nodes count from now even when the aura itself is unreadable.
+                    if ns.markerTimers and rule.id then
+                        ns.markerTimers:Restart(rule.id, ns.TrackID(rule, auraID), GetTime())
+                    end
                     table.insert(identityMatches, tostring(rule.id or "?") .. ":" .. tostring(auraID))
                     if ns._Aura.addonCanSpeak(auraID, rule) then
                         sayAura(auraID, "apply", "UNIT_SPELLCAST_SUCCEEDED", castGUID, rule)
@@ -3277,6 +3281,34 @@ ns._Aura.processAura = processAura
 -- a readable aura belongs to processAura, so nothing is announced twice.  activeAuras[spellID] is the shared
 -- active state, so a transition runs once however many icons or hooks report it, and it feeds the same
 -- apply/expire rules (sayAura) as a normal read, with the cast dedupe of shouldAnnounceApply.
+-- A Cooldown Manager icon that goes dark and lights up again within a moment is a refresh (recast while the old
+-- one still ran): the end is spoken only when it stays dark.
+ns._Aura.deferredExpire = {}
+function ns._Aura.cancelDeferredExpire(spellID)
+    local timer = ns._Aura.deferredExpire[spellID]
+    if not timer then return false end
+    ns._Aura.deferredExpire[spellID] = nil
+    if type(timer.Cancel) == "function" then pcall(timer.Cancel, timer) end
+    return true
+end
+function ns._Aura.deferExpire(spellID)
+    ns._Aura.cancelDeferredExpire(spellID)
+    local ok, timer, fired = false, nil, false
+    if C_Timer and C_Timer.NewTimer then
+        ok, timer = pcall(C_Timer.NewTimer, 0.6, function()
+            fired = true
+            ns._Aura.deferredExpire[spellID] = nil
+            if not activeAuras[spellID] then sayAura(spellID, "expire", "CDM_SIGNAL") end
+        end)
+    end
+    if fired then return end
+    if ok and timer then
+        ns._Aura.deferredExpire[spellID] = timer
+    else
+        sayAura(spellID, "expire", "CDM_SIGNAL")
+    end
+end
+
 function ns._Aura.cdmSignal(spellIDs, active)
     if type(active) ~= "boolean" then return end
     if type(spellIDs) ~= "table" then spellIDs = { spellIDs } end
@@ -3306,7 +3338,10 @@ function ns._Aura.cdmSignal(spellIDs, active)
     if active then
         auraTracker.updateState(spellID, "active", nil, nil, "CDM_SIGNAL", false)
         if state then return end
+        -- Lit again right after going dark: a refresh, not a new application (the pending end is dropped).
+        local refreshed = ns._Aura.cancelDeferredExpire(spellID)
         activeAuras[spellID] = { expirationTime = 0, fromCDM = true }
+        if refreshed then return end
         -- the icon is proof of a new application: a hidden read of the same moment must not suppress it
         ns._Aura.unreadableBaselines[spellID] = nil
         if ns.AuraSoundFallback then ns.AuraSoundFallback.LogAura(spellID, "cdm-icon-active", "CDM_SIGNAL") end
@@ -3327,7 +3362,7 @@ function ns._Aura.cdmSignal(spellIDs, active)
     activeAuras[spellID] = nil
     if state.auraInstanceID then auraByInstanceID[state.auraInstanceID] = nil end
     if ns.AuraSoundFallback then ns.AuraSoundFallback.LogAura(spellID, "cdm-icon-inactive", "CDM_SIGNAL") end
-    if expired then sayAura(spellID, "expire", "CDM_SIGNAL") end
+    if expired then ns._Aura.deferExpire(spellID) end
     auraTracker.updateState(spellID, "inactive", nil, nil, "CDM_SIGNAL", false)
 end
 
