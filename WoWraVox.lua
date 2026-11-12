@@ -38,7 +38,7 @@ local spellInfoCache = {}
 local spellLoadRequests = {}
 local itemCooldownStates = {}
 local itemDebugDedupe = {}
-local auraTracker = { updatePending = false, sealSyncPending = false }
+local auraTracker = { sealSyncPending = false }
 function ns._Aura.cancelExpiry(state)
     if not state then return end
     local timer = state.expiryTimer
@@ -54,7 +54,6 @@ function ns._Aura.clearActiveState()
     for _, state in pairs(activeAuras) do ns._Aura.cancelExpiry(state) end
     wipe(activeAuras)
     wipe(auraByInstanceID)
-    if auraTracker.stateManager then auraTracker.stateManager:Reset() end
 end
 local optionsFrame
 local listScroll
@@ -912,7 +911,7 @@ function ns.normalizeNotificationSettings(rule, category)
             local key = marker.key
             if key == "beforeExpire" then
                 hasBeforeExpire = true
-                -- The Codex tracker still reads the percent fields; keep them in step with the marker.
+                -- Keep the old percent fields in step with the marker (older saves and shared groups read them).
                 rule.beforeExpireEnabled = true
                 if marker.anchor == "end" and marker.offset then
                     rule.beforeExpirePercent, rule.beforeExpireSeconds = nil, math.max(1, math.min(60, math.floor(marker.offset + 0.5)))
@@ -1151,16 +1150,10 @@ end
 local function normalizeAuraTrackerData(data)
     if type(data) ~= "table" then return end
     local tracker = type(data.auraTracker) == "table" and data.auraTracker or {}
-    local layout = ns.AuraTrackerView and ns.AuraTrackerView.NormalizeConfig
-        and ns.AuraTrackerView.NormalizeConfig(tracker) or {}
-    tracker.size = layout.size or 40
-    tracker.spacing = layout.spacing or 6
-    tracker.groups = layout.groups or {}
-    tracker.freeIcons = layout.freeIcons or {}
-    tracker.visibilityByEntry = layout.visibilityByEntry or {}
-    tracker.showCountdown = tracker.showCountdown ~= false
-    tracker.showName = tracker.showName == true
-    tracker.showStacks = tracker.showStacks ~= false
+    -- The icon window is gone: its layout fields from older saves are dropped. Only the seal family stays here.
+    for _, field in ipairs({ "size", "spacing", "groups", "freeIcons", "visibilityByEntry", "showCountdown", "showName", "showStacks" }) do
+        tracker[field] = nil
+    end
     tracker.sealNameFilter = type(tracker.sealNameFilter) == "string" and tracker.sealNameFilter or nil
 
     local families = type(tracker.families) == "table" and tracker.families or {}
@@ -1169,7 +1162,6 @@ local function normalizeAuraTrackerData(data)
         local seals = {
             spells = {},
             excludedSpellIDs = {},
-            includeInTracker = source.includeInTracker == true,
             ruleID = type(source.ruleID) == "string" and source.ruleID or nil,
         }
         for _, row in ipairs(type(source.spells) == "table" and source.spells or {}) do
@@ -2575,56 +2567,6 @@ local function auraTrackerConfig()
     return type(tracker) == "table" and tracker or {}
 end
 
-local function trackerRuleIDs(config)
-    local selected = {}
-    config = config or auraTrackerConfig()
-    for _, group in pairs(type(config.groups) == "table" and config.groups or {}) do
-        for _, id in ipairs(type(group) == "table" and group.entryIds or {}) do selected[tostring(id)] = true end
-    end
-    for _, item in ipairs(type(config.freeIcons) == "table" and config.freeIcons or {}) do
-        local id = type(item) == "table" and item.id or item
-        if id ~= nil then selected[tostring(id)] = true end
-    end
-    return selected
-end
-
-local function ruleHasBeforeExpireOutput(rule)
-    local profile = ns.getRuleScreenProfile(rule, "beforeExpire")
-    return rule.beforeExpireEnabled == true or rule.beforeExpireSoundEnabled == true
-        or profile and profile.enabled == true
-end
-
-local function auraIconForSpell(spellID)
-    if C_Spell and C_Spell.GetSpellTexture then
-        local ok, texture = pcall(C_Spell.GetSpellTexture, spellID)
-        if ok and (type(texture) == "string" or type(texture) == "number") then
-            local secret = false
-            if issecretvalue then
-                local secretOK, result = pcall(issecretvalue, texture)
-                secret = not secretOK or result == true
-            end
-            if not secret then return texture end
-        end
-    end
-    local info = getSpellInfo(spellID)
-    local icon, ok = safeAuraField(info, "iconID")
-    return ok and icon or nil
-end
-
-local function auraDurationObject(instanceID)
-    if not (C_UnitAuras and type(C_UnitAuras.GetAuraDuration) == "function") or not isPublicNumber(instanceID) then return nil end
-    local ok, duration = pcall(C_UnitAuras.GetAuraDuration, "player", instanceID)
-    if not ok or duration == nil then return nil end
-    if issecretvalue then
-        local secretOK, secret = pcall(issecretvalue, duration)
-        if not secretOK or secret then return nil end
-    end
-    if issecrettable and type(duration) == "table" then
-        local secretOK, secret = pcall(issecrettable, duration)
-        if not secretOK or secret then return nil end
-    end
-    return duration
-end
 
 do
 -- Intermediate timeline markers (MarkerTimers.lua). The duration is the readable one, else the rule's override, else
@@ -2716,82 +2658,25 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
 end
 end
 
+-- Marker timers (timeline nodes between 0 and 100 %) follow every seen aura of every matching rule.
 local function updateAuraTrackerState(spellID, presence, aura, state, sourceEvent, isBaseline)
-    if not auraTracker.stateManager then return end
     for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
-        local ruleID = rule.id
         local matches = false
-        if ruleID and rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
+        if rule.id and rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
             for _, configuredID in ipairs(rule.spellIDs or {}) do
                 if ns.RuleSpellMatches(rule, configuredID, spellID) then matches = true; break end
             end
         end
         if matches then
-            local instanceID, stacks
-            if aura then
-                local instanceOK
-                instanceID, instanceOK = safeAuraField(aura, "auraInstanceID")
-                if not instanceOK then instanceID = nil end
-                local stacksOK
-                stacks, stacksOK = safeAuraField(aura, "applications")
-                if not stacksOK or not isPublicNumber(stacks) then stacks = nil end
-            end
-            local expiration = state and state.expirationTime or nil
             local duration, permanent
             if aura then
                 local value, durationOK = safeAuraField(aura, "duration")
                 if durationOK and isPublicNumber(value) and value > 0 then duration = value end
                 permanent = durationOK and isPublicNumber(value) and value == 0
             end
-            local auraDurationObjectValue = aura and instanceID and auraDurationObject(instanceID) or nil
-            ns.updateMarkerTimers(rule, spellID, presence, expiration, duration, isBaseline, permanent)
-            auraTracker.stateManager:Update(ruleID, spellID, {
-                presence = presence,
-                instanceID = instanceID or (state and state.auraInstanceID),
-                expirationTime = expiration,
-                duration = duration,
-                icon = auraIconForSpell(spellID),
-                stacks = stacks,
-                source = sourceEvent == "CDM_SIGNAL" and "cdm" or (presence == "active" and "aura" or "unknown"),
-                durationObject = auraDurationObjectValue,
-            }, {
-                baseline = isBaseline == true,
-                beforeExpireEnabled = false, -- every intermediate marker, the old warning included, runs in MarkerTimers
-                warningPercent = rule.beforeExpirePercent,
-            })
+            ns.updateMarkerTimers(rule, spellID, presence, state and state.expirationTime or nil, duration, isBaseline, permanent)
         end
     end
-end
-
-local function queueAuraTrackerUpdate()
-    if not (auraTracker.view and auraTracker.frame) or auraTracker.updatePending then return end
-    auraTracker.updatePending = true
-    C_Timer.After(0, function()
-        auraTracker.updatePending = false
-        if auraTracker.view then auraTracker.view:Update(ns.getAuraTrackerEntries and ns.getAuraTrackerEntries() or {}) end
-    end)
-end
-
-if ns.AuraTrackerState then
-    auraTracker.stateManager = ns.AuraTrackerState.Create({
-        now = function() return GetTime() end,
-        schedule = function(delay, callback)
-            local ok, timer = pcall(C_Timer.NewTimer, delay, callback)
-            return ok and timer or nil
-        end,
-        cancel = function(timer)
-            if timer and type(timer.Cancel) == "function" then pcall(timer.Cancel, timer) end
-        end,
-        emit = function(ruleID, eventKey, context)
-            local rule
-            for _, candidate in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
-                if candidate.id == ruleID then rule = candidate; break end
-            end
-            if rule and context and isPublicNumber(context.spellID) then
-                sayAura(context.spellID, eventKey, "AURA_TRACKER_TIMER", nil, rule)
-            end
-        end,
-    })
 end
 
 local function findAuraRuleByID(ruleID)
@@ -2820,19 +2705,6 @@ local function resolveAuraTrackerSignalSpellID(spellIDs)
         end
     end
     return resolved
-end
-
-local function ensureSealTrackerGroup(config)
-    config.groups = type(config.groups) == "table" and config.groups or {}
-    local first
-    for _, group in pairs(config.groups) do
-        if type(group) == "table" and group.id then first = group; break end
-    end
-    if first then return first end
-    local group = { id = "seals", order = 1, entryIds = {}, point = "CENTER", relativePoint = "CENTER",
-        x = 0, y = 0, size = config.size or 40, spacing = config.spacing or 6 }
-    config.groups.seals = group
-    return group
 end
 
 local function syncAuraTrackerSealRule()
@@ -2866,29 +2738,16 @@ local function syncAuraTrackerSealRule()
     rule.castByAuraID = castsByAura
     ns._Aura.normalizeCastMap(rule)
 
-    if family.includeInTracker == true then
-        local group = ensureSealTrackerGroup(tracker)
-        local included = false
-        for _, id in ipairs(group.entryIds or {}) do
-            if tostring(id) == tostring(rule.id) then included = true; break end
-        end
-        if not included then
-            group.entryIds = type(group.entryIds) == "table" and group.entryIds or {}
-            group.entryIds[#group.entryIds + 1] = tostring(rule.id)
-        end
-    end
     tracker.families = families
-    if auraTracker.view then auraTracker.view:SetConfig(tracker) end
     if ns._Aura.rebuildAuraWatches then ns._Aura.rebuildAuraWatches() end
     C_Timer.After(0, function()
         if ns._Aura.syncAllAuras then ns._Aura.syncAllAuras(true) end
         if optionsFrame and optionsFrame:IsShown() and refreshList then refreshList() end
-        queueAuraTrackerUpdate()
     end)
     return true
 end
 
-local function scanAuraTrackerSeals(nameFilter, includeInTracker)
+local function scanAuraTrackerSeals(nameFilter)
     local familyAPI = ns.AuraTrackerFamily
     if not (familyAPI and WoWraVoxDB and not (InCombatLockdown and InCombatLockdown())) then return 0, "combat-or-unavailable" end
     local _, classFile = UnitClass("player")
@@ -2909,11 +2768,8 @@ local function scanAuraTrackerSeals(nameFilter, includeInTracker)
 
     local tracker = auraTrackerConfig()
     tracker.families = type(tracker.families) == "table" and tracker.families or {}
-    local existingFamily = tracker.families.seals
     local family, added = familyAPI.Sync(tracker.families.seals, candidates, false)
     if family then
-        family.includeInTracker = includeInTracker == nil
-            and existingFamily and existingFamily.includeInTracker == true or includeInTracker == true
         tracker.sealNameFilter = filter ~= "" and filter or tracker.sealNameFilter
         tracker.families.seals = family
         normalizeAuraTrackerData(WoWraVoxDB)
@@ -2921,7 +2777,6 @@ local function scanAuraTrackerSeals(nameFilter, includeInTracker)
         if ns.AuraCDM and type(ns.AuraCDM.RefreshSignals) == "function" then
             pcall(ns.AuraCDM.RefreshSignals)
         end
-        if auraTracker.view then auraTracker.view:SetConfig(auraTrackerConfig()) end
     end
     local familyRule = family and family.ruleID and findAuraRuleByID(family.ruleID)
     local hasUnmapped = false
@@ -2991,329 +2846,12 @@ local function observeSealMappingsFromCDM(spellIDs, active)
     return changed
 end
 
-function ns.getAuraTrackerEntries()
-    local config = auraTrackerConfig()
-    local selected = trackerRuleIDs(config)
-    local entries = {}
-    for ruleID in pairs(selected) do
-        local rule = findAuraRuleByID(ruleID)
-        if rule then
-            local chosen, chosenState
-            local states = auraTracker.stateManager and auraTracker.stateManager:Get(rule.id) or {}
-            for _, spellID in ipairs(rule.spellIDs or {}) do
-                local state = states and states[spellID]
-                if state and (state.presence == "active" or state.presence == "unknown") then
-                    if not chosenState or state.presence == "active" then
-                        chosen, chosenState = spellID, state
-                        if state.presence == "active" then break end
-                    end
-                end
-            end
-            chosen = chosen or rule.spellIDs and rule.spellIDs[1]
-            local state = chosenState or (states and chosen and states[chosen])
-            local presence = state and state.presence or "unknown"
-            entries[#entries + 1] = {
-                id = tostring(rule.id),
-                name = rule.name,
-                icon = chosen and auraIconForSpell(chosen) or nil,
-                active = presence == "active",
-                presence = presence,
-                stacks = state and state.stacks or nil,
-                durationObject = chosen and auraTracker.stateManager
-                    and auraTracker.stateManager:GetDurationObject(rule.id, chosen) or nil,
-                source = state and state.source or "unknown",
-                groupId = nil,
-            }
-        end
-    end
-    table.sort(entries, function(a, b) return a.id < b.id end)
-    return entries
-end
-
-local function saveAuraTrackerLayout(config)
-    if not WoWraVoxDB then return end
-    local tracker = auraTrackerConfig()
-    local source = type(config) == "table" and config or tracker
-    local layout = ns.AuraTrackerView.NormalizeConfig(source)
-    tracker.size, tracker.spacing = layout.size, layout.spacing
-    tracker.groups, tracker.freeIcons = layout.groups, layout.freeIcons
-    tracker.visibilityByEntry = layout.visibilityByEntry
-    if type(source.showCountdown) == "boolean" then tracker.showCountdown = source.showCountdown end
-    if type(source.showName) == "boolean" then tracker.showName = source.showName end
-    if type(source.showStacks) == "boolean" then tracker.showStacks = source.showStacks end
-    WoWraVoxDB.auraTracker = tracker
-    if auraTracker.view then
-        auraTracker.view:SetConfig(tracker)
-        auraTracker.view:Update(ns.getAuraTrackerEntries())
-    end
-    if auraTracker.frame and auraTracker.frame.status then
-        auraTracker.frame.status:SetText(next(trackerRuleIDs(tracker)) and ""
-            or L("Aura tracker is empty. Configure it to add rules."))
-    end
-end
-
-local function createAuraTrackerUI()
-    if auraTracker.frame or not (UIParent and ns.AuraTrackerView) then return end
-    local frame = CreateFrame("Frame", "WoWraVoxAuraTracker", UIParent, "BackdropTemplate")
-    frame:SetSize(560, 286)
-    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    -- Same strata as the WoWraVox window and raised on show, so it never opens behind it; drag the title row to move it.
-    frame:SetFrameStrata("DIALOG")
-    frame:SetToplevel(true)
-    frame:SetClampedToScreen(true)
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
-    frame:SetBackdropColor(0.025, 0.03, 0.04, 0.82)
-    frame:SetBackdropBorderColor(0.52, 0.42, 0.22, 0.75)
-    frame:Hide()
-    auraTracker.frame = frame
-
-    local title = frame:CreateFontString(nil, "OVERLAY", "WoWraVoxFontNormal")
-    title:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -9)
-    title:SetText(L("Aura tracker"))
-    title:SetTextColor(1, 0.82, 0.2)
-
-    -- Drag the window from anywhere that is not a control (empty areas pass the mouse to the window itself).
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
-    frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-    frame:HookScript("OnHide", function(self) self:StopMovingOrSizing() end)
-
-    -- A button sits at `anchor` of `relative`; with relativePoint it hangs off the other side of that button.
-    local function button(text, width, anchor, relative, x, y, relativePoint)
-        local result = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-        result:SetText(L(text))
-        result:SetSize(math.max(width, (result:GetTextWidth() or 0) + 24), 22)
-        result:SetPoint(anchor, relative, relativePoint or anchor, x, y)
-        return result
-    end
-
-    local function setEditing(editing)
-        editing = editing == true
-        if editing and InCombatLockdown and InCombatLockdown() then
-            frame.status:SetText(L("Layout changes are available out of combat."))
-            return false
-        end
-        auraTracker.view:SetEditMode(editing)
-        frame.editButton:SetText(L(editing and "Done" or "Configure"))
-        frame.resetButton:SetShown(editing)
-        frame.countdownCheck:SetShown(editing)
-        frame.nameCheck:SetShown(editing)
-        frame.stacksCheck:SetShown(editing)
-        frame.allSealsButton:SetShown(editing and frame.isPaladin)
-        frame.cdmButton:SetShown(editing)
-        frame.sealFilter:SetShown(editing and frame.manualSealFilter)
-        return true
-    end
-    auraTracker.setEditing = setEditing
-
-    frame.closeButton = button("Close", 52, "TOPRIGHT", frame, -6, -5)
-    frame.closeButton:SetScript("OnClick", function() frame:Hide() end)
-    frame.editButton = button("Configure", 82, "RIGHT", frame.closeButton, -5, 0, "LEFT")
-    frame.editButton:SetScript("OnClick", function()
-        setEditing(not auraTracker.view.editMode)
-    end)
-    frame.resetButton = button("Reset positions", 100, "RIGHT", frame.editButton, -5, 0, "LEFT")
-    frame.resetButton:SetScript("OnClick", function()
-        if InCombatLockdown and InCombatLockdown() then return end
-        local config = auraTrackerConfig()
-        for _, group in pairs(config.groups or {}) do
-            group.x, group.y, group.point, group.relativePoint = nil, nil, nil, nil
-        end
-        for _, item in ipairs(config.freeIcons or {}) do
-            item.x, item.y, item.point, item.relativePoint = nil, nil, nil, nil
-        end
-        saveAuraTrackerLayout(config)
-        if auraTracker.view.ResetPosition then auraTracker.view:ResetPosition() end
-    end)
-    frame.resetButton:Hide()
-
-    frame.content = CreateFrame("Frame", nil, frame)
-    frame.content:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, -68)
-    frame.content:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -6, 6)
-    frame.status = frame:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlightSmall")
-    frame.status:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -35)
-    frame.status:SetPoint("RIGHT", frame, "RIGHT", -12, 0)
-    frame.status:SetHeight(24)
-    frame.status:SetJustifyH("LEFT")
-    frame.status:SetText(L("Aura tracker is empty. Configure it to add rules."))
-
-    local config = auraTrackerConfig()
-    local callbacks = {
-        listRules = function()
-            local result = {}
-            for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
-                result[#result + 1] = { id = tostring(rule.id), name = rule.name or tostring(rule.id) }
-            end
-            return result
-        end,
-        onLayoutChange = function(nextConfig) saveAuraTrackerLayout(nextConfig) end,
-        onAddEntry = function(ruleID)
-            local tracker = auraTrackerConfig()
-            local group = ensureSealTrackerGroup(tracker)
-            group.entryIds = type(group.entryIds) == "table" and group.entryIds or {}
-            for _, id in ipairs(group.entryIds) do if tostring(id) == tostring(ruleID) then return end end
-            for _, item in ipairs(tracker.freeIcons or {}) do if tostring(item.id) == tostring(ruleID) then return end end
-            group.entryIds[#group.entryIds + 1] = tostring(ruleID)
-            saveAuraTrackerLayout(tracker)
-            if ns._Aura.rebuildAuraWatches then ns._Aura.rebuildAuraWatches() end
-            if ns._Aura.syncAllAuras then ns._Aura.syncAllAuras(true) end
-        end,
-        onAddGroup = function()
-            local tracker = auraTrackerConfig()
-            tracker.groups = type(tracker.groups) == "table" and tracker.groups or {}
-            local order = 0
-            for _, group in pairs(tracker.groups) do
-                order = math.max(order, tonumber(group.order) or 0)
-            end
-            local suffix, id = order + 1, nil
-            repeat
-                id = "tracker-group-" .. tostring(suffix)
-                suffix = suffix + 1
-            until tracker.groups[id] == nil
-            tracker.groups[id] = { id = id, order = order + 1, entryIds = {}, point = "CENTER",
-                relativePoint = "CENTER", x = 0, y = 0, size = tracker.size or 40, spacing = tracker.spacing or 6 }
-            saveAuraTrackerLayout(tracker)
-        end,
-        onRemoveEntry = function(ruleID)
-            local tracker = auraTrackerConfig()
-            for _, group in pairs(tracker.groups or {}) do
-                for index = #(group.entryIds or {}), 1, -1 do
-                    if tostring(group.entryIds[index]) == tostring(ruleID) then table.remove(group.entryIds, index) end
-                end
-            end
-            for index = #(tracker.freeIcons or {}), 1, -1 do
-                if tostring(tracker.freeIcons[index].id) == tostring(ruleID) then table.remove(tracker.freeIcons, index) end
-            end
-            if tracker.visibilityByEntry then tracker.visibilityByEntry[tostring(ruleID)] = nil end
-            saveAuraTrackerLayout(tracker)
-            if ns._Aura.rebuildAuraWatches then ns._Aura.rebuildAuraWatches() end
-        end,
-        onDetachEntry = function(ruleID, groupID)
-            local tracker = auraTrackerConfig()
-            local group = tracker.groups and tracker.groups[groupID]
-            if not group then return end
-            for index = #(group.entryIds or {}), 1, -1 do
-                if tostring(group.entryIds[index]) == tostring(ruleID) then table.remove(group.entryIds, index) end
-            end
-            tracker.freeIcons = type(tracker.freeIcons) == "table" and tracker.freeIcons or {}
-            tracker.freeIcons[#tracker.freeIcons + 1] = { id = tostring(ruleID), order = #tracker.freeIcons + 1,
-                point = "CENTER", relativePoint = "CENTER", x = 0, y = 0, size = tracker.size or 40 }
-            saveAuraTrackerLayout(tracker)
-        end,
-        onVisibilityChange = function(ruleID, mode)
-            local tracker = auraTrackerConfig()
-            tracker.visibilityByEntry = type(tracker.visibilityByEntry) == "table" and tracker.visibilityByEntry or {}
-            tracker.visibilityByEntry[tostring(ruleID)] = mode == "dimInactive" and "dimInactive" or nil
-            saveAuraTrackerLayout(tracker)
-        end,
-        onMoveEntry = function(ruleID, direction, groupID)
-            local tracker = auraTrackerConfig()
-            local group = tracker.groups and tracker.groups[groupID]
-            if not group or type(group.entryIds) ~= "table" then return end
-            for index, id in ipairs(group.entryIds) do
-                if tostring(id) == tostring(ruleID) then
-                    local target = index + (direction == "previous" and -1 or 1)
-                    if target >= 1 and target <= #group.entryIds then
-                        group.entryIds[index], group.entryIds[target] = group.entryIds[target], group.entryIds[index]
-                        saveAuraTrackerLayout(tracker)
-                    end
-                    return
-                end
-            end
-        end,
-    }
-    auraTracker.view = ns.AuraTrackerView.Create(frame.content, config, callbacks)
-    auraTracker.view:Update(ns.getAuraTrackerEntries())
-
-    local locale = GetLocale and GetLocale() or ""
-    frame.manualSealFilter = locale ~= "enUS" and locale ~= "deDE"
-    local _, classFile = UnitClass("player")
-    frame.isPaladin = classFile == "PALADIN"
-    -- createEditBox is a local defined further down the file; reach it through ns at run time.
-    frame.sealFilter = ns.createEditBox(frame, 128, 22)
-    frame.sealFilter:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 10, 36)
-    frame.sealFilter:SetText(auraTrackerConfig().sealNameFilter or "")
-    frame.sealFilter:SetTextInsets(5, 5, 0, 0)
-    frame.sealFilter:Hide()
-    frame.allSealsButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.allSealsButton:SetSize(104, 22)
-    frame.allSealsButton:SetPoint("BOTTOMLEFT", frame.sealFilter, "BOTTOMRIGHT", 4, 0)
-    frame.allSealsButton:SetText(L("Add all Seals"))
-    frame.allSealsButton:SetScript("OnClick", function()
-        local filter = frame.manualSealFilter and frame.sealFilter:GetText() or nil
-        local added, status = ns.syncAuraTrackerSeals(filter, true)
-        if frame.manualSealFilter and filter and filter ~= "" then
-            local tracker = auraTrackerConfig()
-            tracker.sealNameFilter = trim(filter)
-        end
-        local message = status == "partially-mapped" and "Seal family added; some mappings await Blizzard CDM evidence."
-            or status == "ready" and added == 0 and "All matching Seals are already added."
-            or status == "ready" and string.format(L("Added %d seal candidates."), added)
-            or status == "unmapped-until-cdm" and "Seal candidates saved; aura mapping waits for Blizzard CDM evidence."
-            or status == "manual-filter-required" and "Enter a localized name filter first."
-            or status == "paladin-only" and "All Seals is available only to Paladins."
-            or status == "combat-or-unavailable" and "Add all Seals after combat."
-            or status == "no-candidates" and "No matching learned Seals found."
-            or string.format(L("Added %d seal candidates."), added)
-        frame.status:SetText(L(message))
-    end)
-    frame.allSealsButton:SetShown(false)
-
-    frame.cdmButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.cdmButton:SetSize(128, 22)
-    frame.cdmButton:SetPoint("LEFT", frame.allSealsButton, "RIGHT", 4, 0)
-    frame.cdmButton:SetText(L("Open Blizzard CDM"))
-    frame.cdmButton:SetScript("OnClick", function()
-        local ok = ns.AuraCDM and ns.AuraCDM.OpenSettings and ns.AuraCDM.OpenSettings()
-        if not ok then frame.status:SetText(L("Blizzard Cooldown Manager is unavailable or combat is active.")) end
-    end)
-    frame.cdmButton:Hide()
-
-    local function displayCheck(key, label, x)
-        local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-        check:SetSize(22, 22)
-        check:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", x, 8)
-        check.text = check:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlightSmall")
-        check.text:SetPoint("LEFT", check, "RIGHT", 1, 0)
-        check.text:SetText(L(label))
-        check:SetChecked(auraTrackerConfig()[key] ~= false)
-        check:SetScript("OnClick", function(self)
-            local nextConfig = auraTrackerConfig()
-            nextConfig[key] = self:GetChecked() == true or self:GetChecked() == 1
-            saveAuraTrackerLayout(nextConfig)
-        end)
-        check:Hide()
-        return check
-    end
-    frame.countdownCheck = displayCheck("showCountdown", "Countdown", 12)
-    frame.nameCheck = displayCheck("showName", "Name", 124)
-    frame.stacksCheck = displayCheck("showStacks", "Stacks", 220)
-    frame.status:SetText(L("Aura tracker is empty. Configure it to add rules."))
-end
-
-function ns.OpenAuraTracker(editMode)
-    if not auraTracker.frame then createAuraTrackerUI() end
-    if not auraTracker.frame or not auraTracker.view or not auraTracker.setEditing then return false end
-    auraTracker.view:SetConfig(auraTrackerConfig())
-    local entries = ns.getAuraTrackerEntries()
-    auraTracker.view:Update(entries)
-    auraTracker.frame.status:SetText(#entries == 0 and L("Aura tracker is empty. Configure it to add rules.") or "")
-    auraTracker.frame:Show()
-    auraTracker.frame:Raise()
-    return auraTracker.setEditing(editMode == true)
-end
-
 auraTracker.config = auraTrackerConfig
-auraTracker.ruleIDs = trackerRuleIDs
 auraTracker.findRule = findAuraRuleByID
 auraTracker.resolveSignalSpellID = resolveAuraTrackerSignalSpellID
 auraTracker.updateState = updateAuraTrackerState
-auraTracker.queueUpdate = queueAuraTrackerUpdate
 auraTracker.observeSealMappings = observeSealMappingsFromCDM
 auraTracker.scanSeals = scanAuraTrackerSeals
-auraTracker.createUI = createAuraTrackerUI
 end
 
 local rebuildAuraWatchesInner
@@ -3324,50 +2862,18 @@ local function rebuildAuraWatches()
 end
 function rebuildAuraWatchesInner()
     wipe(auraWatchBySpellID)
-    local tracker = auraTracker.config()
-    local validRuleIDs = {}
-    for _, rule in ipairs(WoWraVoxDB.auras) do validRuleIDs[tostring(rule.id)] = true end
-    local prunedTrackerLayout = false
-    for _, group in pairs(tracker.groups or {}) do
-        if type(group) == "table" then
-            for index = #(group.entryIds or {}), 1, -1 do
-                if not validRuleIDs[tostring(group.entryIds[index])] then
-                    table.remove(group.entryIds, index)
-                    prunedTrackerLayout = true
-                end
-            end
-        end
-    end
-    for index = #(tracker.freeIcons or {}), 1, -1 do
-        local id = type(tracker.freeIcons[index]) == "table" and tracker.freeIcons[index].id or tracker.freeIcons[index]
-        if not validRuleIDs[tostring(id)] then
-            table.remove(tracker.freeIcons, index)
-            prunedTrackerLayout = true
-        end
-    end
-    for id in pairs(tracker.visibilityByEntry or {}) do
-        if not validRuleIDs[tostring(id)] then
-            tracker.visibilityByEntry[id] = nil
-            prunedTrackerLayout = true
-        end
-    end
-    if prunedTrackerLayout and auraTracker.view then auraTracker.view:SetConfig(tracker) end
-    local trackerIDs = auraTracker.ruleIDs(tracker)
-    local activeRuleIDs = {}
     for _, rule in ipairs(WoWraVoxDB.auras) do
         local applyScreen = ns.getRuleScreenProfile(rule, "apply")
         local expireScreen = ns.getRuleScreenProfile(rule, "expire")
         local beforeExpireScreen = ns.getRuleScreenProfile(rule, "beforeExpire")
         local ruleID = tostring(rule.id)
-        local trackerSelected = trackerIDs[ruleID] == true
         local ruleActive = rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule)
             and (rule.applyEnabled or rule.expireEnabled or rule.applySoundEnabled or rule.expireSoundEnabled
             or rule.beforeExpireEnabled or rule.beforeExpireSoundEnabled
             or ns._Aura.hasApplyCue(rule) or (rule.expireCategory or "none") ~= "none"
-            or applyScreen.enabled or expireScreen.enabled or beforeExpireScreen.enabled or trackerSelected
+            or applyScreen.enabled or expireScreen.enabled or beforeExpireScreen.enabled
             or ns.ruleHasMarkerOutput(rule))
         if ruleActive then
-            activeRuleIDs[ruleID] = true
             local watchIDs = rule.spellIDs
             if ns.SpellRanks then
                 watchIDs = {}
@@ -3383,8 +2889,6 @@ function rebuildAuraWatchesInner()
                 local _, status = getSpellInfo(spellID)
                 if status == "valid" then auraWatchBySpellID[spellID] = true end
             end
-        elseif auraTracker.stateManager then
-            auraTracker.stateManager:ResetRule(rule.id)
         end
     end
 
@@ -3405,7 +2909,7 @@ function rebuildAuraWatchesInner()
             or rule.beforeExpireEnabled or rule.beforeExpireSoundEnabled
             or ns._Aura.hasApplyCue(rule) or (rule.expireCategory or "none") ~= "none"
             or applyScreen.enabled or expireScreen.enabled or beforeExpireScreen.enabled
-            or trackerIDs[tostring(rule.id)] == true or ns.ruleHasMarkerOutput(rule))
+            or ns.ruleHasMarkerOutput(rule))
         if not ruleActive then
             ns._Aura.eventStates[rule] = nil
         else
@@ -3421,11 +2925,6 @@ function rebuildAuraWatchesInner()
     end
     for spellID in pairs(ns._Aura.unreadableBaselines) do
         if not auraWatchBySpellID[spellID] then ns._Aura.unreadableBaselines[spellID] = nil end
-    end
-    if auraTracker.stateManager then
-        for _, rule in ipairs(WoWraVoxDB.auras) do
-            if not activeRuleIDs[tostring(rule.id)] then auraTracker.stateManager:ResetRule(rule.id) end
-        end
     end
     if ns.AuraSoundFallback then ns.AuraSoundFallback.Refresh(WoWraVoxDB.auras) end
 end
@@ -3771,11 +3270,6 @@ processAura = function(spellID, isBaseline, sourceEvent)
     auraTracker.updateState(spellID, "inactive", nil, nil, sourceEvent, isBaseline)
 end
 
-local processAuraImpl = processAura
-processAura = function(spellID, isBaseline, sourceEvent)
-    processAuraImpl(spellID, isBaseline, sourceEvent)
-    auraTracker.queueUpdate()
-end
 ns._Aura.processAura = processAura
 
 -- Cooldown Manager signal for auras hidden in combat (WoWraVoxTooltip.lua reports the icon's linked spell IDs
@@ -3805,14 +3299,12 @@ function ns._Aura.cdmSignal(spellIDs, active)
         else
             auraTracker.updateState(spellID, "inactive", nil, nil, "CDM_SIGNAL", false)
         end
-        auraTracker.queueUpdate()
         return
     end
 
     local state = activeAuras[spellID]
     if active then
         auraTracker.updateState(spellID, "active", nil, nil, "CDM_SIGNAL", false)
-        auraTracker.queueUpdate()
         if state then return end
         activeAuras[spellID] = { expirationTime = 0, fromCDM = true }
         -- the icon is proof of a new application: a hidden read of the same moment must not suppress it
@@ -3823,7 +3315,6 @@ function ns._Aura.cdmSignal(spellIDs, active)
     end
     if not state then
         auraTracker.updateState(spellID, "inactive", nil, nil, "CDM_SIGNAL", false)
-        auraTracker.queueUpdate()
         return
     end
     -- An end counts as an expiry like in processAura: inside the readable expiry window, or for an aura whose
@@ -3838,7 +3329,6 @@ function ns._Aura.cdmSignal(spellIDs, active)
     if ns.AuraSoundFallback then ns.AuraSoundFallback.LogAura(spellID, "cdm-icon-inactive", "CDM_SIGNAL") end
     if expired then sayAura(spellID, "expire", "CDM_SIGNAL") end
     auraTracker.updateState(spellID, "inactive", nil, nil, "CDM_SIGNAL", false)
-    auraTracker.queueUpdate()
 end
 
 local function syncAllAuras(isBaseline)
@@ -6867,7 +6357,6 @@ ns.SkillTracking.addAuraID = function(rule, spellID, castSpellID, auraName)
         if ns._Aura.rebuildAuraWatches then ns._Aura.rebuildAuraWatches() end
         if ns._Aura.syncAllAuras then ns._Aura.syncAllAuras(true) end
         if optionsFrame and optionsFrame:IsShown() and refreshList then refreshList() end
-        queueAuraTrackerUpdate()
         return true
     end
     return addTriggerIDs({ spellID })
@@ -8010,7 +7499,7 @@ auraEditor.batchSealsButton:SetScript("OnClick", function()
 end)
 ns.Skin.Register(auraEditor.batchSealsButton, "button")
 addHelpTooltip(auraEditor.batchSealsButton, L("Add all Seals"),
-    L("Collect all learned Seals into one tracker family. Aura IDs require Blizzard CDM evidence."))
+    L("Collect all learned Seals into one group. Aura IDs require Blizzard CDM evidence."))
 triggerScroll = CreateFrame("ScrollFrame", nil, triggerPanel, "UIPanelScrollFrameTemplate")
 triggerScroll.backdrop = triggerPanel
 triggerChild = CreateFrame("Frame", nil, triggerScroll)
@@ -9404,7 +8893,7 @@ local function buildExportFrame()
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlightSmall")
     frame.hint:SetPoint("TOPLEFT", frame.title, "BOTTOMLEFT", 0, -8)
     frame.hint:SetText(L("Copy this text (Ctrl+C) and send it to a friend.") .. "\n"
-        .. L("Aura tracker layout and seal-family settings stay local and are not included in shared rules."))
+        .. L("Seal-family settings stay local and are not included in shared rules."))
     local scroll, edit = scrollEditBox(frame, 500, 200)
     scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -58)
     scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -32, 48)
@@ -10788,17 +10277,6 @@ function ns.createOptions()
     ns.Skin.Register(optionsFrame.settingsButton, "button")
     if ns.Skin.Data() then optionsFrame.settingsButton:SetBackdrop(nil) end -- the button art replaces the backdrop
 
-    optionsFrame.trackerButton = CreateFrame("Button", nil, header, "BackdropTemplate")
-    optionsFrame.trackerButton:SetSize(36, 36)
-    optionsFrame.trackerButton:SetPoint("RIGHT", optionsFrame.settingsButton, "LEFT", -6, 0)
-    optionsFrame.trackerButton.icon = optionsFrame.trackerButton:CreateTexture(nil, "ARTWORK")
-    optionsFrame.trackerButton.icon:SetTexture("Interface\\Icons\\Spell_Holy_AuraMastery")
-    optionsFrame.trackerButton.icon:SetSize(24, 24)
-    optionsFrame.trackerButton.icon:SetPoint("CENTER")
-    optionsFrame.trackerButton:SetScript("OnClick", function() ns.OpenAuraTracker(true) end)
-    addHelpTooltip(optionsFrame.trackerButton, "Aura tracker", "Open the aura tracker configuration.")
-    ns.Skin.Register(optionsFrame.trackerButton, "button")
-    if ns.Skin.Data() then optionsFrame.trackerButton:SetBackdrop(nil) end
 
     listPanel = CreateFrame("Frame", nil, optionsFrame, "BackdropTemplate")
     listPanel:SetPoint("TOPLEFT", optionsFrame, "TOPLEFT", ns.Layout.MARGIN, -64)
@@ -10876,7 +10354,6 @@ function ns.createOptions()
         if creationView then creationView:Hide() end
     end)
     createPickerPrompt()
-    auraTracker.createUI()
 end
 
 function ns.Profiles.ActivateUI()
@@ -10899,21 +10376,6 @@ function ns.Profiles.ActivateUI()
     lastRenderedCategory = nil
     rebuildAuraWatches()
     syncAllAuras(true)
-    if auraTracker.view then
-        auraTracker.view:SetConfig(auraTracker.config())
-        auraTracker.view:SetEditMode(false)
-        if auraTracker.frame then
-            auraTracker.frame.editButton:SetText(L("Configure"))
-            auraTracker.frame.resetButton:Hide()
-            auraTracker.frame.countdownCheck:Hide()
-            auraTracker.frame.nameCheck:Hide()
-            auraTracker.frame.stacksCheck:Hide()
-            auraTracker.frame.allSealsButton:Hide()
-            auraTracker.frame.cdmButton:Hide()
-            auraTracker.frame.sealFilter:Hide()
-        end
-        auraTracker.view:Update(ns.getAuraTrackerEntries())
-    end
     if optionsFrame and optionsFrame:IsShown() then
         refreshList()
         updateDetails()
@@ -10979,8 +10441,6 @@ function ns.onEvent(self, event, ...)
         SlashCmdList.WOWRAVOXDEBUG = ns.SkillTracking.HandleDebugCommand
         SLASH_WOWRAVOXIMPORT1 = "/wvimport"
         SlashCmdList.WOWRAVOXIMPORT = function() ns.ShareUI.openImport() end
-        SLASH_WOWRAVOXTRACKER1 = "/wvtracker"
-        SlashCmdList.WOWRAVOXTRACKER = function() ns.OpenAuraTracker(true) end
         SLASH_WOWRAVOXTTS1 = "/wvttstest"
         SlashCmdList.WOWRAVOXTTS = function(message)
             local requestedID = trim(message)
