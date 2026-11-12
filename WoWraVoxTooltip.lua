@@ -486,6 +486,15 @@ function ns.AuraCDM.Probe()
                         return obj:GetRemainingDuration()
                     end)
                     lines[#lines + 1] = table.concat(parts, " ")
+                    -- field names of the icon (not functions), to find where this client keeps spell, aura and time
+                    local keys = {}
+                    for key, value in pairs(frame) do
+                        if type(key) == "string" and type(value) ~= "function" and #keys < 40 then
+                            keys[#keys + 1] = key .. ":" .. type(value):sub(1, 1)
+                        end
+                    end
+                    table.sort(keys)
+                    lines[#lines + 1] = "  fields " .. table.concat(keys, " ")
                 end
             end)
         end
