@@ -358,6 +358,48 @@ local function cdmFrameActive(frame)
     return nil
 end
 
+-- Times straight from the Cooldown Manager. In combat its start and remaining time are hidden, but the aura instance
+-- and the full duration of an aura frame stay readable (measured with /wvcdm); a buff bar has no duration of its own,
+-- so it is looked up on the Essential/Utility frame showing the same aura instance.
+local function publicNumber(value)
+    if type(value) ~= "number" or (issecretvalue and issecretvalue(value)) then return nil end
+    return value
+end
+
+local CDM_TIMING_VIEWERS = { "EssentialCooldownViewer", "UtilityCooldownViewer" }
+
+local function frameAuraTiming(frame)
+    local ok, instanceID, duration = pcall(function() return frame.auraInstanceID, frame.cooldownDuration end)
+    if not ok then return nil end
+    duration = publicNumber(duration)
+    return publicNumber(instanceID), duration and duration > 0 and duration or nil
+end
+
+local function cdmFrameInfo(frame)
+    local instanceID, duration = frameAuraTiming(frame)
+    if instanceID and not duration then
+        for _, name in ipairs(CDM_TIMING_VIEWERS) do
+            local viewer = _G[name]
+            local pool = viewer and viewer.itemFramePool
+            if pool and type(pool.EnumerateActive) == "function" then
+                pcall(function()
+                    for other in pool:EnumerateActive() do
+                        if other ~= frame then
+                            local otherID, otherDuration = frameAuraTiming(other)
+                            if otherID == instanceID and otherDuration then
+                                duration = otherDuration
+                                return
+                            end
+                        end
+                    end
+                end)
+            end
+            if duration then break end
+        end
+    end
+    return { instanceID = instanceID, duration = duration }
+end
+
 -- The icon of a buff lights up and goes dark even while the aura behind it is hidden in combat: hand that to the aura
 -- rules (ns._Aura.cdmSignal decides whether it is needed). active = the icon's own alert, nil = read the icon.
 local function signalCDMFrame(frame, active, source)
@@ -367,7 +409,9 @@ local function signalCDMFrame(frame, active, source)
         pcall(ns.SkillTracking.ObserveLearningCDM, ids, active, source or "Cooldown Manager")
     end
     if active == nil then return end
-    if ids and ns._Aura and ns._Aura.cdmSignal then pcall(ns._Aura.cdmSignal, ids, active) end
+    if ids and ns._Aura and ns._Aura.cdmSignal then
+        pcall(ns._Aura.cdmSignal, ids, active, active and cdmFrameInfo(frame) or nil)
+    end
 end
 
 local CDM_STATE_HOOKS = {
@@ -422,9 +466,61 @@ local function hookCDMViewer(name)
     hooksecurefunc(pool, "Acquire", function() hookActiveCDMFrames(pool) end)
 end
 
+-- Essential/Utility frames show an aura when their spell has one (the seals): they carry the aura instance and the
+-- duration. Only frames that were lit by an aura signal; a plain cooldown frame never does.
+local auraFrameLast = setmetatable({}, { __mode = "k" })
+local hookedAuraFrames = setmetatable({}, { __mode = "k" })
+local hookedAuraPools = setmetatable({}, { __mode = "k" })
+
+local function auraFrameReading(frame)
+    local ok, instanceID, setFromAura = pcall(function() return frame.auraInstanceID, frame.wasSetFromAura end)
+    if not ok then return nil end
+    instanceID = publicNumber(instanceID)
+    if instanceID then return true, instanceID end
+    if type(setFromAura) == "boolean" and not (issecretvalue and issecretvalue(setFromAura)) then return setFromAura end
+    return nil
+end
+
+local function auraFrameChanged(frame)
+    local active, instanceID = auraFrameReading(frame)
+    if active == nil then return end
+    local last = auraFrameLast[frame]
+    if not active and not (last and last.active) then return end
+    if last and last.active == active and last.instanceID == instanceID then return end
+    auraFrameLast[frame] = { active = active, instanceID = instanceID }
+    pcall(signalCDMFrame, frame, active, "aura-state")
+end
+
+local function hookAuraFrame(frame)
+    if not frame or hookedAuraFrames[frame] or not hooksecurefunc then return end
+    hookedAuraFrames[frame] = true
+    local active, instanceID = auraFrameReading(frame)
+    if active then auraFrameLast[frame] = { active = true, instanceID = instanceID } end -- primed, not announced
+    local count = 0
+    for key, value in pairs(frame) do
+        if count < 10 and type(key) == "string" and type(value) == "function"
+            and (key:find("Aura") or key:find("ActiveState") or key == "RefreshData") then
+            count = count + 1
+            pcall(hooksecurefunc, frame, key, auraFrameChanged)
+        end
+    end
+end
+
+local function hookAuraViewer(name)
+    local viewer = _G[name]
+    local pool = viewer and viewer.itemFramePool
+    if not (pool and type(pool.EnumerateActive) == "function") then return end
+    local function hookAll() pcall(function() for frame in pool:EnumerateActive() do hookAuraFrame(frame) end end) end
+    hookAll()
+    if hookedAuraPools[pool] or type(pool.Acquire) ~= "function" or not hooksecurefunc then return end
+    hookedAuraPools[pool] = true
+    hooksecurefunc(pool, "Acquire", hookAll)
+end
+
 local function hookCDMViewers()
     hookCDMViewer("BuffIconCooldownViewer")
     hookCDMViewer("BuffBarCooldownViewer")
+    for _, name in ipairs(CDM_TIMING_VIEWERS) do hookAuraViewer(name) end
 end
 
 function ns.AuraCDM.RefreshSignals()

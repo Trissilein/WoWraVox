@@ -3317,8 +3317,47 @@ function ns._Aura.deferExpire(spellID)
     end
 end
 
-function ns._Aura.cdmSignal(spellIDs, active)
+-- Times come from the Cooldown Manager first (info = { instanceID, duration } read off its frames, see
+-- WoWraVoxTooltip.lua); own timers and learned durations are only the fallback when it gives nothing.
+-- The same spell under a new aura instance is a refresh: its nodes count from now.
+function ns._Aura.cdmRestart(spellID)
+    if not ns.markerTimers then return end
+    for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+        if rule.id and rule.enabled then
+            for _, configuredID in ipairs(rule.spellIDs or {}) do
+                if ns.RuleSpellMatches(rule, configuredID, spellID) then
+                    ns.markerTimers:Restart(rule.id, ns.TrackID(rule, spellID), GetTime())
+                    break
+                end
+            end
+        end
+    end
+end
+
+-- True when the Cooldown Manager's own duration says the effect is dark long before its end: replaced or cancelled,
+-- not run out. Only a read duration counts (an estimated one could be wrong).
+function ns._Aura.cdmEndedEarly(spellID)
+    if not ns.markerTimers then return false end
+    for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+        if rule.id and rule.enabled then
+            for _, configuredID in ipairs(rule.spellIDs or {}) do
+                if ns.RuleSpellMatches(rule, configuredID, spellID) then
+                    local run = ns.markerTimers:Get(rule.id, ns.TrackID(rule, spellID))
+                    if run and not run.estimated and run.duration then
+                        return run.start + run.duration - GetTime() > 1.5
+                    end
+                    break
+                end
+            end
+        end
+    end
+    return false
+end
+
+function ns._Aura.cdmSignal(spellIDs, active, info)
     if type(active) ~= "boolean" then return end
+    info = type(info) == "table" and info or {}
+    local timing = info.duration and { duration = info.duration } or nil
     if type(spellIDs) ~= "table" then spellIDs = { spellIDs } end
     auraTracker.observeSealMappings(spellIDs, active)
     local spellID = auraTracker.resolveSignalSpellID(spellIDs)
@@ -3344,11 +3383,18 @@ function ns._Aura.cdmSignal(spellIDs, active)
 
     local state = activeAuras[spellID]
     if active then
-        auraTracker.updateState(spellID, "active", nil, nil, "CDM_SIGNAL", false)
-        if state then return end
+        if state and info.instanceID and state.cdmInstance and state.cdmInstance ~= info.instanceID then
+            state.cdmInstance = info.instanceID
+            ns._Aura.cdmRestart(spellID)
+        end
+        auraTracker.updateState(spellID, "active", timing, nil, "CDM_SIGNAL", false)
+        if state then
+            state.cdmInstance = state.cdmInstance or info.instanceID
+            return
+        end
         -- Lit again right after going dark: a refresh, not a new application (the pending end is dropped).
         local refreshed = ns._Aura.cancelDeferredExpire(spellID)
-        activeAuras[spellID] = { expirationTime = 0, fromCDM = true }
+        activeAuras[spellID] = { expirationTime = 0, fromCDM = true, cdmInstance = info.instanceID }
         if refreshed then return end
         -- the icon is proof of a new application: a hidden read of the same moment must not suppress it
         ns._Aura.unreadableBaselines[spellID] = nil
@@ -3364,7 +3410,7 @@ function ns._Aura.cdmSignal(spellIDs, active)
     -- application this signal announced (no expiry time known).
     local now = GetTime()
     local expired = (state.expirationTime > 0 and now >= state.expirationTime - 0.5 and now <= state.expirationTime + 3)
-        or (state.fromCDM and state.expirationTime <= 0)
+        or (state.fromCDM and state.expirationTime <= 0 and not ns._Aura.cdmEndedEarly(spellID))
     ns._Aura.cancelExpiry(state)
     ns._Aura.clearEventState(spellID)
     activeAuras[spellID] = nil

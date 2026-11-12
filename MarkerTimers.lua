@@ -48,6 +48,8 @@ function MarkerTimers.Create(api)
         -- Same window (same start and duration within a frame): nothing to do.
         if run and math.abs(run.start - start) < 0.05 and (run.duration or -1) == (duration or -1)
             and run.signature == info.signature then
+            -- A guess confirmed by a real reading (or the other way round): same timers, new label.
+            run.estimated, run.info = info.estimated == true, info
             return run
         end
         stop(run)

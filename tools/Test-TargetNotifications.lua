@@ -2533,6 +2533,82 @@ do
     iconB:TriggerAuraRemovedAlert()
     check("CDM (b): the buff in two viewers announces each transition once", #spoken == 2, list(spoken))
 
+    -- (b2) times come from the Cooldown Manager first: its instance and duration drive the nodes, no estimate.
+    do
+        local rule = dpRule()
+        rule.markers = { { key = "beforeExpire", at = 90, anchor = "end", offset = 10 } }
+        setup(rule)
+        deferTimers = {}
+        now = 100
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 7, duration = 30 })
+        local run = ns.markerTimers:Get("dp", DP_ALT)
+        check("CDM time: the duration read from the Cooldown Manager is used, not estimated",
+            run and run.duration == 30 and run.estimated == false and run.start == 100,
+            run and (tostring(run.duration) .. "/" .. tostring(run.estimated) .. "/" .. tostring(run.start)))
+        now = 110
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 7, duration = 30 })
+        check("CDM time: the same aura instance keeps its start", ns.markerTimers:Get("dp", DP_ALT).start == 100)
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 8, duration = 30 })
+        check("CDM time: a new aura instance of the same spell restarts the nodes",
+            ns.markerTimers:Get("dp", DP_ALT).start == 110)
+        -- replaced or cancelled long before the end: dark, but no end announcement
+        now = 115
+        spoken = {}
+        ns._Aura.cdmSignal({ DP_ALT }, false)
+        for _, timer in ipairs(deferTimers) do if not timer.cancelled then timer.callback() end end
+        check("CDM time: dark long before the end is no expiry, no end announcement",
+            list(spoken) == "", list(spoken))
+        -- runs out: dark at the end of the duration
+        setup(rule)
+        deferTimers = {}
+        now = 200
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 9, duration = 30 })
+        now = 230
+        spoken = {}
+        ns._Aura.cdmSignal({ DP_ALT }, false)
+        for _, timer in ipairs(deferTimers) do if not timer.cancelled and not timer.fired then timer.callback() end end
+        check("CDM time: dark at the end of the duration is the expiry", list(spoken) == "expire:408459@CDM_SIGNAL", list(spoken))
+        -- no duration from the Cooldown Manager: the learned one is the fallback and stays marked as estimated
+        setup(rule)
+        deferTimers = {}
+        now = 300
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 10 })
+        local fallback = ns.markerTimers:Get("dp", DP_ALT)
+        check("CDM time: without a Cooldown Manager duration nothing is invented", fallback and fallback.duration == nil
+            or (fallback and fallback.estimated == true), fallback and tostring(fallback.duration))
+        -- the Cooldown Manager frames themselves: a buff bar has no duration, the Essential frame of the same aura does
+        setup(rule)
+        deferTimers = {}
+        now = 400
+        local bar = newIcon(101)
+        bar.auraInstanceID, bar.isActive = 55, true
+        local essential = { cooldownID = 101, auraInstanceID = 55, cooldownDuration = 30, wasSetFromAura = true }
+        function essential:RefreshData() end
+        local plain = { cooldownID = 103, cooldownDuration = 1.5 }
+        function plain:RefreshData() end
+        EssentialCooldownViewer = newViewer({ essential, plain })
+        loadTooltip(nil, { bar })
+        bar:TriggerAuraAppliedAlert()
+        local barRun = ns.markerTimers:Get("dp", DP_ALT)
+        check("CDM time: a buff bar takes the duration from the Essential frame of the same aura instance",
+            barRun and barRun.duration == 30 and barRun.estimated == false, barRun and tostring(barRun.duration))
+        setup(rule)
+        deferTimers = {}
+        essential.auraInstanceID = 56
+        essential:RefreshData()
+        local frameRun = ns.markerTimers:Get("dp", DP_ALT)
+        check("CDM time: an Essential frame lit by an aura signals with its own duration",
+            frameRun and frameRun.duration == 30 and frameRun.estimated == false, frameRun and tostring(frameRun.duration))
+        setup(rule)
+        deferTimers = {}
+        ns.markerTimers:Reset()
+        plain:RefreshData()
+        check("CDM time: a plain cooldown frame never signals", ns.markerTimers:Get("dp", DP_ALT) == nil and #spoken == 0)
+        EssentialCooldownViewer = nil
+        deferTimers = nil
+        now = 0
+    end
+
     -- (c) nothing happens without a matching, enabled rule
     setup(dpRule({ 123 }))
     icon = withIcon(101)
