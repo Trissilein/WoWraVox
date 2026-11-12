@@ -3074,15 +3074,11 @@ local function createAuraTrackerUI()
     title:SetText(L("Aura tracker"))
     title:SetTextColor(1, 0.82, 0.2)
 
-    local dragHandle = CreateFrame("Frame", nil, frame)
-    dragHandle:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
-    dragHandle:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
-    dragHandle:SetHeight(30)
-    dragHandle:EnableMouse(true)
-    dragHandle:RegisterForDrag("LeftButton")
-    dragHandle:SetScript("OnDragStart", function() frame:StartMoving() end)
-    dragHandle:SetScript("OnDragStop", function() frame:StopMovingOrSizing() end)
-    dragHandle:SetFrameLevel(frame:GetFrameLevel())
+    -- Drag the window from anywhere that is not a control (empty areas pass the mouse to the window itself).
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
+    frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    frame:HookScript("OnHide", function(self) self:StopMovingOrSizing() end)
 
     -- A button sits at `anchor` of `relative`; with relativePoint it hangs off the other side of that button.
     local function button(text, width, anchor, relative, x, y, relativePoint)
