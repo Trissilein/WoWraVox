@@ -2468,7 +2468,8 @@ end
 ns._Aura.oneEffectApplyAt = setmetatable({}, { __mode = "k" })
 function ns._Aura.otherTriggerActive(rule, spellID, eventKind)
     if eventKind ~= "apply" and eventKind ~= "expire" then return false end
-    if not rule.oneEffect then return false end
+    -- A deferred CDM end (ns._Aura.expireReplaced) is no end when another trigger of the rule took over meanwhile.
+    if not rule.oneEffect and not (eventKind == "expire" and ns._Aura.expireReplaced) then return false end
     for _, otherID in ipairs(rule.spellIDs) do
         if otherID ~= spellID and activeAuras[otherID] then return true end
     end
@@ -3298,7 +3299,11 @@ function ns._Aura.deferExpire(spellID)
         ok, timer = pcall(C_Timer.NewTimer, 0.6, function()
             fired = true
             ns._Aura.deferredExpire[spellID] = nil
-            if not activeAuras[spellID] then sayAura(spellID, "expire", "CDM_SIGNAL") end
+            if not activeAuras[spellID] then
+                ns._Aura.expireReplaced = true
+                pcall(sayAura, spellID, "expire", "CDM_SIGNAL")
+                ns._Aura.expireReplaced = nil
+            end
         end)
     end
     if fired then return end
