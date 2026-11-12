@@ -3146,7 +3146,10 @@ function ns._Aura.handleCast(unit, castGUID, castSpellID)
                     announced = true
                     -- Own recast = refresh: the timeline nodes count from now even when the aura itself is unreadable.
                     if ns.markerTimers and rule.id then
-                        ns.markerTimers:Restart(rule.id, ns.TrackID(rule, auraID), GetTime())
+                        local trackID = ns.TrackID(rule, auraID)
+                        -- One effect per rule: the cast replaces the others, their pending nodes are void.
+                        if rule.oneEffect then ns.markerTimers:StopOthers(rule.id, trackID) end
+                        ns.markerTimers:Restart(rule.id, trackID, GetTime())
                     end
                     table.insert(identityMatches, tostring(rule.id or "?") .. ":" .. tostring(auraID))
                     if ns._Aura.addonCanSpeak(auraID, rule) then
