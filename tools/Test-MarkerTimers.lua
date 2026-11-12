@@ -121,3 +121,12 @@ run(2027)
 check("nothing at the old 90 %", #fired == 0)
 run(2047)
 check("fires at the new 90 %", #fired == 1)
+
+-- Learned duration of another rank / twin ID of the same spell is used when the exact ID was never seen
+ns.SpellRanks = { FamilyOf = function(id) if id == 1311649 or id == 1311656 then return { 1311649, 1311656 } end end }
+local learnedStore = { [1311656] = 30 }
+local famDuration, famEstimated = ns.MarkerTimers.DurationFor({}, 1311649, nil, learnedStore)
+check("family member's learned duration is used", famDuration == 30 and famEstimated == true)
+check("unrelated spell stays unknown", ns.MarkerTimers.DurationFor({}, 999, nil, learnedStore) == nil)
+check("exact ID still wins", ns.MarkerTimers.DurationFor({}, 1311656, nil, { [1311656] = 12, [1311649] = 30 }) == 12)
+ns.SpellRanks = nil

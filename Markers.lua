@@ -235,14 +235,40 @@ function Markers.Effective(rule, spellID, key)
     if not base then return nil end
     local override = Markers.GetOverride(rule, spellID, key)
     if not override then return base, false end
+    -- off: this spell does not use the node at all (third result true).
+    if override.off then return nil, true, true end
     return { key = key, at = override.at, anchor = override.anchor, offset = override.offset }, true
+end
+
+function Markers.IsOff(rule, spellID, key)
+    local override = Markers.GetOverride(rule, spellID, key)
+    return override ~= nil and override.off == true
+end
+
+-- Removes a node for one spell only (the group node and the other spells keep it). ClearOverride brings it back.
+function Markers.DisableOverride(rule, spellID, key)
+    if spellID == nil or Markers.IsEndpoint(key) or not findMarker(rule, key) then return false end
+    rule.markerOverrides = type(rule.markerOverrides) == "table" and rule.markerOverrides or {}
+    rule.markerOverrides[spellID] = type(rule.markerOverrides[spellID]) == "table" and rule.markerOverrides[spellID] or {}
+    rule.markerOverrides[spellID][key] = { off = true }
+    return true
+end
+
+-- A new node that exists for one spell only: off for every other spell of the rule.
+function Markers.AddOnlyFor(rule, spellID, at)
+    local key = Markers.Add(rule, at)
+    for _, id in ipairs(rule.spellIDs or {}) do
+        if id ~= spellID then Markers.DisableOverride(rule, id, key) end
+    end
+    return key
 end
 
 -- The group's marker list resolved for one spell (a fresh list; the rule is not changed).
 function Markers.ForSpell(rule, spellID)
     local list = {}
     for _, marker in ipairs(rule.markers or {}) do
-        list[#list + 1] = Markers.Effective(rule, spellID, marker.key)
+        local effective = Markers.Effective(rule, spellID, marker.key)
+        if effective then list[#list + 1] = effective end
     end
     return list
 end
@@ -252,7 +278,7 @@ end
 local function editOverride(rule, spellID, key, apply)
     local base = findMarker(rule, key)
     if not base or Markers.IsEndpoint(key) or spellID == nil then return false end
-    local current = Markers.Effective(rule, spellID, key)
+    local current = Markers.Effective(rule, spellID, key) or base
     local temp = { markers = { { key = key, at = current.at, anchor = current.anchor, offset = current.offset } } }
     apply(temp, key)
     local marker = temp.markers[1]

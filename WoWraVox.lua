@@ -155,10 +155,13 @@ ns.Layout.MEMBER_ROW_H = 28 -- trigger / item member rows: 20 px icon + the 8 px
 ns.Layout.refreshListPending = false
 
 -- The window is always maxWidth x maxHeight; on small screens it is scaled down instead of resized.
+-- The user's window scale (70..130 %, Display options) applies on top; it never exceeds what fits on the screen.
 ns.Layout.getWindowScale = function()
     local availableWidth = math.max(1, (UIParent:GetWidth() or ns.Layout.maxWidth) - 24)
     local availableHeight = math.max(1, (UIParent:GetHeight() or ns.Layout.maxHeight) - 24)
-    return math.min(1, availableWidth / ns.Layout.minWidth, availableHeight / ns.Layout.minHeight)
+    local fit = math.min(availableWidth / ns.Layout.minWidth, availableHeight / ns.Layout.minHeight)
+    local wanted = type(WoWraVoxProfilesDB) == "table" and tonumber(WoWraVoxProfilesDB.uiScale) or 1
+    return math.min(fit, math.max(0.7, math.min(1.3, wanted)))
 end
 
 -- Visible column edges / widths for an editor panel of the given width.
@@ -2465,6 +2468,19 @@ function ns.RuleSpellMatches(rule, configuredID, spellID)
     return ns.TriggerTracksRanks(rule, configuredID) and ns.SpellRanks ~= nil and ns.SpellRanks.SameFamily(configuredID, spellID)
 end
 
+-- The configured trigger a seen spell ID belongs to (it may be another rank / twin ID). Timers, learned durations
+-- and per-spell overrides are all keyed by the configured ID, the one the editor shows.
+function ns.TrackID(rule, spellID)
+    local spells = rule and rule.spellIDs or {}
+    for _, configuredID in ipairs(spells) do
+        if configuredID == spellID then return configuredID end
+    end
+    for _, configuredID in ipairs(spells) do
+        if ns.RuleSpellMatches(rule, configuredID, spellID) then return configuredID end
+    end
+    return spellID
+end
+
 -- True when an intermediate timeline node of the rule has some output switched on.
 function ns.ruleHasMarkerOutput(rule)
     for _, marker in ipairs(rule.markers or {}) do
@@ -2489,7 +2505,7 @@ local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
             if matches then
                 -- Applied again (refresh, or recast while the old window still runs): nodes count from now.
                 if eventKind == "apply" and ns.markerTimers and rule.id then
-                    ns.markerTimers:Restart(rule.id, spellID, GetTime())
+                    ns.markerTimers:Restart(rule.id, ns.TrackID(rule, spellID), GetTime())
                 end
                 -- Any timeline marker key: apply, expire, beforeExpire, m1, m2, ...
                 local enabled, message = rule[eventKind .. "Enabled"], rule[eventKind .. "Message"]
@@ -2601,12 +2617,17 @@ end
 
 function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDuration, isBaseline)
     if not (markerTimers and rule and rule.id) or presence == "unknown" then return end
+    local seenID = spellID
+    spellID = ns.TrackID(rule, seenID)
     if presence ~= "active" then
         markerTimers:Update(rule.id, spellID, { active = false })
         return
     end
     local store = learnedDurations()
-    if isPublicNumber(readableDuration) and readableDuration > 0 then ns.MarkerTimers.Learn(store, spellID, readableDuration) end
+    if isPublicNumber(readableDuration) and readableDuration > 0 then
+        ns.MarkerTimers.Learn(store, seenID, readableDuration)
+        ns.MarkerTimers.Learn(store, spellID, readableDuration)
+    end
     local duration, estimated = ns.MarkerTimers.DurationFor(rule, spellID, readableDuration, store)
     local start
     if isPublicNumber(expiration) and expiration > 0 and isPublicNumber(readableDuration) and readableDuration > 0 then
@@ -8264,15 +8285,16 @@ local function buildTimelinePanel()
     end)
     ns.Skin.Register(timeline.addButton, "button")
     ns.Skin.Register(timeline.removeButton, "button")
-    -- Group rules (several spells): a toggle shows one track per spell below the group line.
-    timeline.spellsButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    timeline.spellsButton:SetSize(150, 24)
-    timeline.spellsButton:SetScript("OnClick", function()
+    -- Group rules (several spells): the heading shows the group name; its arrow shows one track per spell.
+    timeline.toggle = CreateFrame("Button", nil, frame)
+    timeline.toggle:SetSize(18, 18)
+    timeline.toggle:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -9)
+    timeline.toggle:SetScript("OnClick", function()
         timeline.showSpells = not timeline.showSpells
         updateDetails()
     end)
-    ns.Skin.Register(timeline.spellsButton, "button")
-    addHelpTooltip(timeline.spellsButton, "Spells", "Shows one track per spell. The group line moves a node for every spell; dragging on a spell's track moves it for that spell only (marked blue). Seconds always belong to that spell's own duration.")
+    addHelpTooltip(timeline.toggle, "Spells", "Shows one track per spell. The group line moves a node for every spell; dragging on a spell's track moves it for that spell only (marked blue). Seconds always belong to that spell's own duration.")
+    timeline.toggle:Hide()
     timeline.relinkButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     timeline.relinkButton:SetSize(120, 24)
     timeline.relinkButton:SetText(L("Link to group"))
@@ -8283,6 +8305,17 @@ local function buildTimelinePanel()
         end
     end)
     ns.Skin.Register(timeline.relinkButton, "button")
+    timeline.offButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    timeline.offButton:SetSize(180, 24)
+    timeline.offButton:SetText(L("Remove from this spell"))
+    timeline.offButton:SetScript("OnClick", function()
+        local rule = selectedAura()
+        if rule and timeline.spellID and ns.Markers.DisableOverride(rule, timeline.spellID, ns.SelectedMarkerKey(rule)) then
+            updateDetails()
+        end
+    end)
+    ns.Skin.Register(timeline.offButton, "button")
+    addHelpTooltip(timeline.offButton, "Remove from this spell", "This spell no longer uses the node; the group and the other spells keep it. It stays visible as a faint copy on this track, where you can link it back.")
     addHelpTooltip(timeline.relinkButton, "Link to group", "This spell has its own timing for the node. Linking it again makes it follow the group node.")
     timeline.spellRows = {}
 
@@ -8446,6 +8479,24 @@ function timeline.spellRowFor(index)
     line:SetPoint("LEFT", row.track, "LEFT", 0, 0)
     line:SetPoint("RIGHT", row.track, "RIGHT", 0, 0)
     row.handles = {}
+    -- Clicking the spell's line adds a node for this spell only (the other spells get it switched off).
+    row.track:EnableMouse(true)
+    row.track:SetScript("OnMouseUp", function(self, button)
+        if button ~= "LeftButton" or not row.spellID then return end
+        local rule = selectedAura()
+        local left, width = self:GetLeft(), self:GetWidth()
+        if not (rule and left and width and width > 0) then return end
+        local x = GetCursorPosition() / self:GetEffectiveScale()
+        saveDetails()
+        local key = ns.Markers.AddOnlyFor(rule, row.spellID, ns.Markers.ClampInner(math.floor((x - left) / width * 1000 + 0.5) / 10))
+        rule[key .. "Enabled"] = true
+        rule[key .. "Message"] = ""
+        ns.normalizeNotificationSettings(rule, "auras")
+        selectedMarkerKey = key
+        timeline.spellID = row.spellID
+        updateDetails()
+    end)
+    addHelpTooltip(row.track, "Spell track", "Click the line to add a node for this spell only. Drag a node to move it for this spell.")
     timeline.spellRows[index] = row
     return row
 end
@@ -8511,10 +8562,19 @@ end
 function timeline.refreshSpellRows(rule)
     local spells = rule and rule.spellIDs or {}
     local multi = #spells > 1
-    timeline.spellsButton:SetShown(multi)
+    timeline.toggle:SetShown(multi)
+    timeline.heading:ClearAllPoints()
     if multi then
         local count = ns.Markers.OverrideCount(rule)
-        timeline.spellsButton:SetText(L("Spells") .. (timeline.showSpells and "  v" or "  >") .. (count > 0 and ("  ·  " .. count) or ""))
+        local texture = timeline.showSpells and "Interface\\Buttons\\UI-MinusButton-Up" or "Interface\\Buttons\\UI-PlusButton-Up"
+        timeline.toggle:SetNormalTexture(texture)
+        timeline.toggle:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight", "ADD")
+        timeline.heading:SetPoint("LEFT", timeline.toggle, "RIGHT", 6, 0)
+        timeline.heading:SetText((rule.name and rule.name ~= "" and rule.name or L("Timeline"))
+            .. (count > 0 and ("  ·  " .. count .. " " .. (count == 1 and L("override") or L("overrides"))) or ""))
+    else
+        timeline.heading:SetPoint("TOPLEFT", timeline.frame, "TOPLEFT", 12, -8)
+        timeline.heading:SetText(L("Timeline"))
     end
     local open = multi and timeline.showSpells == true
     local inGroup = false
@@ -8525,16 +8585,19 @@ function timeline.refreshSpellRows(rule)
     local selectedKey = ns.SelectedMarkerKey(rule)
     for index, spellID in ipairs(open and spells or {}) do
         local row = timeline.spellRowFor(index)
+        row.spellID = spellID
         local y = -(timeline.ROW_TOP + (index - 1) * timeline.ROW_HEIGHT)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", timeline.frame, "TOPLEFT", ns.Layout.PAD + 28, y)
         row:SetPoint("TOPRIGHT", timeline.frame, "TOPRIGHT", ns.Layout.RIGHT - 28, y)
         local duration, estimated = ns.spellDuration(rule, spellID)
         row.name:SetText(ns.spellDisplayName(spellID) .. "  ·  " ..
-            (duration and (formatNumber(duration) .. " s" .. (estimated and "~" or "")) or L("duration unknown")))
+            (duration and ((estimated and "~" or "") .. formatNumber(duration) .. " s") or L("duration unknown")))
         local shownCount = 0
         for _, marker in ipairs(inner) do
-            local effective, overridden = ns.Markers.Effective(rule, spellID, marker.key)
+            local effective, overridden, off = ns.Markers.Effective(rule, spellID, marker.key)
+            -- A node removed for this spell stays visible as a faint copy of the group node (to link it back).
+            if off then effective = marker end
             -- A seconds-before-end node needs this spell's duration; without it the node waits (and is not drawn).
             if effective and not (effective.anchor == "end" and not duration) then
                 shownCount = shownCount + 1
@@ -8550,8 +8613,9 @@ function timeline.refreshSpellRows(rule)
                 local size = selected and 14 or 12
                 handle.tex:SetSize(size, size)
                 handle.border:SetSize(size + 4, size + 4)
-                handle.label:SetText(duration and (formatNumber(duration * at / 100) .. " s") or "? s")
+                handle.label:SetText(off and "" or duration and (formatNumber(duration * at / 100) .. " s") or "? s")
                 handle.top:Hide()
+                handle:SetAlpha(off and 0.4 or 1)
                 handle:SetFrameLevel(row.track:GetFrameLevel() + (selected and 4 or 2))
                 handle:Show()
             end
@@ -8646,7 +8710,8 @@ function ns.refreshTimeline(rule)
     local spellID = timeline.spellID
     local marker = spellID and ns.Markers.Effective(rule, spellID, selected) or findMarker(rule, selected)
     local nodeSelected = marker ~= nil and not ns.Markers.IsEndpoint(selected)
-    timeline.timingLabel:SetText(spellID and ns.spellDisplayName(spellID) or L("Timing"))
+    local off = spellID ~= nil and ns.Markers.IsOff(rule, spellID, selected)
+    timeline.timingLabel:SetText(spellID and (ns.spellDisplayName(spellID) .. (off and ("  ·  " .. L("removed for this spell")) or "")) or L("Timing"))
     timeline.timingLabel:ClearAllPoints()
     timeline.timingLabel:SetPoint("TOPLEFT", timeline.frame, "TOPLEFT", ns.Layout.PAD, -(114 + spellsExtra))
     if nodeSelected then
@@ -8678,12 +8743,14 @@ function ns.refreshTimeline(rule)
     end
     timeline.durationHint:SetText(learnedText)
     -- The property row belongs to the selected node: shown only for an inner node, never as empty fields.
-    for _, region in ipairs({ timeline.timingLabel, timeline.anchorChoice, timeline.valueBox, timeline.valueUnit,
+    timeline.timingLabel:SetShown(nodeSelected)
+    for _, region in ipairs({ timeline.anchorChoice, timeline.valueBox, timeline.valueUnit,
         timeline.durationLabel, timeline.durationBox, timeline.durationHint }) do
-        region:SetShown(nodeSelected)
+        region:SetShown(nodeSelected and not off)
     end
-    -- A group node can be removed on the group line; on a spell's track the node can only be linked back.
+    -- A group node can be removed on the group line; on a spell's track it is removed for that spell only.
     timeline.removeButton:SetShown(nodeSelected and not spellID)
+    timeline.offButton:SetShown(nodeSelected and spellID ~= nil and not off)
     timeline.relinkButton:SetShown(nodeSelected and spellID ~= nil and ns.Markers.GetOverride(rule, spellID, selected) ~= nil)
     timeline.frame:SetHeight((nodeSelected and 146 or 108) + spellsExtra)
 end
@@ -8700,8 +8767,8 @@ function ns.layoutTimeline(y)
     timeline.removeButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
     timeline.relinkButton:ClearAllPoints()
     timeline.relinkButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
-    timeline.spellsButton:ClearAllPoints()
-    timeline.spellsButton:SetPoint("RIGHT", timeline.removeButton, "LEFT", -8, 0)
+    timeline.offButton:ClearAllPoints()
+    timeline.offButton:SetPoint("RIGHT", timeline.relinkButton, "LEFT", -8, 0)
     timeline.track:ClearAllPoints()
     timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -48)
     timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -48)
@@ -9978,6 +10045,32 @@ function ns.createSettingsPanel()
         displayChecks[index] = check
     end
 
+    -- Window scale (shrinks or enlarges the whole window; applied when the slider is released).
+    do
+        local panelWidth = settingsPanel:GetWidth()
+        local scaleX = math.min(340, math.max(ns.Layout.ROW_X, panelWidth - 230))
+        local scaleLabel = createLabel(settingsPanel, "Window scale", "WoWraVoxFontHighlightSmall")
+        scaleLabel:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", scaleX, -48)
+        local scaleValue = createLabel(settingsPanel, "100%", "WoWraVoxFontHighlightSmall")
+        local pending
+        local slider = makeVolumeSlider(settingsPanel, "TOPLEFT", settingsPanel, scaleX, -72, function(value)
+            pending = value
+            scaleValue:SetText(tostring(value) .. "%")
+        end, 70, 130, 5, 150)
+        scaleValue:SetPoint("LEFT", slider, "RIGHT", 8, 0)
+        local current = math.floor((tonumber(WoWraVoxProfilesDB and WoWraVoxProfilesDB.uiScale) or 1) * 100 + 0.5)
+        slider:SetValue(current)
+        scaleValue:SetText(tostring(current) .. "%")
+        slider:HookScript("OnMouseUp", function()
+            if pending and type(WoWraVoxProfilesDB) == "table" then
+                WoWraVoxProfilesDB.uiScale = pending / 100
+                pending = nil
+                ns.applyWindowScale()
+            end
+        end)
+        addHelpTooltip(slider, "Window scale", "Makes the whole window smaller or larger (70 to 130 %). It never grows beyond what fits on your screen. Applied when you release the slider.")
+    end
+
     local profileList = {}
     local function profileDropdown(width, choices, onSelect)
         local dropdown = CreateFrame("Frame", nil, settingsPanel, "UIDropDownMenuTemplate")
@@ -10262,6 +10355,27 @@ ns.Layout.layoutOptionsColumns = function()
     ns.Layout.clampEditorScroll(editorScrollOffset)
 end
 
+-- Applies a changed window scale: new scale, new size limits (the screen is measured in window units), size
+-- clamped to them, top-left corner kept where it was on the screen.
+function ns.applyWindowScale()
+    if not optionsFrame then return end
+    local oldScale = optionsFrame:GetScale()
+    local left, top = optionsFrame:GetLeft(), optionsFrame:GetTop()
+    local scale = ns.Layout.getWindowScale()
+    optionsFrame:SetScale(scale)
+    optionsFrame.maxW = math.max(ns.Layout.minWidth, ((UIParent:GetWidth() or ns.Layout.maxWidth) - 4) / scale)
+    optionsFrame.maxH = math.max(ns.Layout.minHeight, ((UIParent:GetHeight() or ns.Layout.maxHeight) - 4) / scale)
+    if optionsFrame.SetResizeBounds then
+        optionsFrame:SetResizeBounds(ns.Layout.minWidth, ns.Layout.minHeight, optionsFrame.maxW, optionsFrame.maxH)
+    end
+    optionsFrame:SetSize(math.max(ns.Layout.minWidth, math.min(optionsFrame:GetWidth(), optionsFrame.maxW)),
+        math.max(ns.Layout.minHeight, math.min(optionsFrame:GetHeight(), optionsFrame.maxH)))
+    if left and top then
+        optionsFrame:ClearAllPoints()
+        optionsFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left * oldScale / scale, top * oldScale / scale)
+    end
+end
+
 function ns.createOptions()
     optionsFrame = CreateFrame("Frame", "WoWraVoxOptions", UIParent, "BackdropTemplate")
     stylePanel(optionsFrame, 0.035, 0.04, 0.05, false)
@@ -10277,9 +10391,9 @@ function ns.createOptions()
         math.max(ns.Layout.minHeight, math.min(tonumber(db.windowHeight) or ns.Layout.maxHeight, screenH)))
     optionsFrame:SetPoint("CENTER")
     optionsFrame:SetResizable(true)
+    optionsFrame.maxW, optionsFrame.maxH = math.max(ns.Layout.minWidth, screenW), math.max(ns.Layout.minHeight, screenH)
     if optionsFrame.SetResizeBounds then
-        optionsFrame:SetResizeBounds(ns.Layout.minWidth, ns.Layout.minHeight,
-            math.max(ns.Layout.minWidth, screenW), math.max(ns.Layout.minHeight, screenH))
+        optionsFrame:SetResizeBounds(ns.Layout.minWidth, ns.Layout.minHeight, optionsFrame.maxW, optionsFrame.maxH)
     end
     local grip = CreateFrame("Button", nil, optionsFrame)
     grip:SetSize(18, 18)
@@ -10291,15 +10405,35 @@ function ns.createOptions()
     grip:SetScript("OnMouseDown", function(_, button)
         if button ~= "LeftButton" then return end
         -- A centred frame would grow on both sides at half the cursor speed: pin its top-left corner first.
+        -- GetLeft/GetTop and SetPoint offsets both use the window's own scale: pass them through unchanged.
         local left, top = optionsFrame:GetLeft(), optionsFrame:GetTop()
         if left and top then
             optionsFrame:ClearAllPoints()
-            optionsFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT",
-                left * optionsFrame:GetScale() / UIParent:GetScale(), top * optionsFrame:GetScale() / UIParent:GetScale())
+            optionsFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
         end
+        grip.sizing = true
         optionsFrame:StartSizing("BOTTOMRIGHT")
     end)
+    -- The cursor cannot be held at the limits: show when the window sticks to its minimum or maximum size.
+    grip.limit = grip:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlight")
+    grip.limit:SetPoint("BOTTOMRIGHT", grip, "TOPLEFT", 2, 2)
+    grip.limit:SetTextColor(1, 0.35, 0.3)
+    grip.limit:Hide()
+    grip:SetScript("OnUpdate", function(self)
+        if not self.sizing then return end
+        local w, h = optionsFrame:GetWidth(), optionsFrame:GetHeight()
+        local minW, minH, maxW, maxH = ns.Layout.minWidth, ns.Layout.minHeight, optionsFrame.maxW or 1e9, optionsFrame.maxH or 1e9
+        local atMin = w <= minW + 0.5 or h <= minH + 0.5
+        local atMax = w >= maxW - 0.5 or h >= maxH - 0.5
+        self.limit:SetText(atMin and L("Minimum size") or atMax and L("Maximum size") or "")
+        self.limit:SetShown(atMin or atMax)
+        local hit = atMin or atMax
+        self:GetNormalTexture():SetVertexColor(1, hit and 0.35 or 1, hit and 0.3 or 1)
+    end)
     grip:SetScript("OnMouseUp", function()
+        grip.sizing = false
+        grip.limit:Hide()
+        grip:GetNormalTexture():SetVertexColor(1, 1, 1)
         optionsFrame:StopMovingOrSizing()
         if type(WoWraVoxProfilesDB) == "table" then
             WoWraVoxProfilesDB.windowWidth = math.floor(optionsFrame:GetWidth() + 0.5)

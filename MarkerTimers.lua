@@ -137,5 +137,11 @@ function MarkerTimers.DurationFor(rule, spellID, readable, store)
     if override and override > 0 then return override, true end
     local learned = type(store) == "table" and tonumber(store[spellID]) or nil
     if learned and learned > 0 then return learned, true end
+    -- Another rank / twin ID of the same spell may be the one that was seen (and learned).
+    local family = type(store) == "table" and ns.SpellRanks and ns.SpellRanks.FamilyOf and ns.SpellRanks.FamilyOf(spellID)
+    for _, member in ipairs(family or {}) do
+        local value = tonumber(store[member])
+        if value and value > 0 then return value, true end
+    end
     return nil, true
 end

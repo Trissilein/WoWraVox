@@ -461,4 +461,12 @@ ns.Locales.deDE = {
     ["Without {spell} the text stays as you typed it. In a group, {spell} makes one text fit every spell."] = "Ohne {spell} bleibt der Text, wie du ihn getippt hast. In einer Gruppe passt mit {spell} ein Text für jeden Zauber.",
     ["e.g. {spell} gained"] = "z. B. {spell} erhalten", ["e.g. {spell} ended"] = "z. B. {spell} vorbei",
     ["e.g. {spell} ending soon"] = "z. B. {spell} gleich vorbei", ["e.g. {item} ready"] = "z. B. {item} bereit",
+    ["Minimum size"] = "Mindestgröße", ["Maximum size"] = "Maximalgröße",
+    ["override"] = "Override", ["overrides"] = "Overrides",
+    ["Remove from this spell"] = "Für diesen Zauber entfernen", ["removed for this spell"] = "für diesen Zauber entfernt",
+    ["This spell no longer uses the node; the group and the other spells keep it. It stays visible as a faint copy on this track, where you can link it back."] = "Dieser Zauber nutzt den Knoten nicht mehr; Gruppe und andere Zauber behalten ihn. Er bleibt als blasse Kopie auf dieser Spur sichtbar und lässt sich wieder verknüpfen.",
+    ["Spell track"] = "Zauber-Spur",
+    ["Click the line to add a node for this spell only. Drag a node to move it for this spell."] = "Klick auf die Linie legt einen Knoten nur für diesen Zauber an. Ziehen verschiebt ihn nur für diesen Zauber.",
+    ["Window scale"] = "Fenstergröße",
+    ["Makes the whole window smaller or larger (70 to 130 %). It never grows beyond what fits on your screen. Applied when you release the slider."] = "Macht das ganze Fenster kleiner oder größer (70 bis 130 %). Es wird nie größer, als auf deinen Bildschirm passt. Gilt, sobald du den Regler loslässt.",
 }

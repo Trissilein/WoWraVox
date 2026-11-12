@@ -112,3 +112,20 @@ check("removing a node drops its overrides", M.OverrideCount(g) == 1)
 g.spellIDs = { 11 }
 M.PruneOverrides(g)
 check("overrides of removed spells are pruned", g.markerOverrides == nil)
+
+-- Node removed for one spell / created for one spell only
+local h = { spellIDs = { 1, 2, 3 } }
+M.Normalize(h, "auras")
+local hk = M.Add(h, 60)
+M.DisableOverride(h, 2, hk)
+check("off node is not in that spell's list", #M.ForSpell(h, 2) == 2 and #M.ForSpell(h, 1) == 3 and M.IsOff(h, 2, hk))
+check("Effective reports off", select(3, M.Effective(h, 2, hk)) == true and M.Effective(h, 2, hk) == nil)
+M.SetOverrideTiming(h, 2, hk, "percent", 40)
+check("editing an off node switches it on again", not M.IsOff(h, 2, hk) and M.Effective(h, 2, hk).at == 40)
+M.DisableOverride(h, 2, hk)
+M.ClearOverride(h, 2, hk)
+check("re-link restores a removed node", #M.ForSpell(h, 2) == 3)
+local only = M.AddOnlyFor(h, 3, 80)
+check("node for one spell only", #M.ForSpell(h, 3) == 4 and #M.ForSpell(h, 1) == 3 and #M.ForSpell(h, 2) == 3)
+M.Remove(h, only)
+check("removing the group node drops the off entries", M.OverrideCount(h) == 0)
