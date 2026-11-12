@@ -447,6 +447,59 @@ function ns.AuraCDM.RefreshSignals()
     return count
 end
 
+-- /wvcdm: what the lit buff icons of the Cooldown Manager expose right now, readable or SECRET. Run it in and out of
+-- combat to see whether times can be taken from the icons.
+local function probeValue(value)
+    if issecretvalue and issecretvalue(value) then return "SECRET" end
+    return tostring(value)
+end
+
+function ns.AuraCDM.Probe()
+    local lines = { "combat=" .. tostring(InCombatLockdown and InCombatLockdown()) }
+    for _, name in ipairs({ "BuffIconCooldownViewer", "BuffBarCooldownViewer" }) do
+        local viewer = _G[name]
+        local pool = viewer and viewer.itemFramePool
+        if pool and type(pool.EnumerateActive) == "function" then
+            pcall(function()
+                for frame in pool:EnumerateActive() do
+                    local ids = cdmSpellIDs(frame)
+                    local parts = { name:sub(1, 8), "ids=" .. (ids and table.concat(ids, "/") or "?") }
+                    local function add(label, fn)
+                        local ok, value = pcall(fn)
+                        parts[#parts + 1] = label .. "=" .. (ok and probeValue(value) or "error")
+                    end
+                    add("active", function() return frame.isActive end)
+                    add("inst", function() return frame.auraInstanceID end)
+                    local cd = frame.Cooldown or frame.cooldown
+                    if cd and type(cd.GetCooldownTimes) == "function" then
+                        add("cdStart", function() return (cd:GetCooldownTimes()) end)
+                        add("cdDur", function() return select(2, cd:GetCooldownTimes()) end)
+                    else
+                        parts[#parts + 1] = "cooldown=" .. (cd and "noTimes" or "none")
+                    end
+                    add("durObj", function()
+                        local obj = C_UnitAuras and C_UnitAuras.GetAuraDuration and C_UnitAuras.GetAuraDuration("player", frame.auraInstanceID)
+                        return obj and "yes" or "nil"
+                    end)
+                    add("remain", function()
+                        local obj = C_UnitAuras.GetAuraDuration("player", frame.auraInstanceID)
+                        return obj:GetRemainingDuration()
+                    end)
+                    lines[#lines + 1] = table.concat(parts, " ")
+                end
+            end)
+        end
+    end
+    return lines
+end
+
+if SlashCmdList then
+    SLASH_WOWRAVOXCDM1 = "/wvcdm"
+    SlashCmdList.WOWRAVOXCDM = function()
+        for _, line in ipairs(ns.AuraCDM.Probe()) do print("|cff66ccffWVX CDM|r " .. line) end
+    end
+end
+
 hookCDMViewers()
 local cdmLoader = CreateFrame("Frame")
 cdmLoader:RegisterEvent("PLAYER_ENTERING_WORLD")
