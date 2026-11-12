@@ -704,7 +704,7 @@ local function newSkillRule(spellID, name, icon)
         icon = icon,
         enabled = true,
         alertCategory = "none",
-        triggerType = "offCooldown",
+        triggerType = "cooldown",
         readyEnabled = true,
         message = (name or "Spell") .. " " .. L("ready"),
         screenProfiles = { ready = ns.newScreenProfile(false, "") },
@@ -767,6 +767,7 @@ end
 
 function ns.normalizeScreenProfile(raw, fallbackEnabled, fallbackText, settings)
     local profile = type(raw) == "table" and raw or {}
+    settings = type(settings) == "table" and settings or (type(WoWraVoxDB) == "table" and WoWraVoxDB.settings) or {}
     if profile.enabled == nil then profile.enabled = fallbackEnabled == true end
     profile.enabled = profile.enabled == true
     if type(profile.text) ~= "string" then profile.text = type(fallbackText) == "string" and fallbackText or "" end
@@ -812,6 +813,7 @@ function ns.normalizeRuleScreenProfiles(rule, category, settings)
     else
         rule.screenProfiles.ready = ns.normalizeScreenProfile(
             rule.screenProfiles.ready, rule.screenEnabled, rule.screenText, settings)
+        rule.screenProfiles.used = ns.normalizeScreenProfile(rule.screenProfiles.used, false, "", settings)
         rule.screenEnabled = nil
         rule.screenText = nil
     end
@@ -823,10 +825,28 @@ function ns.normalizeRuleScreenProfiles(rule, category, settings)
     end
 end
 
+-- "Goes on Cooldown" and "Comes off Cooldown" became one "cooldown" trigger with two ends: Start (used) and Ready.
+-- A former "Goes on Cooldown" rule moves its ready output to the Start end. Idempotent.
+function ns.migrateCooldownTrigger(rule)
+    if rule.triggerType == "onCooldown" then
+        rule.usedEnabled = rule.readyEnabled ~= false
+        rule.usedMessage = type(rule.message) == "string" and rule.message or ""
+        for _, suffix in ipairs({ "SoundEnabled", "SoundMediaName", "SoundKitID", "SoundChannel" }) do
+            rule["used" .. suffix] = rule["ready" .. suffix]
+        end
+        rule.screenProfiles = type(rule.screenProfiles) == "table" and rule.screenProfiles or {}
+        rule.screenProfiles.used = rule.screenProfiles.ready or ns.newScreenProfile(rule.screenEnabled == true, rule.screenText or "")
+        rule.screenProfiles.ready = nil
+        rule.readyEnabled, rule.message, rule.readySoundEnabled = false, "", false
+        rule.screenEnabled, rule.screenText = false, ""
+    end
+    if rule.triggerType == "onCooldown" or rule.triggerType == "offCooldown" then rule.triggerType = "cooldown" end
+end
+
 function ns.normalizeNotificationSettings(rule, category)
     rule.alertCategory = NOTIFICATION_CUE_ALIASES[rule.alertCategory] or "none"
     if category == "auras" then rule.expireCategory = NOTIFICATION_CUE_ALIASES[rule.expireCategory] or "none" end
-    local soundEvents = category == "auras" and { "apply", "expire", "beforeExpire" } or { "ready" }
+    local soundEvents = category == "auras" and { "apply", "expire", "beforeExpire" } or { "ready", "used" }
     for _, eventKey in ipairs(soundEvents) do
         local mediaField = eventKey .. "SoundMediaName"
         local mediaName = rule[mediaField]
@@ -857,6 +877,12 @@ function ns.normalizeNotificationSettings(rule, category)
         rule.readySoundEnabled = rule.readySoundEnabled == true
         rule.readySoundKitID = tonumber(rule.readySoundKitID) or DEFAULT_NOTIFICATION_SOUND_KIT
         rule.readySoundChannel = NOTIFICATION_SOUND_CHANNEL_SET[rule.readySoundChannel] and rule.readySoundChannel or "Master"
+        -- Start of the cooldown (timeline 0 %): off unless switched on.
+        rule.usedEnabled = rule.usedEnabled == true
+        rule.usedMessage = type(rule.usedMessage) == "string" and rule.usedMessage or ""
+        rule.usedSoundEnabled = rule.usedSoundEnabled == true
+        rule.usedSoundKitID = tonumber(rule.usedSoundKitID) or DEFAULT_NOTIFICATION_SOUND_KIT
+        rule.usedSoundChannel = NOTIFICATION_SOUND_CHANNEL_SET[rule.usedSoundChannel] and rule.usedSoundChannel or "Master"
     end
     -- Spell ranks (SpellRanks.lua): on by default in WoW Forever, where spells come in ranks.
     if category == "skills" then
@@ -1268,6 +1294,7 @@ local function initializeDatabase()
         ns.Profiles.NormalizeRuleSpecializations(rule)
         rule.spellID = tonumber(rule.spellID) or 0
         rule.name = type(rule.name) == "string" and rule.name or ("Spell " .. tostring(rule.spellID))
+        ns.migrateCooldownTrigger(rule)
         ns.SkillTracking.NormalizeRule(rule)
         rule.message = type(rule.message) == "string" and rule.message or ""
         rule.enabled = rule.enabled ~= false
@@ -1314,6 +1341,7 @@ function ns.NormalizeAllProfiles()
                             ns._Aura.normalizeCategoryMap(rule)
                         end
                         if category == "items" then ns.normalizeItemRule(rule) end
+                        if category == "skills" then ns.migrateCooldownTrigger(rule) end
                         ns.normalizeNotificationSettings(rule, category)
                         ns.normalizeRuleScreenProfiles(rule, category, data.settings)
                         if category == "skills" then ns.SkillTracking.NormalizeRule(rule) end
@@ -2485,7 +2513,7 @@ end
 function ns.ruleHasMarkerOutput(rule)
     for _, marker in ipairs(rule.markers or {}) do
         local key = marker.key
-        if key ~= "apply" and key ~= "expire" and key ~= "ready" then
+        if not ns.Markers.IsEndpoint(key) then
             local profile = type(rule.screenProfiles) == "table" and rule.screenProfiles[key] or nil
             if rule[key .. "Enabled"] or rule[key .. "SoundEnabled"] or (profile and profile.enabled) then return true end
         end
@@ -2616,10 +2644,29 @@ function ns.markerSignature(rule, markers)
     return table.concat(parts, ",") .. "|" .. tostring(rule.durationOverride)
 end
 
-function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDuration, isBaseline)
+-- True when every trigger of the group was seen without a duration (a stance, a form, a permanent buff) and the
+-- user set none: such a group has nothing to time, the editor shows Start and End without a timeline.
+function ns.ruleWithoutDuration(rule)
+    if not (rule and type(rule.spellIDs) == "table" and #rule.spellIDs > 0) or tonumber(rule.durationOverride) then return false end
+    local store = learnedDurations()
+    if not store then return false end
+    for _, id in ipairs(rule.spellIDs) do
+        if store[id] ~= 0 then return false end
+    end
+    return true
+end
+
+function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDuration, isBaseline, permanent)
     if not (markerTimers and rule and rule.id) or presence == "unknown" then return end
     local seenID = spellID
     spellID = ns.TrackID(rule, seenID)
+    -- Seen without a duration: remembered as 0 (never overwrites a real duration learned for this ID).
+    if permanent and presence == "active" then
+        local store = learnedDurations()
+        for _, id in ipairs({ seenID, spellID }) do
+            if store and not (tonumber(store[id]) and store[id] > 0) then store[id] = 0 end
+        end
+    end
     if presence ~= "active" then
         markerTimers:Update(rule.id, spellID, { active = false })
         return
@@ -2671,13 +2718,14 @@ local function updateAuraTrackerState(spellID, presence, aura, state, sourceEven
                 if not stacksOK or not isPublicNumber(stacks) then stacks = nil end
             end
             local expiration = state and state.expirationTime or nil
-            local duration
+            local duration, permanent
             if aura then
                 local value, durationOK = safeAuraField(aura, "duration")
                 if durationOK and isPublicNumber(value) and value > 0 then duration = value end
+                permanent = durationOK and isPublicNumber(value) and value == 0
             end
             local auraDurationObjectValue = aura and instanceID and auraDurationObject(instanceID) or nil
-            ns.updateMarkerTimers(rule, spellID, presence, expiration, duration, isBaseline)
+            ns.updateMarkerTimers(rule, spellID, presence, expiration, duration, isBaseline, permanent)
             auraTracker.stateManager:Update(ruleID, spellID, {
                 presence = presence,
                 instanceID = instanceID or (state and state.auraInstanceID),
@@ -4120,6 +4168,11 @@ function ns.checkItemMember(rule, member)
             }
             ns.setItemState(rule, key, state)
             ns.logItemDecision(rule, "active", "cycle-start", slotID, reading.source, member)
+            -- Start (timeline 0 %): only a use seen as it happened, not a cooldown found running or a swap lockout.
+            if not state.notified and now - reading.startTime < 1.5 then
+                notifyRule(rule, "used", rule.usedEnabled and rule.usedMessage or "", nil, "ITEM_COOLDOWN_START", "onCooldown",
+                    ns.itemContext(itemID, slotID))
+            end
         else
             state.source = reading.source
         end
@@ -4217,7 +4270,11 @@ end
 ns.SkillTracking.Configure(
     function(rule) return ns.Profiles and ns.Profiles.RuleMatchesCurrentSpecialization(rule) end,
     function(rule, cause, sourceEvent)
-        notifyRule(rule, "ready", rule.message, rule.spellID, sourceEvent, cause)
+        if cause == "onCooldown" then
+            notifyRule(rule, "used", rule.usedEnabled and rule.usedMessage or "", rule.spellID, sourceEvent, cause)
+        else
+            notifyRule(rule, "ready", rule.message, rule.spellID, sourceEvent, cause)
+        end
     end,
     L,
     function(spellID, name) if ns.AddLearnedAuraRule then ns.AddLearnedAuraRule(spellID, name) end end,
@@ -4848,6 +4905,12 @@ end
 
 function ns.ApplyLearnedTrigger(rule, triggerType)
     if not (rule and triggerType) then return end
+    -- Learning still reports the two ends separately; a learned start switches the Start output on.
+    if triggerType == "onCooldown" then
+        rule.usedEnabled = true
+        if (rule.usedMessage or "") == "" then rule.usedMessage = rule.name or "" end
+    end
+    if triggerType == "onCooldown" or triggerType == "offCooldown" then triggerType = "cooldown" end
     local valid = false
     for _, choice in ipairs(ns.SkillTracking.triggerTypes) do
         if choice.value == triggerType then valid = true; break end
@@ -5999,42 +6062,69 @@ local function layoutSharedEditor(isAura)
     local voiceY
     local voiceExpanded = ns.Layout.isPanelExpanded(auraEditor.voice)
     local voiceHeight = voiceExpanded and 118 or 34
+    local panels = ns.notificationPanels
+    local allPanels = { panels.apply, panels.expire, panels.beforeExpire, panels.ready, panels.used }
+    -- Panels under the timeline join its box (no top edge); standing alone they get their edge back.
+    local function setTopEdge(panel, shown)
+        panel.frame.lines[1]:SetShown(shown)
+        panel.frame.corners[1]:SetShown(shown)
+        panel.frame.corners[2]:SetShown(shown)
+    end
+    local function showOnly(list)
+        for _, candidate in ipairs(allPanels) do
+            local keep = false
+            for _, wanted in ipairs(list) do if wanted == candidate then keep = true end end
+            if not keep then ns.setNotificationPanelShown(candidate, false) end
+        end
+    end
+    -- Panels stacked without a timeline (an effect without a duration, a single-event spell trigger).
+    local function layoutStack(list)
+        if ns.timeline.frame then ns.timeline.frame:Hide() end
+        if ns.timeline.tabBar then ns.timeline.tabBar:Hide() end
+        showOnly(list)
+        local y = messageY
+        for _, panel in ipairs(list) do
+            setTopEdge(panel, true)
+            ns.setNotificationPanelShown(panel, true)
+            layoutNotificationPanel(panel, y)
+            y = y - panel.frame:GetHeight() - 6
+        end
+        return y
+    end
     -- One box: tabs on its top edge, the timeline strip, then the selected node's fields, no gaps between.
-    -- Aura groups, item rules and "comes off cooldown" spell rules use it; other spell triggers keep the plain panel.
     local function layoutTimelineBox(rule)
         local tabsY = messageY - 12
         local tabBar = ns.timeline.tabBar
         tabBar:ClearAllPoints()
         tabBar:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", ns.Layout.PAD, tabsY)
         tabBar:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", ns.Layout.RIGHT, tabsY)
-        tabBar:SetFrameLevel(ns.notificationPanels.apply.frame:GetFrameLevel() + 10)
+        tabBar:SetFrameLevel(panels.apply.frame:GetFrameLevel() + 10)
         tabBar:Show()
         local timelineY = tabsY - 30
         local panelY = timelineY - ns.layoutTimeline(timelineY)
         local key = ns.SelectedMarkerKey(rule)
-        local panels = ns.notificationPanels
         local panel = key == "apply" and panels.apply or key == "expire" and panels.expire
-            or key == "ready" and panels.ready or panels.beforeExpire
-        for _, candidate in ipairs({ panels.apply, panels.expire, panels.beforeExpire, panels.ready }) do
-            if candidate ~= panel then ns.setNotificationPanelShown(candidate, false) end
-        end
-        -- The ready panel joins the timeline box: no top edge of its own.
-        local joinedEdge = panels.ready.frame.lines[1]
-        joinedEdge:SetShown(false)
-        panels.ready.frame.corners[1]:SetShown(false)
-        panels.ready.frame.corners[2]:SetShown(false)
+            or key == "ready" and panels.ready or key == "used" and panels.used or panels.beforeExpire
+        showOnly({ panel })
+        setTopEdge(panel, false)
         ns.setNotificationPanelShown(panel, true)
         layoutNotificationPanel(panel, panelY)
         return panelY - panel.frame:GetHeight() - 12
     end
-    local timelineSkill = isSkill and selectedSkillRule and selectedSkillRule.triggerType == "offCooldown"
+    -- Which rules get a timeline: aura groups with a duration (or with nodes already), item rules and spell rules with
+    -- the Cooldown trigger. Effects without a duration and single-event spell triggers keep plain stacked panels.
+    local timelineSkill = isSkill and selectedSkillRule and selectedSkillRule.triggerType == "cooldown"
     if isAura then
         auraEditor.skillTriggerLabel:Hide()
         auraEditor.skillTriggerDropdown:Hide()
         auraEditor.skillLearnButton:SetShown(selectedAura() ~= nil and selectedAura().builtin ~= true)
         auraEditor.skillLearningStatus:Hide()
-        ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
-        voiceY = layoutTimelineBox(selectedAura())
+        local rule = selectedAura()
+        if ns.ruleWithoutDuration(rule) and #ns.Markers.Intermediate(rule) == 0 then
+            voiceY = layoutStack({ panels.apply, panels.expire }) - 6
+        else
+            voiceY = layoutTimelineBox(rule)
+        end
     else
         auraEditor.skillTriggerLabel:ClearAllPoints()
         auraEditor.skillTriggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -22)
@@ -6049,21 +6139,10 @@ local function layoutSharedEditor(isAura)
         auraEditor.skillTriggerDropdown:SetShown(isSkill)
         auraEditor.skillLearnButton:SetShown(isSkill)
         auraEditor.skillLearningStatus:SetShown(isSkill)
-        ns.setNotificationPanelShown(ns.notificationPanels.apply, false)
-        ns.setNotificationPanelShown(ns.notificationPanels.expire, false)
-        ns.setNotificationPanelShown(ns.notificationPanels.beforeExpire, false)
         if isItem or timelineSkill then
             voiceY = layoutTimelineBox(isItem and selectedItemRule or selectedSkillRule)
         else
-            if ns.timeline.frame then ns.timeline.frame:Hide() end
-            if ns.timeline.tabBar then ns.timeline.tabBar:Hide() end
-            ns.setNotificationPanelShown(ns.notificationPanels.ready, true)
-            local readyFrame = ns.notificationPanels.ready.frame
-            readyFrame.lines[1]:SetShown(true)
-            readyFrame.corners[1]:SetShown(true)
-            readyFrame.corners[2]:SetShown(true)
-            layoutNotificationPanel(ns.notificationPanels.ready, messageY)
-            voiceY = messageY - ns.notificationPanels.ready.frame:GetHeight() - 6
+            voiceY = layoutStack({ panels.ready })
         end
     end
     auraEditor.voicePanel:ClearAllPoints()
@@ -7059,6 +7138,7 @@ function saveDetails()
         if readyRule and ruleNameBox then
             readyRule.name = trim(ruleNameBox:GetText())
             saveNotificationPanel(ns.notificationPanels.ready, readyRule, "ready")
+            saveNotificationPanel(ns.notificationPanels.used, readyRule, "used")
             local nodePanel = ns.notificationPanels.beforeExpire
             if nodePanel.loadedKey and not ns.Markers.IsEndpoint(nodePanel.loadedKey) and ns.findMarker(readyRule, nodePanel.loadedKey) then
                 saveNotificationPanel(nodePanel, readyRule, nodePanel.loadedKey)
@@ -7245,6 +7325,7 @@ function updateDetails()
             end
         end
         loadNotificationPanel(ns.notificationPanels.ready, readyRule, "ready")
+        loadNotificationPanel(ns.notificationPanels.used, readyRule, "used")
         local nodeKey = ns.SelectedMarkerKey(readyRule)
         local nodePanel = ns.notificationPanels.beforeExpire
         nodePanel.loadedKey = nil
@@ -8239,6 +8320,7 @@ local function markerTitle(marker, rule)
     if marker.key == "apply" then return L("Start") end
     if marker.key == "expire" then return L("End") end
     if marker.key == "ready" then return L("Ready") end
+    if marker.key == "used" then return L("Start") end
     local number = markerNumber(rule or ns.timelineRule(), marker.key)
     return L("Node") .. " " .. tostring(number or "?") .. "  ·  " .. timingText(marker)
 end
@@ -8769,7 +8851,7 @@ function ns.refreshTimeline(rule)
             if seconds then labelText = labelText .. "  ·  -" .. formatNumber(duration - seconds) .. " s" end
         end
         handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
-            or marker.key == "ready" and L("Ready") or labelText)
+            or marker.key == "ready" and L("Ready") or marker.key == "used" and L("Start") or labelText)
         if isSelected then
             handle.tex:SetVertexColor(1, 0.82, 0.2)
         elseif endpoint then
@@ -8798,7 +8880,7 @@ function ns.refreshTimeline(rule)
         local tab = tabFor(index)
         tab.key, tab.selected = marker.key, isSelected
         tab.text:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
-            or marker.key == "ready" and L("Ready") or (tostring(number) .. "  ·  " .. timingText(marker)))
+            or marker.key == "ready" and L("Ready") or marker.key == "used" and L("Start") or (tostring(number) .. "  ·  " .. timingText(marker)))
         tab:SetWidth(math.max(70, tab.text:GetStringWidth() + 40))
         tab:ClearAllPoints()
         tab:SetPoint("BOTTOMLEFT", previousTab or timeline.tabBar, previousTab and "BOTTOMRIGHT" or "BOTTOMLEFT",
@@ -8919,6 +9001,7 @@ local function buildMessageControls()
     local expirePanel = buildAuraNotificationPanel("expire", L("End"))
     buildAuraNotificationPanel("beforeExpire", L("Node"))
     local readyPanel = buildAuraNotificationPanel("ready", "Ready")
+    local usedPanel = buildAuraNotificationPanel("used", L("Start"))
     applyEnabledCheck, applyMessageBox, testApplyButton = applyPanel.ttsEnabled, applyPanel.ttsMessage, applyPanel.ttsTest
     expireEnabledCheck, expireMessageBox, testExpireButton = expirePanel.ttsEnabled, expirePanel.ttsMessage, expirePanel.ttsTest
     readyLabel, readyMessageBox, testItemButton = readyPanel.ttsLabel, readyPanel.ttsMessage, readyPanel.ttsTest
@@ -8972,9 +9055,10 @@ local function buildMessageControls()
     ns.addPlaceholder(expirePanel.ttsMessage, "e.g. {spell} ended")
     ns.addPlaceholder(ns.notificationPanels.beforeExpire.ttsMessage, "e.g. {spell} ending soon")
     ns.addPlaceholder(readyPanel.ttsMessage, "e.g. {item} ready")
-    for _, key in ipairs({ "apply", "expire", "beforeExpire", "ready" }) do
+    ns.addPlaceholder(usedPanel.ttsMessage, "e.g. {item} used")
+    for _, key in ipairs({ "apply", "expire", "beforeExpire", "ready", "used" }) do
         local screenBox = ns.notificationPanels[key].screen and ns.notificationPanels[key].screen.text
-        local hints = { apply = "e.g. {spell} gained", expire = "e.g. {spell} ended", ready = "e.g. {item} ready" }
+        local hints = { apply = "e.g. {spell} gained", expire = "e.g. {spell} ended", ready = "e.g. {item} ready", used = "e.g. {item} used" }
         if screenBox then ns.addPlaceholder(screenBox, hints[key] or "e.g. {spell} ending soon") end
     end
     -- Source hint ("Choose an equipped item" / "Spellbook · ID n") sits in the Ready heading row, right-aligned.

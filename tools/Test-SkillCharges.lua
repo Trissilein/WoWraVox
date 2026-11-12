@@ -335,3 +335,18 @@ cooldownData[3002] = nil
 scan(rules, "SPELL_UPDATE_COOLDOWN")
 check("ended cooldown reports nil", #cycles == 2 and cycles[2].rule == "cyc" and cycles[2].start == nil)
 tracking.cycle = nil
+
+
+-- The merged Cooldown trigger announces both ends: Start (onCooldown) and Ready (offCooldown).
+reset()
+local both = makeRule("both", 4001, "cooldown")
+rules = { both }
+scan(rules, "BASELINE")
+now = 5
+cooldownData[4001] = { startTime = 5, duration = 20, isEnabled = true, isOnGCD = false }
+scan(rules, "SPELL_UPDATE_COOLDOWN")
+check("Cooldown trigger announces the start", #notices == 1 and notices[1].cause == "onCooldown")
+now = 26
+cooldownData[4001] = nil
+scan(rules, "SPELL_UPDATE_COOLDOWN")
+check("Cooldown trigger announces ready", #notices == 2 and notices[2].cause == "offCooldown")

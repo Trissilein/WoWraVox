@@ -13,8 +13,7 @@ tracking.debugEnabled = false
 tracking.maxDebugLines = 180
 tracking.maxLearningResults = 40
 tracking.triggerTypes = {
-    { value = "offCooldown", label = "Comes off Cooldown", help = "Announce when this spell's genuine cooldown ends; ignore the global cooldown. WoW may hide cooldown data during combat, so this trigger can miss the event.", kind = "cooldown" },
-    { value = "onCooldown", label = "Goes on Cooldown", help = "Announce when this spell starts a genuine cooldown. WoW may hide cooldown data during combat, so this trigger can miss the event.", kind = "cooldown" },
+    { value = "cooldown", label = "Cooldown", help = "Start: the spell goes on cooldown. Ready: it comes off cooldown. Nodes in between run on the cooldown's duration; the global cooldown is ignored. WoW may hide cooldown data during combat, so this trigger can miss an event.", kind = "cooldown" },
     { value = "chargeGained", label = "Gains a Charge", help = "Announce when this spell recovers a charge. WoW may hide charge data during combat, so this trigger can miss the event.", kind = "charge" },
     { value = "chargeSpent", label = "Spends a Charge", help = "Announce when this spell consumes a charge. WoW may hide charge data during combat, so this trigger can miss the event.", kind = "charge" },
     { value = "castSucceeded", label = "Cast succeeds", help = "Announce after you successfully cast this spell.", kind = "cast" },
@@ -22,6 +21,13 @@ tracking.triggerTypes = {
 
 local triggerTypeByValue = {}
 for _, trigger in ipairs(tracking.triggerTypes) do triggerTypeByValue[trigger.value] = trigger end
+-- Older single-ended cooldown triggers stay readable (saved rules, learning results); WoWraVox migrates them to "cooldown".
+triggerTypeByValue.offCooldown = { value = "offCooldown", label = "Comes off Cooldown", help = tracking.triggerTypes[1].help, kind = "cooldown" }
+triggerTypeByValue.onCooldown = { value = "onCooldown", label = "Goes on Cooldown", help = tracking.triggerTypes[1].help, kind = "cooldown" }
+
+-- "cooldown" announces both ends; the older values only one each.
+local function readyTrigger(rule) return rule.triggerType == "offCooldown" or rule.triggerType == "cooldown" end
+local function startTrigger(rule) return rule.triggerType == "onCooldown" or rule.triggerType == "cooldown" end
 
 local function safeNumber(value)
     return not (issecretvalue and issecretvalue(value)) and type(value) == "number"
@@ -43,7 +49,7 @@ end
 
 function tracking.NormalizeRule(rule)
     if type(rule) ~= "table" or not triggerTypeByValue[rule.triggerType] then
-        if type(rule) == "table" then rule.triggerType = "offCooldown" end
+        if type(rule) == "table" then rule.triggerType = "cooldown" end
     end
 end
 
@@ -183,7 +189,7 @@ end
 -- Timeline nodes between "used" and "ready": the cooldown cycle of an offCooldown rule (start + duration), or nil
 -- when it ended / was reset. Set by WoWraVox.lua (tracking.cycle).
 local function cycle(rule, startTime, duration)
-    if tracking.cycle and rule and rule.triggerType == "offCooldown" then tracking.cycle(rule, startTime, duration) end
+    if tracking.cycle and rule and readyTrigger(rule) then tracking.cycle(rule, startTime, duration) end
 end
 
 local function invalidateReadyTimer(state)
@@ -262,7 +268,7 @@ function tracking.OnDurationCooldownDone(self)
         refreshDurationWatch(rule, state, "OnCooldownDone", cooldown, cooldownOK, charges, chargesOK)
         return
     end
-    if not isActiveRule(rule) or rule.triggerType ~= "offCooldown" then
+    if not isActiveRule(rule) or not readyTrigger(rule) then
         addDebug(rule, "OnCooldownDone", "duration-callback-rule-inactive", cooldown, charges)
         return
     end
@@ -337,7 +343,7 @@ local function shouldWatchCooldown(rule, state, event, cooldown, cooldownOK, cha
         return (state.chargeTracking == true or readable == true)
             and not (readable and charges.current >= charges.maximum)
     end
-    if rule.triggerType ~= "offCooldown" then return false end
+    if not readyTrigger(rule) then return false end
     if cooldownOK and cooldown.isEnabled == false then return false end
     local cooldownEvent = event == "OnCooldownDone" and "SPELL_UPDATE_COOLDOWN" or event
     if cooldownOK and isActiveCooldown(cooldown, GetTime())
@@ -350,7 +356,7 @@ local function shouldWatchCooldown(rule, state, event, cooldown, cooldownOK, cha
 end
 
 refreshDurationWatch = function(rule, state, event, cooldown, cooldownOK, charges, chargesOK)
-    if rule.triggerType ~= "offCooldown" and rule.triggerType ~= "chargeGained" then
+    if not readyTrigger(rule) and rule.triggerType ~= "chargeGained" then
         clearDurationWatch(rule, state)
         return
     end
@@ -417,7 +423,7 @@ processChargeSnapshot = function(rule, event, state, charges, cooldown, cooldown
     if current == 0 then
         state.notified = false
         state.chargeReadyPending = false
-    elseif rule.triggerType == "offCooldown"
+    elseif readyTrigger(rule)
         and (state.chargeReadyPending or (changed and previous == 0)) then
         clearDurationWatch(rule, state)
         invalidateReadyTimer(state)
@@ -451,7 +457,7 @@ processChargeSnapshot = function(rule, event, state, charges, cooldown, cooldown
 end
 
 shouldScheduleReady = function(rule, state)
-    return rule.triggerType == "offCooldown"
+    return readyTrigger(rule)
         and (not state.chargeTracking or state.charges == 0)
 end
 
@@ -486,7 +492,7 @@ local function processCooldownSnapshot(rule, event, state, cooldown, cooldownOK,
         if not state.cooldownActive then
             state.cooldownActive = true
             if not state.chargeTracking then state.notified = false end
-            if event ~= "TIMER" and rule.triggerType == "onCooldown" then
+            if event ~= "TIMER" and startTrigger(rule) then
                 fire(rule, event, "onCooldown", cooldown, charges)
             end
         elseif not state.cooldownEnd or math.abs(state.cooldownEnd - newEnd) > 0.25 then
@@ -505,7 +511,7 @@ local function processCooldownSnapshot(rule, event, state, cooldown, cooldownOK,
         state.cooldownEnd = nil
         invalidateReadyTimer(state)
         cycle(rule, nil)
-        if not state.chargeTracking and rule.triggerType == "offCooldown" and not state.notified then
+        if not state.chargeTracking and readyTrigger(rule) and not state.notified then
             clearDurationWatch(rule, state)
             state.notified = true
             fire(rule, event, "offCooldown", cooldown, charges)
@@ -580,7 +586,7 @@ function tracking.OnCast(spellID, castGUID, rules)
                     state.lastCastGUID = castGUID
                     local cooldown, cooldownOK = readCooldown(rule.spellID)
                     local charges, chargesOK = readCharges(rule.spellID)
-                    if rule.triggerType == "offCooldown" or rule.triggerType == "chargeGained" then
+                    if readyTrigger(rule) or rule.triggerType == "chargeGained" then
                         refreshDurationWatch(rule, state, "UNIT_SPELLCAST_SUCCEEDED",
                             cooldown, cooldownOK, charges, chargesOK)
                     end

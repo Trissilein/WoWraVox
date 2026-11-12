@@ -469,4 +469,7 @@ ns.Locales.deDE = {
     ["Click the line to add a node for this spell only. Drag a node to move it for this spell."] = "Klick auf die Linie legt einen Knoten nur für diesen Zauber an. Ziehen verschiebt ihn nur für diesen Zauber.",
     ["Window scale"] = "Fenstergröße",
     ["Makes the whole window smaller or larger (70 to 130 %). It never grows beyond what fits on your screen. Applied when you release the slider."] = "Macht das ganze Fenster kleiner oder größer (70 bis 130 %). Es wird nie größer, als auf deinen Bildschirm passt. Gilt, sobald du den Regler loslässt.",
+    ["Cooldown"] = "Cooldown",
+    ["Start: the spell goes on cooldown. Ready: it comes off cooldown. Nodes in between run on the cooldown's duration; the global cooldown is ignored. WoW may hide cooldown data during combat, so this trigger can miss an event."] = "Start: der Zauber geht auf Cooldown. Bereit: er ist wieder verfügbar. Knoten dazwischen laufen auf der Dauer des Cooldowns; der globale Cooldown zählt nicht. WoW kann Cooldown-Daten im Kampf verbergen, dann kann ein Ereignis fehlen.",
+    ["e.g. {item} used"] = "z. B. {item} benutzt",
 }

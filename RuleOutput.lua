@@ -31,7 +31,8 @@ local EVENTS = {
 -- Intermediate timeline markers (m1, m2, ...) use the same field pattern under their own key.
 local function fieldsFor(eventKey)
     if EVENTS[eventKey] then return EVENTS[eventKey] end
-    if type(eventKey) ~= "string" or not eventKey:match("^m%d+$") then return nil end
+    -- "used" (an item / spell cooldown starts) has its own fields as well.
+    if type(eventKey) ~= "string" or not (eventKey:match("^m%d+$") or eventKey == "used") then return nil end
     return {
         category = eventKey .. "Category", enabled = eventKey .. "Enabled", message = eventKey .. "Message",
         sound = eventKey .. "SoundEnabled", media = eventKey .. "SoundMediaName", kit = eventKey .. "SoundKitID",

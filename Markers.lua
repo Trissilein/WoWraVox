@@ -14,12 +14,12 @@ ns.Markers = Markers
 
 local ENDPOINTS = {
     auras = { { key = "apply", at = 0 }, { key = "expire", at = 100 } },
-    items = { { key = "ready", at = 100 } },
-    skills = { { key = "ready", at = 100 } },
+    items = { { key = "used", at = 0 }, { key = "ready", at = 100 } },
+    skills = { { key = "used", at = 0 }, { key = "ready", at = 100 } },
 }
 
 function Markers.IsEndpoint(key)
-    return key == "apply" or key == "expire" or key == "ready"
+    return key == "apply" or key == "expire" or key == "ready" or key == "used"
 end
 
 -- Any key whose output fields live on the rule.

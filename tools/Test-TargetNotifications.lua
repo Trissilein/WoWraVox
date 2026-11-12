@@ -2814,3 +2814,24 @@ do
     check("a former rule-wide all ranks seeds every trigger", old.rankIDs[633] == true)
     WoWraVoxProfilesDB = savedDB
 end
+
+
+-- "Goes on Cooldown" / "Comes off Cooldown" merge into one Cooldown trigger with Start (used) and Ready
+do
+    local onRule = { triggerType = "onCooldown", readyEnabled = true, message = "Shield up", readySoundEnabled = true,
+        readySoundKitID = 12345, screenProfiles = { ready = { enabled = true, text = "UP" } } }
+    ns.migrateCooldownTrigger(onRule)
+    check("on-cooldown rule becomes Cooldown with its output on Start",
+        onRule.triggerType == "cooldown" and onRule.usedEnabled == true and onRule.usedMessage == "Shield up"
+        and onRule.usedSoundEnabled == true and onRule.usedSoundKitID == 12345 and onRule.screenProfiles.used.text == "UP"
+        and onRule.readyEnabled == false and onRule.message == "" and onRule.screenProfiles.ready == nil)
+    ns.migrateCooldownTrigger(onRule)
+    check("migration is idempotent", onRule.usedMessage == "Shield up" and onRule.triggerType == "cooldown")
+    local offRule = { triggerType = "offCooldown", readyEnabled = true, message = "Ready" }
+    ns.migrateCooldownTrigger(offRule)
+    check("off-cooldown rule keeps Ready, Start stays off",
+        offRule.triggerType == "cooldown" and offRule.message == "Ready" and offRule.usedEnabled == nil)
+    local charge = { triggerType = "chargeGained" }
+    ns.migrateCooldownTrigger(charge)
+    check("charge triggers stay", charge.triggerType == "chargeGained")
+end

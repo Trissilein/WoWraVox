@@ -25,7 +25,7 @@ M.Normalize(secs, "auras")
 check("seconds warning becomes 5 s before the end", secs.markers[2].key == "beforeExpire" and secs.markers[2].anchor == "end" and secs.markers[2].offset == 5)
 local item = {}
 M.Normalize(item, "items")
-check("item rule gets ready at 100", keys(item) == "ready@100")
+check("item rule gets Start at 0 and Ready at 100", keys(item) == "used@0,ready@100", keys(item))
 
 -- Idempotent and repairing
 local again = keys(before)
