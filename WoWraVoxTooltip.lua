@@ -458,6 +458,23 @@ function ns.AuraCDM.Probe()
     local lines = { "combat=" .. tostring(InCombatLockdown and InCombatLockdown()) }
     for _, name in ipairs({ "BuffIconCooldownViewer", "BuffBarCooldownViewer" }) do
         local viewer = _G[name]
+        -- every child of the viewer, shown or not: where do the lit buffs live?
+        pcall(function()
+            local children = { viewer:GetChildren() }
+            local out = { name:sub(1, 8) .. " children=" .. #children .. " shown=" .. tostring(viewer:IsShown()) }
+            for index, child in ipairs(children) do
+                if index > 12 then break end
+                local keys = {}
+                for key, value in pairs(child) do
+                    if type(key) == "string" and type(value) ~= "function" and type(value) ~= "table" and #keys < 14 then
+                        keys[#keys + 1] = key .. "=" .. probeValue(value)
+                    end
+                end
+                table.sort(keys)
+                out[#out + 1] = "  #" .. index .. " shown=" .. tostring(child:IsShown()) .. " " .. table.concat(keys, " ")
+            end
+            for _, line in ipairs(out) do lines[#lines + 1] = line end
+        end)
         local pool = viewer and viewer.itemFramePool
         if pool and type(pool.EnumerateActive) == "function" then
             pcall(function()
