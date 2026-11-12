@@ -472,4 +472,6 @@ ns.Locales.deDE = {
     ["Cooldown"] = "Cooldown",
     ["Start: the spell goes on cooldown. Ready: it comes off cooldown. Nodes in between run on the cooldown's duration; the global cooldown is ignored. WoW may hide cooldown data during combat, so this trigger can miss an event."] = "Start: der Zauber geht auf Cooldown. Bereit: er ist wieder verfügbar. Knoten dazwischen laufen auf der Dauer des Cooldowns; der globale Cooldown zählt nicht. WoW kann Cooldown-Daten im Kampf verbergen, dann kann ein Ereignis fehlen.",
     ["e.g. {item} used"] = "z. B. {item} benutzt",
+    ["Press C to open your character window, then click an equipped slot. Press Esc to cancel."] = "Drücke C, um dein Charakterfenster zu öffnen, und klicke dann einen angelegten Platz an. Esc bricht ab.",
+    ["Click the line to add a node there. Drag a node to move it. Click a selected node again to remove it. Colours: grey = says nothing, blue = spoken text, green = sound, orange = on-screen text, purple = two of them, gold = all three."] = "Klick auf die Linie legt dort einen Knoten an. Ziehen verschiebt ihn. Ein erneuter Klick auf den gewählten Knoten entfernt ihn. Farben: grau = sagt nichts, blau = gesprochener Text, grün = Sound, orange = Bildschirmtext, lila = zwei davon, gold = alle drei.",
 }

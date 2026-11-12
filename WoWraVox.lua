@@ -2509,6 +2509,25 @@ function ns.TrackID(rule, spellID)
     return spellID
 end
 
+-- What a timeline node says: spoken text, a sound, on-screen text. Used to colour the nodes.
+function ns.markerContent(rule, key)
+    local profile = ns.getRuleScreenProfile(rule, key)
+    return rule[key .. "Enabled"] == true, rule[key .. "SoundEnabled"] == true, profile ~= nil and profile.enabled == true
+end
+
+-- Node colour by content: nothing = grey, text only = blue, sound only = green, on-screen only = orange,
+-- two kinds = purple, all three = gold.
+function ns.markerContentColor(rule, key)
+    local tts, sound, screen = ns.markerContent(rule, key)
+    local count = (tts and 1 or 0) + (sound and 1 or 0) + (screen and 1 or 0)
+    if count == 0 then return 0.5, 0.5, 0.5 end
+    if count == 3 then return 1, 0.82, 0.3 end
+    if count == 2 then return 0.72, 0.5, 0.95 end
+    if tts then return 0.4, 0.68, 1 end
+    if sound then return 0.45, 0.85, 0.5 end
+    return 1, 0.62, 0.28
+end
+
 -- True when an intermediate timeline node of the rule has some output switched on.
 function ns.ruleHasMarkerOutput(rule)
     for _, marker in ipairs(rule.markers or {}) do
@@ -3038,7 +3057,12 @@ local function createAuraTrackerUI()
     local frame = CreateFrame("Frame", "WoWraVoxAuraTracker", UIParent, "BackdropTemplate")
     frame:SetSize(560, 286)
     frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    frame:SetFrameStrata("HIGH")
+    -- Same strata as the WoWraVox window and raised on show, so it never opens behind it; drag the title row to move it.
+    frame:SetFrameStrata("DIALOG")
+    frame:SetToplevel(true)
+    frame:SetClampedToScreen(true)
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
     frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     frame:SetBackdropColor(0.025, 0.03, 0.04, 0.82)
     frame:SetBackdropBorderColor(0.52, 0.42, 0.22, 0.75)
@@ -3050,11 +3074,22 @@ local function createAuraTrackerUI()
     title:SetText(L("Aura tracker"))
     title:SetTextColor(1, 0.82, 0.2)
 
-    local function button(text, width, anchor, relative, x, y)
+    local dragHandle = CreateFrame("Frame", nil, frame)
+    dragHandle:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+    dragHandle:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+    dragHandle:SetHeight(30)
+    dragHandle:EnableMouse(true)
+    dragHandle:RegisterForDrag("LeftButton")
+    dragHandle:SetScript("OnDragStart", function() frame:StartMoving() end)
+    dragHandle:SetScript("OnDragStop", function() frame:StopMovingOrSizing() end)
+    dragHandle:SetFrameLevel(frame:GetFrameLevel())
+
+    -- A button sits at `anchor` of `relative`; with relativePoint it hangs off the other side of that button.
+    local function button(text, width, anchor, relative, x, y, relativePoint)
         local result = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-        result:SetSize(width, 22)
-        result:SetPoint(anchor, relative, anchor, x, y)
         result:SetText(L(text))
+        result:SetSize(math.max(width, (result:GetTextWidth() or 0) + 24), 22)
+        result:SetPoint(anchor, relative, relativePoint or anchor, x, y)
         return result
     end
 
@@ -3079,11 +3114,11 @@ local function createAuraTrackerUI()
 
     frame.closeButton = button("Close", 52, "TOPRIGHT", frame, -6, -5)
     frame.closeButton:SetScript("OnClick", function() frame:Hide() end)
-    frame.editButton = button("Configure", 82, "RIGHT", frame.closeButton, -5, 0)
+    frame.editButton = button("Configure", 82, "RIGHT", frame.closeButton, -5, 0, "LEFT")
     frame.editButton:SetScript("OnClick", function()
         setEditing(not auraTracker.view.editMode)
     end)
-    frame.resetButton = button("Reset positions", 100, "RIGHT", frame.editButton, -5, 0)
+    frame.resetButton = button("Reset positions", 100, "RIGHT", frame.editButton, -5, 0, "LEFT")
     frame.resetButton:SetScript("OnClick", function()
         if InCombatLockdown and InCombatLockdown() then return end
         local config = auraTrackerConfig()
@@ -3270,6 +3305,7 @@ function ns.OpenAuraTracker(editMode)
     auraTracker.view:Update(entries)
     auraTracker.frame.status:SetText(#entries == 0 and L("Aura tracker is empty. Configure it to add rules.") or "")
     auraTracker.frame:Show()
+    auraTracker.frame:Raise()
     return auraTracker.setEditing(editMode == true)
 end
 
@@ -8435,7 +8471,7 @@ local function buildTimelinePanel()
         local x = GetCursorPosition() / self:GetEffectiveScale()
         addNodeAt(rule, ns.Markers.ClampInner(math.floor((x - left) / width * 1000 + 0.5) / 10))
     end)
-    addHelpTooltip(track, "Timeline", "Click the line to add a node there. Drag a node to move it. Click a selected node again to remove it.")
+    addHelpTooltip(track, "Timeline", "Click the line to add a node there. Drag a node to move it. Click a selected node again to remove it. Colours: grey = says nothing, blue = spoken text, green = sound, orange = on-screen text, purple = two of them, gold = all three.")
     StaticPopupDialogs["WOWRAVOX_REMOVE_NODE"] = StaticPopupDialogs["WOWRAVOX_REMOVE_NODE"] or {
         text = L("Remove %s?"),
         button1 = YES or "Yes",
@@ -8852,14 +8888,9 @@ function ns.refreshTimeline(rule)
         end
         handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
             or marker.key == "ready" and L("Ready") or marker.key == "used" and L("Start") or labelText)
-        if isSelected then
-            handle.tex:SetVertexColor(1, 0.82, 0.2)
-        elseif endpoint then
-            handle.tex:SetVertexColor(0.55, 0.55, 0.55)
-        else
-            handle.tex:SetVertexColor(0.85, 0.7, 0.35)
-        end
-        handle.border:SetVertexColor(0.05, 0.04, 0.02, 1)
+        handle.tex:SetVertexColor(ns.markerContentColor(rule, marker.key))
+        -- The selected node gets a white rim (its fill shows what it says, so the fill cannot mark the selection).
+        if isSelected then handle.border:SetVertexColor(1, 1, 1, 1) else handle.border:SetVertexColor(0.05, 0.04, 0.02, 1) end
         -- Start/End labels sit under the line, node labels above it: a node next to an end never covers its label.
         handle.label:ClearAllPoints()
         if endpoint then
@@ -10090,6 +10121,12 @@ local function beginItemPicker(replaceRule, replaceIndex, addRule)
     end
 
     local characterShown = _G.CharacterFrame and CharacterFrame:IsShown()
+    if pickerPrompt and pickerPrompt.message then
+        -- Forever: opening the character window from addon code would taint it, so the player opens it (C).
+        pickerPrompt.message:SetText(L(ns.isForever and not characterShown
+            and "Press C to open your character window, then click an equipped slot. Press Esc to cancel."
+            or "Click an equipped slot in the character window. Press Esc to cancel."))
+    end
     if ns.isForever then
         -- Opening the window from addon code taints Forever's CharacterFrame (it compares secret health values in
         -- OnShow and errors).  The OnShow hook above draws the overlays once the player opens it themself.
@@ -10137,6 +10174,7 @@ local function createPickerPrompt()
     local message = createLabel(pickerPrompt, "Click an equipped slot in the character window. Press Esc to cancel.", "WoWraVoxFontHighlightSmall")
     message:SetPoint("TOPLEFT", pickerPrompt, "TOPLEFT", 15, -42)
     message:SetWidth(270)
+    pickerPrompt.message = message
     message:SetJustifyH("LEFT")
     local cancel = CreateFrame("Button", nil, pickerPrompt, "UIPanelButtonTemplate")
     cancel:SetSize(65, 24)
@@ -10249,15 +10287,17 @@ function ns.createSettingsPanel()
     -- Window scale (shrinks or enlarges the whole window; applied when the slider is released).
     do
         local panelWidth = settingsPanel:GetWidth()
-        local scaleX = math.min(340, math.max(ns.Layout.ROW_X, panelWidth - 230))
+        local scaleX = math.min(330, math.max(ns.Layout.ROW_X, panelWidth - 270))
         local scaleLabel = createLabel(settingsPanel, "Window scale", "WoWraVoxFontHighlightSmall")
-        scaleLabel:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", scaleX, -48)
+        scaleLabel:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", scaleX, -61)
         local scaleValue = createLabel(settingsPanel, "100%", "WoWraVoxFontHighlightSmall")
         local pending
-        local slider = makeVolumeSlider(settingsPanel, "TOPLEFT", settingsPanel, scaleX, -72, function(value)
+        local slider = makeVolumeSlider(settingsPanel, "TOPLEFT", settingsPanel, scaleX + 96, -62, function(value)
             pending = value
             scaleValue:SetText(tostring(value) .. "%")
-        end, 70, 130, 5, 150)
+        end, 70, 130, 5, 110)
+        if slider.Low then slider.Low:SetText("") end
+        if slider.High then slider.High:SetText("") end
         scaleValue:SetPoint("LEFT", slider, "RIGHT", 8, 0)
         local current = math.floor((tonumber(WoWraVoxProfilesDB and WoWraVoxProfilesDB.uiScale) or 1) * 100 + 0.5)
         slider:SetValue(current)
