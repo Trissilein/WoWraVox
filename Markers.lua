@@ -93,6 +93,7 @@ function Markers.Normalize(rule, category)
         return a.key < b.key
     end)
     rule.markers = filtered
+    Markers.PruneOverrides(rule)
     return filtered
 end
 
@@ -207,10 +208,105 @@ function Markers.Remove(rule, key)
                 rule[key .. suffix] = nil
             end
             if type(rule.screenProfiles) == "table" then rule.screenProfiles[key] = nil end
+            for _, bySpell in pairs(type(rule.markerOverrides) == "table" and rule.markerOverrides or {}) do bySpell[key] = nil end
+            Markers.PruneOverrides(rule)
             return true
         end
     end
     return false
+end
+
+-- Per-spell overrides of a group rule: rule.markerOverrides[spellID][key] = { at, anchor, offset }. A spell without
+-- an override follows the group marker; an override keeps the anchor (a "5 s before end" node stays seconds-based).
+local function findMarker(rule, key)
+    for _, marker in ipairs(rule.markers or {}) do
+        if marker.key == key then return marker end
+    end
+end
+
+function Markers.GetOverride(rule, spellID, key)
+    local bySpell = type(rule.markerOverrides) == "table" and rule.markerOverrides[spellID]
+    return type(bySpell) == "table" and bySpell[key] or nil
+end
+
+-- Marker as seen by one spell: the override when set, else the group marker itself.
+function Markers.Effective(rule, spellID, key)
+    local base = findMarker(rule, key)
+    if not base then return nil end
+    local override = Markers.GetOverride(rule, spellID, key)
+    if not override then return base, false end
+    return { key = key, at = override.at, anchor = override.anchor, offset = override.offset }, true
+end
+
+-- The group's marker list resolved for one spell (a fresh list; the rule is not changed).
+function Markers.ForSpell(rule, spellID)
+    local list = {}
+    for _, marker in ipairs(rule.markers or {}) do
+        list[#list + 1] = Markers.Effective(rule, spellID, marker.key)
+    end
+    return list
+end
+
+-- Sets/moves the override of one spell. `apply(temp, key)` edits a temporary one-marker rule with the existing
+-- SetTiming/Move logic, so the anchor rules stay in one place.
+local function editOverride(rule, spellID, key, apply)
+    local base = findMarker(rule, key)
+    if not base or Markers.IsEndpoint(key) or spellID == nil then return false end
+    local current = Markers.Effective(rule, spellID, key)
+    local temp = { markers = { { key = key, at = current.at, anchor = current.anchor, offset = current.offset } } }
+    apply(temp, key)
+    local marker = temp.markers[1]
+    rule.markerOverrides = type(rule.markerOverrides) == "table" and rule.markerOverrides or {}
+    rule.markerOverrides[spellID] = type(rule.markerOverrides[spellID]) == "table" and rule.markerOverrides[spellID] or {}
+    rule.markerOverrides[spellID][key] = { at = marker.at, anchor = marker.anchor, offset = marker.offset }
+    return true
+end
+
+function Markers.SetOverrideTiming(rule, spellID, key, anchor, value, duration)
+    return editOverride(rule, spellID, key, function(temp, k)
+        local marker = temp.markers[1]
+        Markers.SetTiming(temp, k, anchor or marker.anchor or "percent", value, duration)
+    end)
+end
+
+function Markers.MoveOverride(rule, spellID, key, at, duration)
+    return editOverride(rule, spellID, key, function(temp, k) Markers.Move(temp, k, at, nil, duration) end)
+end
+
+function Markers.ClearOverride(rule, spellID, key)
+    local bySpell = type(rule.markerOverrides) == "table" and rule.markerOverrides[spellID]
+    if type(bySpell) ~= "table" or bySpell[key] == nil then return false end
+    bySpell[key] = nil
+    if next(bySpell) == nil then rule.markerOverrides[spellID] = nil end
+    if next(rule.markerOverrides) == nil then rule.markerOverrides = nil end
+    return true
+end
+
+function Markers.OverrideCount(rule)
+    local count = 0
+    for _, bySpell in pairs(type(rule.markerOverrides) == "table" and rule.markerOverrides or {}) do
+        for _ in pairs(bySpell) do count = count + 1 end
+    end
+    return count
+end
+
+-- Drops overrides whose marker or spell is gone (call after Normalize / when triggers change).
+function Markers.PruneOverrides(rule)
+    if type(rule.markerOverrides) ~= "table" then return end
+    local spells = {}
+    for _, id in ipairs(rule.spellIDs or {}) do spells[id] = true end
+    for spellID, bySpell in pairs(rule.markerOverrides) do
+        if type(bySpell) ~= "table" or (next(spells) and not spells[spellID]) then
+            rule.markerOverrides[spellID] = nil
+        else
+            for key in pairs(bySpell) do
+                local marker = findMarker(rule, key)
+                if not marker or Markers.IsEndpoint(key) then bySpell[key] = nil end
+            end
+            if next(bySpell) == nil then rule.markerOverrides[spellID] = nil end
+        end
+    end
+    if next(rule.markerOverrides) == nil then rule.markerOverrides = nil end
 end
 
 -- Intermediate markers only (the ones a timer has to fire).

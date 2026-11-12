@@ -2305,6 +2305,14 @@ local function notifyRule(rule, eventKey, message, spellID, sourceEvent, detecte
         ctx = ns._Aura.spellContext(spellID)
     end
     local ttsMessage = ns.formatRuleNotificationMessage(rule, message, ctx)
+    -- Timeline nodes of several spells of one group can land together: the same spoken text within 1 s counts once.
+    if sourceEvent == "MARKER_TIMER" and type(ttsMessage) == "string" and ttsMessage ~= "" then
+        local recent = ns._Aura.recentMarkerSpeech
+        if not recent then recent = {}; ns._Aura.recentMarkerSpeech = recent end
+        local key, now = tostring(rule.id) .. "|" .. ttsMessage, GetTime and GetTime() or 0
+        if recent[key] and now - recent[key] < 1 then return false end
+        recent[key] = now
+    end
     local profile = ns.getRuleScreenProfile(rule, eventKey)
     local screenText = profile and ns.formatRuleNotificationMessage(rule, profile.text, ctx) or ""
     local decision = ns.RuleOutput and ns.RuleOutput.Decide and ns.RuleOutput.Decide(rule, eventKey, {
@@ -2585,9 +2593,9 @@ local function learnedDurations()
 end
 ns.learnedDurations = learnedDurations
 
-local function markerSignature(rule)
+local function markerSignature(rule, markers)
     local parts = {}
-    for _, marker in ipairs(rule.markers or {}) do parts[#parts + 1] = marker.key .. "@" .. tostring(marker.at) .. "/" .. tostring(marker.anchor) .. tostring(marker.offset) end
+    for _, marker in ipairs(markers or rule.markers or {}) do parts[#parts + 1] = marker.key .. "@" .. tostring(marker.at) .. "/" .. tostring(marker.anchor) .. tostring(marker.offset) end
     return table.concat(parts, ",") .. "|" .. tostring(rule.durationOverride)
 end
 
@@ -2611,9 +2619,11 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
     if rule.oneEffect and not markerTimers:Get(rule.id, spellID) then
         markerTimers:StopOthers(rule.id, spellID)
     end
+    -- Each spell of a group rule runs its own copy of the nodes (per-spell overrides applied).
+    local markers = ns.Markers.ForSpell(rule, spellID)
     markerTimers:Update(rule.id, spellID, {
         active = true, start = start, duration = duration, estimated = estimated,
-        markers = rule.markers, baseline = isBaseline == true, signature = markerSignature(rule),
+        markers = markers, baseline = isBaseline == true, signature = markerSignature(rule, markers),
     })
 end
 end
@@ -8019,19 +8029,38 @@ function ns.SelectedMarkerKey(rule)
     return selectedMarkerKey
 end
 
-function ns.SelectMarker(key)
-    if key == selectedMarkerKey then return end
+-- spellID: select the node as seen by one spell of a group rule (its own track); nil = the group node itself.
+function ns.SelectMarker(key, spellID)
+    if key == selectedMarkerKey and spellID == timeline.spellID then return end
     saveDetails()
     selectedMarkerKey = key
+    timeline.spellID = spellID
     updateDetails()
 end
 
-local function timelineDuration(rule)
-    if not (rule and ns.MarkerTimers) then return nil, true end
-    local spellID = rule.spellIDs and rule.spellIDs[1]
+-- Duration of one spell (readable is unknown out of combat here: override, else learned).
+function ns.spellDuration(rule, spellID)
+    if not (rule and ns.MarkerTimers and spellID) then return nil, true end
     return ns.MarkerTimers.DurationFor(rule, spellID, nil, ns.learnedDurations and ns.learnedDurations())
 end
+
+-- Reference duration of the group line: the longest known one (a single spell: its own).
+local function timelineDuration(rule)
+    if not (rule and ns.MarkerTimers) then return nil, true end
+    local best, bestEstimated
+    for _, spellID in ipairs(rule.spellIDs or {}) do
+        local duration, estimated = ns.spellDuration(rule, spellID)
+        if duration and (not best or duration > best) then best, bestEstimated = duration, estimated end
+    end
+    if best then return best, bestEstimated end
+    return nil, true
+end
 ns.timelineDuration = timelineDuration
+
+function ns.spellDisplayName(spellID)
+    local info = getSpellInfo(spellID)
+    return info and info.name or ("#" .. tostring(spellID))
+end
 
 local function formatNumber(value)
     if not value then return "" end
@@ -8076,11 +8105,17 @@ local function applyTiming(anchor)
     local key = ns.SelectedMarkerKey(rule)
     if ns.Markers.IsEndpoint(key) then return end
     local value = tonumber((timeline.valueBox:GetText():gsub(",", ".")))
-    local selectedNode = findMarker(rule, key)
+    local spellID = timeline.spellID
+    local selectedNode = spellID and ns.Markers.Effective(rule, spellID, key) or findMarker(rule, key)
     local current = selectedNode and selectedNode.anchor or "percent"
     -- Switching the anchor keeps the spot on the line: the value is recomputed, not reused.
     if anchor and anchor ~= current then value = nil end
-    ns.Markers.SetTiming(rule, key, anchor or current, value, timelineDuration(rule))
+    if spellID then
+        -- One spell of a group: only this spell's override changes; the group node stays.
+        ns.Markers.SetOverrideTiming(rule, spellID, key, anchor or current, value, (ns.spellDuration(rule, spellID)))
+    else
+        ns.Markers.SetTiming(rule, key, anchor or current, value, timelineDuration(rule))
+    end
     updateDetails()
 end
 
@@ -8214,6 +8249,27 @@ local function buildTimelinePanel()
     end)
     ns.Skin.Register(timeline.addButton, "button")
     ns.Skin.Register(timeline.removeButton, "button")
+    -- Group rules (several spells): a toggle shows one track per spell below the group line.
+    timeline.spellsButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    timeline.spellsButton:SetSize(150, 24)
+    timeline.spellsButton:SetScript("OnClick", function()
+        timeline.showSpells = not timeline.showSpells
+        updateDetails()
+    end)
+    ns.Skin.Register(timeline.spellsButton, "button")
+    addHelpTooltip(timeline.spellsButton, "Spells", "Shows one track per spell. The group line moves a node for every spell; dragging on a spell's track moves it for that spell only (marked blue). Seconds always belong to that spell's own duration.")
+    timeline.relinkButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    timeline.relinkButton:SetSize(120, 24)
+    timeline.relinkButton:SetText(L("Link to group"))
+    timeline.relinkButton:SetScript("OnClick", function()
+        local rule = selectedAura()
+        if rule and timeline.spellID and ns.Markers.ClearOverride(rule, timeline.spellID, ns.SelectedMarkerKey(rule)) then
+            updateDetails()
+        end
+    end)
+    ns.Skin.Register(timeline.relinkButton, "button")
+    addHelpTooltip(timeline.relinkButton, "Link to group", "This spell has its own timing for the node. Linking it again makes it follow the group node.")
+    timeline.spellRows = {}
 
     timeline.timingLabel = createLabel(frame, "Timing", "WoWraVoxFontNormal")
     timeline.anchorChoice = createScreenChoiceDropdown(frame, 190, ANCHOR_CHOICES,
@@ -8299,7 +8355,7 @@ local function handleFor(index)
         -- Show the value in the node's own timing while dragging.
         local marker = findMarker(selectedAura(), self.key)
         local duration = timelineDuration(selectedAura())
-        if not duration then
+        if not duration or #(selectedAura().spellIDs or {}) > 1 then
             self.label:SetText(formatNumber(at) .. " %")
         elseif marker and marker.anchor == "start" then
             self.label:SetText("+" .. formatNumber(duration * at / 100) .. " s  ·  " .. formatNumber(at) .. " %")
@@ -8354,11 +8410,150 @@ local function tabFor(index)
     return tab
 end
 
+-- One track per spell of a group rule: the group's nodes as this spell sees them (blue = own timing), seconds
+-- from this spell's own duration. Dragging moves the node for this spell only.
+timeline.ROW_HEIGHT, timeline.ROW_TOP = 50, 104
+
+function timeline.spellRowFor(index)
+    local row = timeline.spellRows[index]
+    if row then return row end
+    row = CreateFrame("Frame", nil, timeline.frame)
+    row:SetHeight(timeline.ROW_HEIGHT)
+    row.name = row:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlight")
+    row.name:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+    row.track = CreateFrame("Frame", nil, row)
+    row.track:SetHeight(14)
+    row.track:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -26)
+    row.track:SetPoint("TOPRIGHT", row, "TOPRIGHT", 0, -26)
+    local line = row.track:CreateTexture(nil, "BACKGROUND")
+    line:SetColorTexture(0.3, 0.26, 0.2, 0.95)
+    line:SetHeight(3)
+    line:SetPoint("LEFT", row.track, "LEFT", 0, 0)
+    line:SetPoint("RIGHT", row.track, "RIGHT", 0, 0)
+    row.handles = {}
+    timeline.spellRows[index] = row
+    return row
+end
+
+function timeline.spellHandleFor(row, index)
+    local handle = row.handles[index]
+    if handle then return handle end
+    handle = CreateFrame("Button", nil, row.track)
+    handle:SetSize(22, 22)
+    handle.border = handle:CreateTexture(nil, "ARTWORK", nil, 1)
+    handle.border:SetTexture("Interface\\Buttons\\WHITE8X8")
+    handle.border:SetPoint("CENTER")
+    handle.border:SetRotation(math.rad(45))
+    handle.tex = handle:CreateTexture(nil, "ARTWORK", nil, 2)
+    handle.tex:SetTexture("Interface\\Buttons\\WHITE8X8")
+    handle.tex:SetPoint("CENTER")
+    handle.tex:SetRotation(math.rad(45))
+    handle.label = handle:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlight")
+    handle.label:SetPoint("TOP", handle, "BOTTOM", 0, 0)
+    handle.top = handle:CreateFontString(nil, "OVERLAY", "WoWraVoxFontHighlight")
+    handle.top:SetPoint("BOTTOM", handle, "TOP", 0, 0)
+    handle.top:Hide()
+    handle:RegisterForClicks("LeftButtonUp")
+    handle:SetScript("OnMouseDown", function(self)
+        self.downX, self.dragAt, self.moved = GetCursorPosition(), nil, false
+        ns.SelectMarker(self.key, self.spellID)
+        self.dragging = true
+    end)
+    handle:SetScript("OnUpdate", function(self)
+        if not self.dragging then return end
+        if not self.moved and math.abs(GetCursorPosition() - (self.downX or 0)) < 3 then return end
+        self.moved = true
+        local left, width = self.row.track:GetLeft(), self.row.track:GetWidth()
+        if not (left and width and width > 0) then return end
+        local x = GetCursorPosition() / self.row.track:GetEffectiveScale()
+        local at = ns.Markers.ClampInner((x - left) / width * 100)
+        self.dragAt = at
+        self:ClearAllPoints()
+        self:SetPoint("CENTER", self.row.track, "LEFT", width * at / 100, 0)
+        -- Both while dragging: percent above, this spell's seconds below.
+        self.top:SetText(formatNumber(at) .. " %")
+        self.top:Show()
+        local duration = ns.spellDuration(selectedAura(), self.spellID)
+        self.label:SetText(duration and (formatNumber(duration * at / 100) .. " s") or "? s")
+    end)
+    handle:SetScript("OnMouseUp", function(self)
+        local dragging = self.dragging
+        self.dragging = false
+        self.top:Hide()
+        local rule = selectedAura()
+        if rule and dragging and self.moved and self.dragAt then
+            ns.Markers.MoveOverride(rule, self.spellID, self.key, math.floor(self.dragAt * 10 + 0.5) / 10,
+                (ns.spellDuration(rule, self.spellID)))
+            updateDetails()
+        end
+    end)
+    handle.row = row
+    row.handles[index] = handle
+    return handle
+end
+
+-- Returns the height the spell tracks take (0 when hidden).
+function timeline.refreshSpellRows(rule)
+    local spells = rule and rule.spellIDs or {}
+    local multi = #spells > 1
+    timeline.spellsButton:SetShown(multi)
+    if multi then
+        local count = ns.Markers.OverrideCount(rule)
+        timeline.spellsButton:SetText(L("Spells") .. (timeline.showSpells and "  v" or "  >") .. (count > 0 and ("  ·  " .. count) or ""))
+    end
+    local open = multi and timeline.showSpells == true
+    local inGroup = false
+    for _, id in ipairs(spells) do if id == timeline.spellID then inGroup = true end end
+    if not (open and inGroup) then timeline.spellID = nil end
+    local inner = ns.Markers.Intermediate(rule or {})
+    local width = math.max(1, timeline.track:GetWidth())
+    local selectedKey = ns.SelectedMarkerKey(rule)
+    for index, spellID in ipairs(open and spells or {}) do
+        local row = timeline.spellRowFor(index)
+        local y = -(timeline.ROW_TOP + (index - 1) * timeline.ROW_HEIGHT)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", timeline.frame, "TOPLEFT", ns.Layout.PAD + 28, y)
+        row:SetPoint("TOPRIGHT", timeline.frame, "TOPRIGHT", ns.Layout.RIGHT - 28, y)
+        local duration, estimated = ns.spellDuration(rule, spellID)
+        row.name:SetText(ns.spellDisplayName(spellID) .. "  ·  " ..
+            (duration and (formatNumber(duration) .. " s" .. (estimated and "~" or "")) or L("duration unknown")))
+        local shownCount = 0
+        for _, marker in ipairs(inner) do
+            local effective, overridden = ns.Markers.Effective(rule, spellID, marker.key)
+            -- A seconds-before-end node needs this spell's duration; without it the node waits (and is not drawn).
+            if effective and not (effective.anchor == "end" and not duration) then
+                shownCount = shownCount + 1
+                local handle = timeline.spellHandleFor(row, shownCount)
+                local at = ns.Markers.Percent(effective, duration)
+                local selected = timeline.spellID == spellID and marker.key == selectedKey
+                handle.key, handle.spellID = marker.key, spellID
+                handle:ClearAllPoints()
+                handle:SetPoint("CENTER", row.track, "LEFT", width * at / 100, 0)
+                handle.tex:SetVertexColor(selected and 1 or (overridden and 0.35 or 0.85),
+                    selected and 0.82 or (overridden and 0.75 or 0.7), selected and 0.2 or (overridden and 0.95 or 0.35))
+                handle.border:SetVertexColor(0.05, 0.04, 0.02, 1)
+                local size = selected and 14 or 12
+                handle.tex:SetSize(size, size)
+                handle.border:SetSize(size + 4, size + 4)
+                handle.label:SetText(duration and (formatNumber(duration * at / 100) .. " s") or "? s")
+                handle.top:Hide()
+                handle:SetFrameLevel(row.track:GetFrameLevel() + (selected and 4 or 2))
+                handle:Show()
+            end
+        end
+        for h = shownCount + 1, #row.handles do row.handles[h]:Hide() end
+        row:Show()
+    end
+    for index = (open and #spells or 0) + 1, #timeline.spellRows do timeline.spellRows[index]:Hide() end
+    return open and (#spells * timeline.ROW_HEIGHT + 6) or 0
+end
+
 function ns.refreshTimeline(rule)
     if not timeline.frame then return end
     local duration, estimated = timelineDuration(rule)
     if rule and rule.markers then ns.Markers.Resolve(rule, duration) end
     local markers = rule and rule.markers or {}
+    local multi = rule and #(rule.spellIDs or {}) > 1
     local selected = ns.SelectedMarkerKey(rule)
     local width = math.max(1, timeline.track:GetWidth())
     local previousTab
@@ -8373,7 +8568,8 @@ function ns.refreshTimeline(rule)
         handle:SetPoint("CENTER", timeline.track, "LEFT", width * marker.at / 100, 0)
         handle.number:SetText(number and tostring(number) or "")
         local labelText = timingText(marker)
-        if marker.anchor == "percent" and duration then
+        -- A group's seconds differ per spell, so its line shows only the node's own timing (seconds: spell tracks).
+        if marker.anchor == "percent" and duration and not multi then
             local seconds = ns.Markers.Seconds(marker, duration)
             if seconds then labelText = labelText .. "  ·  -" .. formatNumber(duration - seconds) .. " s" end
         end
@@ -8431,8 +8627,13 @@ function ns.refreshTimeline(rule)
     for index = #markers + 1, #timeline.handles do timeline.handles[index]:Hide() end
     for index = #markers + 1, #timeline.tabs do timeline.tabs[index]:Hide() end
 
-    local marker = findMarker(rule, selected)
+    local spellsExtra = timeline.refreshSpellRows(rule)
+    local spellID = timeline.spellID
+    local marker = spellID and ns.Markers.Effective(rule, spellID, selected) or findMarker(rule, selected)
     local nodeSelected = marker ~= nil and not ns.Markers.IsEndpoint(selected)
+    timeline.timingLabel:SetText(spellID and ns.spellDisplayName(spellID) or L("Timing"))
+    timeline.timingLabel:ClearAllPoints()
+    timeline.timingLabel:SetPoint("TOPLEFT", timeline.frame, "TOPLEFT", ns.Layout.PAD, -(114 + spellsExtra))
     if nodeSelected then
         local anchor = marker.anchor or "percent"
         timeline.anchorChoice.screenValue = anchor
@@ -8447,24 +8648,29 @@ function ns.refreshTimeline(rule)
     end
     timeline.durationBox:SetText(rule and rule.durationOverride and formatNumber(rule.durationOverride) or "")
     local learnedText
+    local hintDuration, hintEstimated = duration, estimated
+    if spellID then hintDuration, hintEstimated = ns.spellDuration(rule, spellID) end
     if rule and rule.durationOverride then
         learnedText = L("set by you")
-    elseif duration then
-        learnedText = string.format(L("learned: %s s"), formatNumber(duration))
+    elseif hintDuration then
+        learnedText = string.format(L("learned: %s s"), formatNumber(hintDuration))
     else
         learnedText = L("unknown until the effect was seen once")
     end
-    if duration and estimated then learnedText = learnedText .. " · " .. L("estimated in combat") end
-    if nodeSelected and marker.anchor == "end" and not duration then
+    if hintDuration and hintEstimated then learnedText = learnedText .. " · " .. L("estimated in combat") end
+    if nodeSelected and marker.anchor == "end" and not hintDuration then
         learnedText = L("seconds before the end need a duration")
     end
     timeline.durationHint:SetText(learnedText)
     -- The property row belongs to the selected node: shown only for an inner node, never as empty fields.
     for _, region in ipairs({ timeline.timingLabel, timeline.anchorChoice, timeline.valueBox, timeline.valueUnit,
-        timeline.durationLabel, timeline.durationBox, timeline.durationHint, timeline.removeButton }) do
+        timeline.durationLabel, timeline.durationBox, timeline.durationHint }) do
         region:SetShown(nodeSelected)
     end
-    timeline.frame:SetHeight(nodeSelected and 146 or 108)
+    -- A group node can be removed on the group line; on a spell's track the node can only be linked back.
+    timeline.removeButton:SetShown(nodeSelected and not spellID)
+    timeline.relinkButton:SetShown(nodeSelected and spellID ~= nil and ns.Markers.GetOverride(rule, spellID, selected) ~= nil)
+    timeline.frame:SetHeight((nodeSelected and 146 or 108) + spellsExtra)
 end
 
 function ns.layoutTimeline(y)
@@ -8477,6 +8683,10 @@ function ns.layoutTimeline(y)
     timeline.addButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT, -6)
     timeline.removeButton:ClearAllPoints()
     timeline.removeButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
+    timeline.relinkButton:ClearAllPoints()
+    timeline.relinkButton:SetPoint("RIGHT", timeline.addButton, "LEFT", -8, 0)
+    timeline.spellsButton:ClearAllPoints()
+    timeline.spellsButton:SetPoint("RIGHT", timeline.removeButton, "LEFT", -8, 0)
     timeline.track:ClearAllPoints()
     timeline.track:SetPoint("TOPLEFT", frame, "TOPLEFT", ns.Layout.PAD + 28, -48)
     timeline.track:SetPoint("TOPRIGHT", frame, "TOPRIGHT", ns.Layout.RIGHT - 28, -48)

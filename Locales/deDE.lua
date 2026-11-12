@@ -452,4 +452,7 @@ ns.Locales.deDE = {
     ["Every rank of this spell counts (Lay on Hands rank 1, 2 and 3). The ranks are found once in the background and remembered."] = "Jeder Rang dieses Zaubers zählt (Handauflegung Rang 1, 2 und 3). Die Ränge werden einmal im Hintergrund gesucht und gemerkt.",
     ["Paladin: one aura rule with every Seal you know."] = "Paladin: eine Aura-Regel mit allen Siegeln, die du kennst.",
     ["Seals could not be added."] = "Siegel konnten nicht hinzugefügt werden.",
+    ["Spells"] = "Zauber", ["Link to group"] = "Mit Gruppe verknüpfen", ["duration unknown"] = "Laufzeit unbekannt",
+    ["Shows one track per spell. The group line moves a node for every spell; dragging on a spell's track moves it for that spell only (marked blue). Seconds always belong to that spell's own duration."] = "Zeigt eine Spur pro Zauber. Die Gruppenlinie verschiebt einen Knoten für alle Zauber; Ziehen auf der Spur eines Zaubers verschiebt ihn nur für diesen (blau markiert). Sekunden gehören immer zur eigenen Laufzeit des Zaubers.",
+    ["This spell has its own timing for the node. Linking it again makes it follow the group node."] = "Dieser Zauber hat für den Knoten eine eigene Zeit. Verknüpfen lässt ihn dem Gruppen-Knoten wieder folgen.",
 }

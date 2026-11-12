@@ -85,3 +85,30 @@ check("older fromEnd becomes an end anchor", legacy.markers[2].anchor == "end" a
 M.SetTiming(t, a, "start", 3, 10)
 M.Resolve(t, 10)
 check("resolve draws second-based nodes at their spot", t.markers[2].at == 30)
+
+-- Per-spell overrides of a group rule
+local g = { spellIDs = { 11, 22 } }
+M.Normalize(g, "auras")
+local pk = M.Add(g, 50)
+local ek = M.Add(g, 90)
+M.SetTiming(g, ek, "end", 5, 30)
+check("spell without override follows the group", select(2, M.Effective(g, 11, pk)) == false and M.Effective(g, 11, pk).at == 50)
+M.MoveOverride(g, 22, pk, 70, 15)
+check("moving on one spell overrides only that spell", M.Effective(g, 22, pk).at == 70 and M.Effective(g, 11, pk).at == 50 and M.OverrideCount(g) == 1)
+M.MoveOverride(g, 22, ek, 60, 15)
+local e22 = M.Effective(g, 22, ek)
+check("override keeps the end anchor and moves its seconds", e22.anchor == "end" and e22.offset == 6, tostring(e22.anchor) .. "/" .. tostring(e22.offset))
+check("group node itself is untouched", g.markers[3].offset == 5 or g.markers[2].offset == 5)
+local list22 = M.ForSpell(g, 22)
+local found
+for _, marker in ipairs(list22) do if marker.key == pk then found = marker end end
+check("ForSpell resolves overrides", found and found.at == 70)
+M.SetOverrideTiming(g, 11, pk, "percent", 33)
+check("typed value sets the override", M.Effective(g, 11, pk).at == 33 and M.OverrideCount(g) == 3)
+M.ClearOverride(g, 11, pk)
+check("clear re-links to the group", select(2, M.Effective(g, 11, pk)) == false and M.OverrideCount(g) == 2)
+M.Remove(g, pk)
+check("removing a node drops its overrides", M.OverrideCount(g) == 1)
+g.spellIDs = { 11 }
+M.PruneOverrides(g)
+check("overrides of removed spells are pruned", g.markerOverrides == nil)
