@@ -3,6 +3,7 @@
 
 local now = 0
 local chargeData = {}
+local cooldownData = {}
 local notices = {}
 local chargeDurationAvailable = true
 local durationCalls = { charge = 0, cooldown = 0 }
@@ -70,8 +71,8 @@ function CreateFrame() return newFrame() end
 
 C_Spell = {
     GetSpellCharges = function(spellID) return chargeData[spellID] end,
-    GetSpellCooldown = function()
-        return { startTime = 0, duration = 0, isEnabled = true, isOnGCD = false }
+    GetSpellCooldown = function(spellID)
+        return cooldownData[spellID] or { startTime = 0, duration = 0, isEnabled = true, isOnGCD = false }
     end,
     GetSpellChargeDuration = function()
         durationCalls.charge = durationCalls.charge + 1
@@ -312,3 +313,25 @@ tracking.CancelLearning("test complete", true)
 C_UnitAuras = previousAuraAPI
 tracking.learningWindow = previousAuraWindow
 tracking.RenderLearningResults = previousRenderLearningResults
+
+
+-- Cooldown cycles feed the timeline nodes (tracking.cycle): start+duration while running, nil when it ended.
+reset()
+local cycles = {}
+tracking.cycle = function(rule, startTime, duration) cycles[#cycles + 1] = { rule = rule.id, start = startTime, duration = duration } end
+local cyc = makeRule("cyc", 3001, "offCooldown")
+local onlyOn = makeRule("on", 3002, "onCooldown")
+rules = { cyc, onlyOn }
+scan(rules, "BASELINE")
+check("idle spell: no cycle", #cycles == 0)
+now = 10
+cooldownData[3001] = { startTime = 10, duration = 30, isEnabled = true, isOnGCD = false }
+cooldownData[3002] = { startTime = 10, duration = 30, isEnabled = true, isOnGCD = false }
+scan(rules, "SPELL_UPDATE_COOLDOWN")
+check("running offCooldown reports its cycle", #cycles == 1 and cycles[1].rule == "cyc" and cycles[1].start == 10 and cycles[1].duration == 30)
+now = 41
+cooldownData[3001] = nil
+cooldownData[3002] = nil
+scan(rules, "SPELL_UPDATE_COOLDOWN")
+check("ended cooldown reports nil", #cycles == 2 and cycles[2].rule == "cyc" and cycles[2].start == nil)
+tracking.cycle = nil

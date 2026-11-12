@@ -73,6 +73,7 @@ function tracking.ResetRule(rule)
     end
     tracking.states[rule] = nil
     tracking.inactiveRules[rule] = nil
+    if tracking.cycle then tracking.cycle(rule, nil) end
 end
 
 function tracking.ResetAll()
@@ -177,6 +178,12 @@ end
 local function fire(rule, event, cause, cooldown, charges)
     addDebug(rule, event, "announce:" .. cause, cooldown, charges)
     if tracking.notify then tracking.notify(rule, cause, event) end
+end
+
+-- Timeline nodes between "used" and "ready": the cooldown cycle of an offCooldown rule (start + duration), or nil
+-- when it ended / was reset. Set by WoWraVox.lua (tracking.cycle).
+local function cycle(rule, startTime, duration)
+    if tracking.cycle and rule and rule.triggerType == "offCooldown" then tracking.cycle(rule, startTime, duration) end
 end
 
 local function invalidateReadyTimer(state)
@@ -295,6 +302,7 @@ function tracking.OnDurationCooldownDone(self)
     state.cooldownActive = false
     state.cooldownEnd = nil
     invalidateReadyTimer(state)
+    cycle(rule, nil)
     if not state.notified then
         state.notified = true
         fire(rule, "OnCooldownDone", "offCooldown", cooldown, chargesOK and charges or nil)
@@ -468,6 +476,7 @@ local function processCooldownSnapshot(rule, event, state, cooldown, cooldownOK,
         state.cooldownEnd = active and cooldown.startTime + cooldown.duration or nil
         if not state.chargeTracking then state.notified = false end
         if active and shouldScheduleReady(rule, state) then scheduleReady(rule, state) end
+        if active and not state.chargeTracking then cycle(rule, cooldown.startTime, cooldown.duration) end
         addDebug(rule, event, state.initialized and "baseline-after-unavailable-data" or "baseline", cooldown, charges)
         return
     end
@@ -485,6 +494,7 @@ local function processCooldownSnapshot(rule, event, state, cooldown, cooldownOK,
             addDebug(rule, event, "cooldown-end-changed", cooldown, charges)
         end
         state.cooldownEnd = newEnd
+        if not state.chargeTracking then cycle(rule, cooldown.startTime, cooldown.duration) end
         if shouldScheduleReady(rule, state) then
             scheduleReady(rule, state)
         else
@@ -494,6 +504,7 @@ local function processCooldownSnapshot(rule, event, state, cooldown, cooldownOK,
         state.cooldownActive = false
         state.cooldownEnd = nil
         invalidateReadyTimer(state)
+        cycle(rule, nil)
         if not state.chargeTracking and rule.triggerType == "offCooldown" and not state.notified then
             clearDurationWatch(rule, state)
             state.notified = true

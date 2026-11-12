@@ -809,17 +809,17 @@ function ns.normalizeRuleScreenProfiles(rule, category, settings)
         rule.expireScreenText = nil
         rule.beforeExpireScreenEnabled = nil
         rule.beforeExpireScreenText = nil
-        -- Intermediate timeline markers (m1, m2, ...) keep their own screen profile under their key.
-        for key, profile in pairs(rule.screenProfiles) do
-            if type(key) == "string" and key:match("^m%d+$") then
-                rule.screenProfiles[key] = ns.normalizeScreenProfile(profile, false, "", settings)
-            end
-        end
     else
         rule.screenProfiles.ready = ns.normalizeScreenProfile(
             rule.screenProfiles.ready, rule.screenEnabled, rule.screenText, settings)
         rule.screenEnabled = nil
         rule.screenText = nil
+    end
+    -- Intermediate timeline markers (m1, m2, ...) keep their own screen profile under their key.
+    for key, profile in pairs(rule.screenProfiles) do
+        if type(key) == "string" and key:match("^m%d+$") then
+            rule.screenProfiles[key] = ns.normalizeScreenProfile(profile, false, "", settings)
+        end
     end
 end
 
@@ -2582,7 +2582,7 @@ end
 do
 -- Intermediate timeline markers (MarkerTimers.lua). The duration is the readable one, else the rule's override, else
 -- the last readable duration learned for this spell (WoWraVoxProfilesDB.auraDurations); the latter two are estimates.
-local markerTimers = ns.MarkerTimers and ns.MarkerTimers.Create({
+ns.markerTimerApi = {
     now = function() return GetTime() end,
     schedule = function(delay, callback)
         local ok, timer = pcall(C_Timer.NewTimer, delay, callback)
@@ -2599,7 +2599,8 @@ local markerTimers = ns.MarkerTimers and ns.MarkerTimers.Create({
             end
         end
     end,
-})
+}
+local markerTimers = ns.MarkerTimers and ns.MarkerTimers.Create(ns.markerTimerApi)
 ns.markerTimers = markerTimers
 
 local function learnedDurations()
@@ -2609,7 +2610,7 @@ local function learnedDurations()
 end
 ns.learnedDurations = learnedDurations
 
-local function markerSignature(rule, markers)
+function ns.markerSignature(rule, markers)
     local parts = {}
     for _, marker in ipairs(markers or rule.markers or {}) do parts[#parts + 1] = marker.key .. "@" .. tostring(marker.at) .. "/" .. tostring(marker.anchor) .. tostring(marker.offset) end
     return table.concat(parts, ",") .. "|" .. tostring(rule.durationOverride)
@@ -2644,7 +2645,7 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
     local markers = ns.Markers.ForSpell(rule, spellID)
     markerTimers:Update(rule.id, spellID, {
         active = true, start = start, duration = duration, estimated = estimated,
-        markers = markers, baseline = isBaseline == true, signature = markerSignature(rule, markers),
+        markers = markers, baseline = isBaseline == true, signature = ns.markerSignature(rule, markers),
     })
 end
 end
@@ -3971,6 +3972,7 @@ end
 -- state == nil drops that member's cycle (and the rule's table once it is empty).
 function ns.setItemState(rule, key, state)
     local states = itemCooldownStates[rule]
+    if state == nil and states and states[key] then ns.cooldownCycle(rule, states[key].itemID, nil) end
     if not states then
         if state == nil then return end
         states = {}
@@ -3978,6 +3980,75 @@ function ns.setItemState(rule, key, state)
     end
     states[key] = state
     if next(states) == nil then itemCooldownStates[rule] = nil end
+end
+
+-- Timeline nodes of item and spell cooldown rules: 0 % = used, 100 % = ready (the existing ready event), inner nodes
+-- at a percentage / seconds of the cooldown. Cooldown cycles are readable, so the timers never estimate; the last
+-- seen duration is kept (WoWraVoxProfilesDB.cooldownDurations) so the editor can show seconds while idle.
+do
+local rulesByID = {}
+local api = {}
+for name, fn in pairs(ns.markerTimerApi or {}) do api[name] = fn end
+api.emit = function(ruleID, key, markerKey)
+    local rule = rulesByID[tostring(ruleID)]
+    if not (rule and rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule)) then return end
+    local spellID, ctx = rule.spellID, nil
+    if not spellID then ctx = ns.itemContext(key, ns.findEquippedItemSlot(key)) end
+    notifyRule(rule, markerKey, rule[markerKey .. "Enabled"] and rule[markerKey .. "Message"] or "", spellID,
+        "MARKER_TIMER", markerKey, ctx)
+end
+ns.cooldownTimers = ns.MarkerTimers and ns.MarkerTimers.Create(api)
+
+function ns.learnedCooldowns()
+    if type(WoWraVoxProfilesDB) ~= "table" then return nil end
+    WoWraVoxProfilesDB.cooldownDurations = type(WoWraVoxProfilesDB.cooldownDurations) == "table"
+        and WoWraVoxProfilesDB.cooldownDurations or {}
+    return WoWraVoxProfilesDB.cooldownDurations
+end
+
+-- Store key of a cooldown: the spell ID of a spell rule, the negative item ID of an item rule.
+function ns.cooldownKey(rule, key)
+    return rule.spellID and key or -key
+end
+
+-- Duration the editor shows for a cooldown rule (override, else the last one seen), estimated flag.
+function ns.cooldownDuration(rule)
+    if not ns.MarkerTimers then return nil, true end
+    local key
+    if rule.spellID then
+        key = rule.spellID
+    else
+        local member = ns.itemMembers(rule)[1]
+        local itemID = member and (member.slotID and ns.getEquippedItemID(member.slotID) or member.itemID)
+        key = itemID and -itemID
+    end
+    if not key then return nil, true end
+    return ns.MarkerTimers.DurationFor(rule, key, nil, ns.learnedCooldowns())
+end
+
+-- A cooldown of `key` (spell ID / item ID) runs from `start` for `duration`; start nil = it ended or was reset.
+function ns.cooldownCycle(rule, key, start, duration)
+    local timers = ns.cooldownTimers
+    if not (timers and rule and rule.id and key) then return end
+    if not start or #ns.Markers.Intermediate(rule) == 0 then
+        timers:Stop(rule.id, key)
+        return
+    end
+    rulesByID[tostring(rule.id)] = rule
+    if isPublicNumber(duration) and duration > 0 then
+        ns.MarkerTimers.Learn(ns.learnedCooldowns(), ns.cooldownKey(rule, key), duration)
+    end
+    local length, estimated = ns.MarkerTimers.DurationFor(rule, ns.cooldownKey(rule, key), duration, ns.learnedCooldowns())
+    timers:Update(rule.id, key, {
+        active = true, start = start, duration = length, estimated = estimated,
+        -- A cooldown found already running (login, reload) skips nodes that are in the past.
+        baseline = GetTime() - start > 1, markers = rule.markers, signature = ns.markerSignature(rule, rule.markers),
+    })
+end
+
+function ns.cooldownStopRule(rule)
+    if ns.cooldownTimers and rule and rule.id then ns.cooldownTimers:StopOthers(rule.id, nil) end
+end
 end
 
 function ns.scheduleItemReady(rule, member, state)
@@ -4052,6 +4123,9 @@ function ns.checkItemMember(rule, member)
         else
             state.source = reading.source
         end
+        -- A swap lockout (notified, never announced) is not a real use: no nodes for it.
+        if state.notified then ns.cooldownCycle(rule, itemID, nil)
+        else ns.cooldownCycle(rule, itemID, state.cycleStart, reading.duration) end
         ns.scheduleItemReady(rule, member, state)
         return
     end
@@ -4080,6 +4154,7 @@ ns.checkItemRule = function(rule)
     -- ns.itemScanSpecID is set only during ns.scanItemRules; nil (timer path, or spec unknown) makes the rule read it.
     if not rule.enabled or not ns.Profiles.RuleMatchesCurrentSpecialization(rule, ns.itemScanSpecID) then
         if itemCooldownStates[rule] then ns.logItemDecision(rule, "check", "inactive") end
+        ns.cooldownStopRule(rule)
         itemCooldownStates[rule] = nil
         return
     end
@@ -4136,6 +4211,9 @@ local function scanSkillRules(event)
     if profiling then ns.Prof.add("scanSkillRules", ns.Prof.clock() - started) end
 end
 
+ns.SkillTracking.cycle = function(rule, start, duration)
+    ns.cooldownCycle(rule, rule.spellID, start, duration)
+end
 ns.SkillTracking.Configure(
     function(rule) return ns.Profiles and ns.Profiles.RuleMatchesCurrentSpecialization(rule) end,
     function(rule, cause, sourceEvent)
@@ -4151,6 +4229,7 @@ function ns.RefreshRuleActivationState()
     ns._Aura.clearActiveState()
     ns._Aura.resetEventState()
     wipe(itemCooldownStates)
+    if ns.cooldownTimers then ns.cooldownTimers:Reset() end
     ns.SkillTracking.ResetAll()
     auraBaselineComplete = false
     syncAllAuras(true)
@@ -5920,13 +5999,9 @@ local function layoutSharedEditor(isAura)
     local voiceY
     local voiceExpanded = ns.Layout.isPanelExpanded(auraEditor.voice)
     local voiceHeight = voiceExpanded and 118 or 34
-    if isAura then
-        auraEditor.skillTriggerLabel:Hide()
-        auraEditor.skillTriggerDropdown:Hide()
-        auraEditor.skillLearnButton:SetShown(selectedAura() ~= nil and selectedAura().builtin ~= true)
-        auraEditor.skillLearningStatus:Hide()
-        ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
-        -- One box: tabs on its top edge, the timeline strip, then the selected node's fields, no gaps between.
+    -- One box: tabs on its top edge, the timeline strip, then the selected node's fields, no gaps between.
+    -- Aura groups, item rules and "comes off cooldown" spell rules use it; other spell triggers keep the plain panel.
+    local function layoutTimelineBox(rule)
         local tabsY = messageY - 12
         local tabBar = ns.timeline.tabBar
         tabBar:ClearAllPoints()
@@ -5936,15 +6011,30 @@ local function layoutSharedEditor(isAura)
         tabBar:Show()
         local timelineY = tabsY - 30
         local panelY = timelineY - ns.layoutTimeline(timelineY)
-        local key = ns.SelectedMarkerKey(selectedAura())
-        local panel = key == "apply" and ns.notificationPanels.apply or key == "expire" and ns.notificationPanels.expire
-            or ns.notificationPanels.beforeExpire
-        for _, candidate in ipairs({ ns.notificationPanels.apply, ns.notificationPanels.expire, ns.notificationPanels.beforeExpire }) do
+        local key = ns.SelectedMarkerKey(rule)
+        local panels = ns.notificationPanels
+        local panel = key == "apply" and panels.apply or key == "expire" and panels.expire
+            or key == "ready" and panels.ready or panels.beforeExpire
+        for _, candidate in ipairs({ panels.apply, panels.expire, panels.beforeExpire, panels.ready }) do
             if candidate ~= panel then ns.setNotificationPanelShown(candidate, false) end
         end
+        -- The ready panel joins the timeline box: no top edge of its own.
+        local joinedEdge = panels.ready.frame.lines[1]
+        joinedEdge:SetShown(false)
+        panels.ready.frame.corners[1]:SetShown(false)
+        panels.ready.frame.corners[2]:SetShown(false)
         ns.setNotificationPanelShown(panel, true)
         layoutNotificationPanel(panel, panelY)
-        voiceY = panelY - panel.frame:GetHeight() - 12
+        return panelY - panel.frame:GetHeight() - 12
+    end
+    local timelineSkill = isSkill and selectedSkillRule and selectedSkillRule.triggerType == "offCooldown"
+    if isAura then
+        auraEditor.skillTriggerLabel:Hide()
+        auraEditor.skillTriggerDropdown:Hide()
+        auraEditor.skillLearnButton:SetShown(selectedAura() ~= nil and selectedAura().builtin ~= true)
+        auraEditor.skillLearningStatus:Hide()
+        ns.setNotificationPanelShown(ns.notificationPanels.ready, false)
+        voiceY = layoutTimelineBox(selectedAura())
     else
         auraEditor.skillTriggerLabel:ClearAllPoints()
         auraEditor.skillTriggerLabel:SetPoint("TOPLEFT", triggerPanel, "TOPLEFT", ns.Layout.PAD, -22)
@@ -5962,11 +6052,19 @@ local function layoutSharedEditor(isAura)
         ns.setNotificationPanelShown(ns.notificationPanels.apply, false)
         ns.setNotificationPanelShown(ns.notificationPanels.expire, false)
         ns.setNotificationPanelShown(ns.notificationPanels.beforeExpire, false)
-        if ns.timeline.frame then ns.timeline.frame:Hide() end
-        if ns.timeline.tabBar then ns.timeline.tabBar:Hide() end
-        ns.setNotificationPanelShown(ns.notificationPanels.ready, true)
-        layoutNotificationPanel(ns.notificationPanels.ready, messageY)
-        voiceY = messageY - ns.notificationPanels.ready.frame:GetHeight() - 6
+        if isItem or timelineSkill then
+            voiceY = layoutTimelineBox(isItem and selectedItemRule or selectedSkillRule)
+        else
+            if ns.timeline.frame then ns.timeline.frame:Hide() end
+            if ns.timeline.tabBar then ns.timeline.tabBar:Hide() end
+            ns.setNotificationPanelShown(ns.notificationPanels.ready, true)
+            local readyFrame = ns.notificationPanels.ready.frame
+            readyFrame.lines[1]:SetShown(true)
+            readyFrame.corners[1]:SetShown(true)
+            readyFrame.corners[2]:SetShown(true)
+            layoutNotificationPanel(ns.notificationPanels.ready, messageY)
+            voiceY = messageY - ns.notificationPanels.ready.frame:GetHeight() - 6
+        end
     end
     auraEditor.voicePanel:ClearAllPoints()
     auraEditor.voicePanel:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 0, voiceY)
@@ -6961,6 +7059,10 @@ function saveDetails()
         if readyRule and ruleNameBox then
             readyRule.name = trim(ruleNameBox:GetText())
             saveNotificationPanel(ns.notificationPanels.ready, readyRule, "ready")
+            local nodePanel = ns.notificationPanels.beforeExpire
+            if nodePanel.loadedKey and not ns.Markers.IsEndpoint(nodePanel.loadedKey) and ns.findMarker(readyRule, nodePanel.loadedKey) then
+                saveNotificationPanel(nodePanel, readyRule, nodePanel.loadedKey)
+            end
         end
     end
     refreshList()
@@ -7143,6 +7245,15 @@ function updateDetails()
             end
         end
         loadNotificationPanel(ns.notificationPanels.ready, readyRule, "ready")
+        local nodeKey = ns.SelectedMarkerKey(readyRule)
+        local nodePanel = ns.notificationPanels.beforeExpire
+        nodePanel.loadedKey = nil
+        if not ns.Markers.IsEndpoint(nodeKey) and ns.findMarker(readyRule, nodeKey) then
+            nodePanel.eventKey, nodePanel.key, nodePanel.screen.eventKey = nodeKey, nodeKey, nodeKey
+            loadNotificationPanel(nodePanel, readyRule, nodeKey)
+            nodePanel.loadedKey = nodeKey
+            nodePanel.heading:SetText(ns.markerTitle(ns.findMarker(readyRule, nodeKey), readyRule))
+        end
         layoutSharedEditor(false)
         itemSourceText:Show()
         ns.itemHelpButton:SetShown(itemRule ~= nil)
@@ -8048,6 +8159,9 @@ do
 local timeline = {}
 ns.timeline = timeline
 
+-- The rule the timeline edits: an aura group, or an item / spell cooldown rule.
+function ns.timelineRule() return selectedAura() or selectedItem() or selectedSkill() end
+
 local ANCHOR_CHOICES = {
     { value = "percent", label = "Percent of the duration", unit = "%" },
     { value = "start", label = "Seconds after start", unit = "s after start" },
@@ -8055,13 +8169,13 @@ local ANCHOR_CHOICES = {
 }
 
 function ns.SelectedMarkerKey(rule)
-    rule = rule or selectedAura()
+    rule = rule or ns.timelineRule()
     if rule and type(rule.markers) == "table" then
         for _, marker in ipairs(rule.markers) do
             if marker.key == selectedMarkerKey then return selectedMarkerKey end
         end
     end
-    selectedMarkerKey = "apply"
+    selectedMarkerKey = (rule and ns.Markers.IsEndpoint("ready") and not rule.spellIDs) and "ready" or "apply"
     return selectedMarkerKey
 end
 
@@ -8083,6 +8197,7 @@ end
 -- Reference duration of the group line: the longest known one (a single spell: its own).
 local function timelineDuration(rule)
     if not (rule and ns.MarkerTimers) then return nil, true end
+    if not rule.spellIDs then return ns.cooldownDuration(rule) end
     local best, bestEstimated
     for _, spellID in ipairs(rule.spellIDs or {}) do
         local duration, estimated = ns.spellDuration(rule, spellID)
@@ -8123,7 +8238,8 @@ end
 local function markerTitle(marker, rule)
     if marker.key == "apply" then return L("Start") end
     if marker.key == "expire" then return L("End") end
-    local number = markerNumber(rule or selectedAura(), marker.key)
+    if marker.key == "ready" then return L("Ready") end
+    local number = markerNumber(rule or ns.timelineRule(), marker.key)
     return L("Node") .. " " .. tostring(number or "?") .. "  ·  " .. timingText(marker)
 end
 ns.markerTitle = markerTitle
@@ -8136,7 +8252,7 @@ end
 ns.findMarker = findMarker
 
 local function applyTiming(anchor)
-    local rule = selectedAura()
+    local rule = ns.timelineRule()
     if not rule or editorLoading then return end
     local key = ns.SelectedMarkerKey(rule)
     if ns.Markers.IsEndpoint(key) then return end
@@ -8156,7 +8272,7 @@ local function applyTiming(anchor)
 end
 
 local function applyDurationOverride()
-    local rule = selectedAura()
+    local rule = ns.timelineRule()
     if not rule or editorLoading then return end
     local value = tonumber((timeline.durationBox:GetText():gsub(",", ".")))
     rule.durationOverride = value and value > 0 and value or nil
@@ -8164,7 +8280,7 @@ local function applyDurationOverride()
 end
 
 function ns.timeline.beginEdit(handle)
-    local rule = selectedAura()
+    local rule = ns.timelineRule()
     local marker = rule and findMarker(rule, handle.key)
     if not marker or ns.Markers.IsEndpoint(marker.key) then return end
     ns.SelectMarker(marker.key)
@@ -8176,7 +8292,7 @@ function ns.timeline.beginEdit(handle)
         box:SetScript("OnEscapePressed", function(self) self:ClearFocus() self:Hide() end)
         box:SetScript("OnEditFocusLost", function(self) self:Hide() end)
         box:SetScript("OnEnterPressed", function(self)
-            local current = selectedAura()
+            local current = ns.timelineRule()
             local node = current and findMarker(current, self.key)
             local value = tonumber((self:GetText():gsub(",", ".")))
             self:Hide()
@@ -8203,7 +8319,7 @@ local function addNodeAt(rule, at)
     local key = ns.Markers.Add(rule, at)
     rule[key .. "Enabled"] = true
     rule[key .. "Message"] = ""
-    ns.normalizeNotificationSettings(rule, "auras")
+    ns.normalizeNotificationSettings(rule, selectedCategory)
     selectedMarkerKey = key
     updateDetails()
 end
@@ -8231,7 +8347,7 @@ local function buildTimelinePanel()
     track:EnableMouse(true)
     track:SetScript("OnMouseUp", function(self, button)
         if button ~= "LeftButton" then return end
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         local left, width = self:GetLeft(), self:GetWidth()
         if not (rule and left and width and width > 0) then return end
         local x = GetCursorPosition() / self:GetEffectiveScale()
@@ -8245,7 +8361,7 @@ local function buildTimelinePanel()
         OnAccept = function(_, data)
             if not (data and data.rule) then return end
             if ns.Markers.Remove(data.rule, data.key) then
-                ns.normalizeNotificationSettings(data.rule, "auras")
+                ns.normalizeNotificationSettings(data.rule, selectedCategory)
                 if selectedMarkerKey == data.key then selectedMarkerKey = "apply" end
                 updateDetails()
             end
@@ -8270,14 +8386,14 @@ local function buildTimelinePanel()
     timeline.addButton:SetSize(120, 24)
     timeline.addButton:SetText("+ " .. L("New node"))
     timeline.addButton:SetScript("OnClick", function()
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         if rule then addNodeAt(rule, 90) end
     end)
     timeline.removeButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     timeline.removeButton:SetSize(120, 24)
     timeline.removeButton:SetText(L("Remove node"))
     timeline.removeButton:SetScript("OnClick", function()
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         if not rule then return end
         local key = ns.SelectedMarkerKey(rule)
         StaticPopup_Show("WOWRAVOX_REMOVE_NODE", markerTitle(findMarker(rule, key) or { key = key, at = 0 }, rule),
@@ -8299,7 +8415,7 @@ local function buildTimelinePanel()
     timeline.relinkButton:SetSize(120, 24)
     timeline.relinkButton:SetText(L("Link to group"))
     timeline.relinkButton:SetScript("OnClick", function()
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         if rule and timeline.spellID and ns.Markers.ClearOverride(rule, timeline.spellID, ns.SelectedMarkerKey(rule)) then
             updateDetails()
         end
@@ -8309,7 +8425,7 @@ local function buildTimelinePanel()
     timeline.offButton:SetSize(180, 24)
     timeline.offButton:SetText(L("Remove from this spell"))
     timeline.offButton:SetScript("OnClick", function()
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         if rule and timeline.spellID and ns.Markers.DisableOverride(rule, timeline.spellID, ns.SelectedMarkerKey(rule)) then
             updateDetails()
         end
@@ -8379,7 +8495,7 @@ local function handleFor(index)
     handle:SetScript("OnMouseUp", function(self)
         local dragging = self.dragging
         self.dragging = false
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         if not rule then return end
         if dragging and self.moved and self.dragAt then
             ns.Markers.Move(rule, self.key, math.floor(self.dragAt * 10 + 0.5) / 10, nil, timelineDuration(rule))
@@ -8401,9 +8517,9 @@ local function handleFor(index)
         self:ClearAllPoints()
         self:SetPoint("CENTER", timeline.track, "LEFT", width * at / 100, 0)
         -- Show the value in the node's own timing while dragging.
-        local marker = findMarker(selectedAura(), self.key)
-        local duration = timelineDuration(selectedAura())
-        if not duration or #(selectedAura().spellIDs or {}) > 1 then
+        local marker = findMarker(ns.timelineRule(), self.key)
+        local duration = timelineDuration(ns.timelineRule())
+        if not duration or #(ns.timelineRule().spellIDs or {}) > 1 then
             self.label:SetText(formatNumber(at) .. " %")
         elseif marker and marker.anchor == "start" then
             self.label:SetText("+" .. formatNumber(duration * at / 100) .. " s  ·  " .. formatNumber(at) .. " %")
@@ -8483,7 +8599,7 @@ function timeline.spellRowFor(index)
     row.track:EnableMouse(true)
     row.track:SetScript("OnMouseUp", function(self, button)
         if button ~= "LeftButton" or not row.spellID then return end
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         local left, width = self:GetLeft(), self:GetWidth()
         if not (rule and left and width and width > 0) then return end
         local x = GetCursorPosition() / self:GetEffectiveScale()
@@ -8491,7 +8607,7 @@ function timeline.spellRowFor(index)
         local key = ns.Markers.AddOnlyFor(rule, row.spellID, ns.Markers.ClampInner(math.floor((x - left) / width * 1000 + 0.5) / 10))
         rule[key .. "Enabled"] = true
         rule[key .. "Message"] = ""
-        ns.normalizeNotificationSettings(rule, "auras")
+        ns.normalizeNotificationSettings(rule, selectedCategory)
         selectedMarkerKey = key
         timeline.spellID = row.spellID
         updateDetails()
@@ -8539,14 +8655,14 @@ function timeline.spellHandleFor(row, index)
         -- Both while dragging: percent above, this spell's seconds below.
         self.top:SetText(formatNumber(at) .. " %")
         self.top:Show()
-        local duration = ns.spellDuration(selectedAura(), self.spellID)
+        local duration = ns.spellDuration(ns.timelineRule(), self.spellID)
         self.label:SetText(duration and (formatNumber(duration * at / 100) .. " s") or "? s")
     end)
     handle:SetScript("OnMouseUp", function(self)
         local dragging = self.dragging
         self.dragging = false
         self.top:Hide()
-        local rule = selectedAura()
+        local rule = ns.timelineRule()
         if rule and dragging and self.moved and self.dragAt then
             ns.Markers.MoveOverride(rule, self.spellID, self.key, math.floor(self.dragAt * 10 + 0.5) / 10,
                 (ns.spellDuration(rule, self.spellID)))
@@ -8652,7 +8768,8 @@ function ns.refreshTimeline(rule)
             local seconds = ns.Markers.Seconds(marker, duration)
             if seconds then labelText = labelText .. "  ·  -" .. formatNumber(duration - seconds) .. " s" end
         end
-        handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End") or labelText)
+        handle.label:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
+            or marker.key == "ready" and L("Ready") or labelText)
         if isSelected then
             handle.tex:SetVertexColor(1, 0.82, 0.2)
         elseif endpoint then
@@ -8681,7 +8798,7 @@ function ns.refreshTimeline(rule)
         local tab = tabFor(index)
         tab.key, tab.selected = marker.key, isSelected
         tab.text:SetText(marker.key == "apply" and L("Start") or marker.key == "expire" and L("End")
-            or (tostring(number) .. "  ·  " .. timingText(marker)))
+            or marker.key == "ready" and L("Ready") or (tostring(number) .. "  ·  " .. timingText(marker)))
         tab:SetWidth(math.max(70, tab.text:GetStringWidth() + 40))
         tab:ClearAllPoints()
         tab:SetPoint("BOTTOMLEFT", previousTab or timeline.tabBar, previousTab and "BOTTOMRIGHT" or "BOTTOMLEFT",
@@ -8790,7 +8907,7 @@ function ns.layoutTimeline(y)
     timeline.durationHint:SetPoint("RIGHT", frame, "RIGHT", ns.Layout.RIGHT, 0)
     timeline.durationHint:SetJustifyH("LEFT")
     frame:Show()
-    ns.refreshTimeline(selectedAura())
+    ns.refreshTimeline(ns.timelineRule())
     return frame:GetHeight()
 end
 ns.buildTimelinePanel = buildTimelinePanel
@@ -10650,6 +10767,7 @@ function ns.Profiles.ActivateUI()
     ns._Aura.clearActiveState()
     ns._Aura.resetEventState()
     wipe(itemCooldownStates)
+    if ns.cooldownTimers then ns.cooldownTimers:Reset() end
     ns.SkillTracking.ResetAll()
     auraBaselineComplete = false
     if ns.AuraPresetUI and ns.AuraPresetUI.creationActive then
