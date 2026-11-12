@@ -529,7 +529,15 @@ end
 if SlashCmdList then
     SLASH_WOWRAVOXCDM1 = "/wvcdm"
     SlashCmdList.WOWRAVOXCDM = function()
-        for _, line in ipairs(ns.AuraCDM.Probe()) do print("|cff66ccffWVX CDM|r " .. line) end
+        local lines = ns.AuraCDM.Probe()
+        -- also kept in the saved variables (written on /reload) so the full output can be read from the file
+        if type(WoWraVoxProfilesDB) == "table" then
+            WoWraVoxProfilesDB.cdmProbe = WoWraVoxProfilesDB.cdmProbe or {}
+            local run = { time = date and date("%H:%M:%S") or "?", lines = lines }
+            table.insert(WoWraVoxProfilesDB.cdmProbe, run)
+            while #WoWraVoxProfilesDB.cdmProbe > 4 do table.remove(WoWraVoxProfilesDB.cdmProbe, 1) end
+        end
+        print("|cff66ccffWVX CDM|r " .. #lines .. " lines saved; /reload writes them to the file")
     end
 end
 
