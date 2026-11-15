@@ -35,6 +35,10 @@ const markerTimers = fs.readFileSync(path.join(root, "MarkerTimers.lua"), "utf8"
   /^local _, ns = \.\.\.$/m,
   "local _, ns = addonName, addonNamespace",
 );
+const auraRun = fs.readFileSync(path.join(root, "AuraRun.lua"), "utf8").replace(
+  /^local _, ns = \.\.\.$/m,
+  "local _, ns = addonName, addonNamespace",
+);
 const spellRanks = fs.readFileSync(path.join(root, "SpellRanks.lua"), "utf8").replace(
   /^local _, ns = \.\.\.$/m,
   "local _, ns = addonName, addonNamespace",
@@ -75,6 +79,9 @@ markers,
 "end",
 "do",
 markerTimers,
+"end",
+"do",
+auraRun,
 "end",
 "do",
 spellRanks,

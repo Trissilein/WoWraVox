@@ -11,6 +11,8 @@
 - Saved aura timings and learned cooldowns keep fractional seconds (e.g. 1.5 s) instead of discarding them.
 - A cast of one rank tracks that exact rank when a rule lists several ranks of the same spell; an ambiguous rank signal uses the first configured trigger.
 - Aura ends and timeline nodes are announced at most once per run (cast, refresh or new aura instance), whichever source reports them and however late; the next run's end is no longer swallowed. The last 60 end/node decisions are kept in `WoWraVoxProfilesDB.endTrace` (time, source, run, lateness against the expected end).
+- Aura ends come from one state machine per run (`AuraRun.lua`) fed in priority order: Cooldown Manager, readable aura, saved time, and last a cast plus learned duration. A natural end is announced on the first removal report, without the former 0.6 s delay; only a removal well before the expected end waits 0.5 s for a seal switch or refresh. A seal switch announces no end; a one-effect seal used up early (Judgement) announces one end, also when it was readable. With estimated warnings on, a cast-only effect without any other source ends at cast plus learned duration. The Cooldown Manager's removed alert and cleared hook now report the aura that left instead of briefly re-lighting it.
+- Seal ends without a Cooldown Manager frame: a seal read before the pull ends in combat at its exact end (+0.5 s), and a recast in combat ends at cast plus learned duration. A recast with a new aura instance seen by two viewers no longer announces a false end, and a seal switch just before the end announces none. Fixed a Lua error when the learning window adds an aura to the All Seals rule.
 
 ## 0.15.0
 

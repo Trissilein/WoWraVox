@@ -1680,7 +1680,7 @@ do
     C_Timer = {
         After = function(delay, callback) table.insert(queue, { at = now + delay, cb = callback }) end,
         NewTimer = function(delay, callback)
-            local timer = { at = now + delay, cb = callback, isExpiry = true }
+            local timer = { at = now + delay, cb = callback, isExpiry = delay ~= ns.AuraRun.REPLACE_WINDOW }
             function timer:Cancel() self.cancelled = true end
             table.insert(queue, timer)
             return timer
@@ -1813,7 +1813,8 @@ do
     C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return present[spellID] end }
     C_Secrets.ShouldAurasBeSecret = function() return false end
 
-    -- Expiry scheduling is deduplicated and cancellable when an aura changes or is removed.
+    -- A readable exact end is probed once at its time (ns.auraRun deadline): deduplicated, replaced when the end
+    -- moves, dropped when the aura is removed or the rules are re-activated.
     do
         reset(bloodlustRule(false))
         now = 20
@@ -2329,18 +2330,25 @@ do
         return frame
     end
 
+    -- An applied aura brings a new aura instance (unless a test set one); hidden values stay hidden.
+    local lastInstance = 1000
     local function newIcon(cooldownID)
         local icon = { cooldownID = cooldownID, isActive = false }
-        function icon:TriggerAuraAppliedAlert() if self.isActive ~= hiddenValue then self.isActive = true end end
-        -- Blizzard's removed alert leaves isActive alone (CooldownViewer.lua TriggerAuraRemovedAlert)...
+        function icon:TriggerAuraAppliedAlert()
+            if self.isActive ~= hiddenValue then self.isActive = true end
+            if self.auraInstanceID == nil then lastInstance = lastInstance + 1; self.auraInstanceID = lastInstance end
+        end
+        -- Blizzard's removed alert leaves isActive and the old aura instance alone (CooldownViewer.lua)...
         function icon:TriggerAuraRemovedAlert() end
         function icon:OnActiveStateChanged() end
         function icon:HookScript() end
         return icon
     end
-    -- ...the frame goes dark only in the RefreshData that follows (SetIsActive(false) -> OnActiveStateChanged).
+    -- ...the frame drops the instance and goes dark only in the RefreshData that follows (SetIsActive(false) ->
+    -- OnActiveStateChanged).
     local function removeAura(icon)
         icon:TriggerAuraRemovedAlert()
+        if icon.auraInstanceID ~= hiddenValue then icon.auraInstanceID = nil end
         if icon.isActive ~= hiddenValue then icon.isActive = false end
         icon:OnActiveStateChanged()
     end
@@ -2467,8 +2475,8 @@ do
         check("CDM four-second warning reaches TTS in combat", tts[#tts] == "Four seconds", list(tts))
         check("CDM four-second warning reaches sound in combat", soundCount == 1)
         now = 110.75
-        ns._Aura.cdmSignal({ DP_ALT }, false)
-        for _, timer in ipairs(deferTimers) do if timer.delay == 0.6 and not timer.cancelled then timer.callback() end end
+        ns._Aura.cdmSignal({ DP_ALT }, false, { instanceID = 17 })
+        -- The natural end is announced at once, before any timer runs (no grace delay).
         check("CDM fractional expiry reaches end TTS in combat", tts[#tts] == "Divine Purpose ended", list(tts))
         check("CDM fractional expiry reaches end sound in combat", soundCount == 2)
         PlaySound = previousSound
@@ -2500,15 +2508,130 @@ do
         -- Blizzard order (OnUnitAuraRemovedEvent): ClearAuraInstanceInfo fires the Cleared hook while wasSetFromAura is
         -- still true; only the RefreshData after it resets wasSetFromAura.
         currentAura, frame.auraInstanceID = nil, nil
-        frame:OnAuraInstanceInfoCleared()
+        frame:OnAuraInstanceInfoCleared(DP_ALT, 77) -- Blizzard passes the spell and the old instance
         check("CDM Cleared hook starts no timer for another seal of the shared entry",
             ns.markerTimers:Get("dp", DP) == nil, list(spoken))
         frame.wasSetFromAura = false
         frame:RefreshData()
-        for _, timer in ipairs(deferTimers) do if timer.delay == 0.6 and not timer.cancelled then timer.callback() end end
         check("CDM inherited removal hook ends the original seal once, no phantom seal",
             list(spoken) == "apply:408459@CDM_SIGNAL|expire:408459@CDM_SIGNAL", list(spoken))
         EssentialCooldownViewer, deferTimers, now = priorEssential, nil, 0
+    end
+    do
+        -- Natural end seen by a buff icon and an Essential frame. Each viewer handles its own UNIT_AURA in Blizzard's
+        -- order (CooldownViewer.lua): the icon's removed alert first (isActive still true, old aura instance), then it
+        -- goes dark; the Essential frame: Cleared(spell, old instance) -> RefreshData. Which viewer runs first is not
+        -- known (in-game only): both orders, every report twice, a stale applied alert in between; one-effect and plain
+        -- rule. MOCKED frames.
+        for variant = 1, 4 do
+            local buffFirst, oneEffect = variant % 2 == 1, variant <= 2
+            local priorEssential = EssentialCooldownViewer
+            local currentAura
+            local methods = {
+                GetAuraSpellID = function() return currentAura end,
+                GetSpellID = function() return currentAura or 1323522 end,
+                OnAuraInstanceInfoSet = function() end,
+                OnAuraInstanceInfoCleared = function() end,
+                RefreshData = function() end,
+            }
+            local essential = setmetatable({ cooldownID = 106, wasSetFromAura = false, cooldownDuration = 30 },
+                { __index = methods })
+            EssentialCooldownViewer = newViewer({ essential })
+            local rule = dpRule({ DP_ALT })
+            rule.oneEffect = oneEffect
+            setup(rule)
+            deferTimers, now = {}, 500
+            local buff = newIcon(101)
+            loadTooltip({ buff }, nil)
+            currentAura, essential.auraInstanceID, essential.wasSetFromAura = DP_ALT, 77, true
+            essential:OnAuraInstanceInfoSet(DP_ALT, 77)
+            essential:RefreshData()
+            buff.auraInstanceID = 77
+            buff:TriggerAuraAppliedAlert()
+            now = 530
+            local function buffViewer()
+                for _ = 1, 2 do buff:TriggerAuraRemovedAlert() end
+                buff:TriggerAuraAppliedAlert() -- a late applied alert of the same, ended instance
+                buff.isActive, buff.auraInstanceID = false, nil
+                for _ = 1, 2 do buff:OnActiveStateChanged() end
+            end
+            local function essentialViewer()
+                currentAura, essential.auraInstanceID = nil, nil
+                for _ = 1, 2 do essential:OnAuraInstanceInfoCleared(DP_ALT, 77) end
+                essential.wasSetFromAura = false
+                essential:RefreshData()
+            end
+            if buffFirst then buffViewer(); essentialViewer() else essentialViewer(); buffViewer() end
+            local label = (buffFirst and "buff icon first" or "Essential frame first") .. (oneEffect and ", one effect" or "")
+            check("natural end, " .. label .. ": one end at once, no new start",
+                list(spoken) == "apply:408459@CDM_SIGNAL|expire:408459@CDM_SIGNAL", list(spoken))
+            for _, timer in ipairs(deferTimers) do if not timer.cancelled then timer.callback() end end
+            check("natural end, " .. label .. ": nothing more after every timer ran",
+                list(spoken) == "apply:408459@CDM_SIGNAL|expire:408459@CDM_SIGNAL", list(spoken))
+            EssentialCooldownViewer, deferTimers, now = priorEssential, nil, 0
+        end
+    end
+    do
+        -- Same seal recast with a new aura instance, seen by an Essential frame and a buff icon (review R1, finding 1):
+        -- the viewer that goes dark after the other one already showed the new instance reports the OLD instance
+        -- (the one it last showed), so the new seal is not taken as ended. Both viewer orders. MOCKED frames and order.
+        for _, essentialFirst in ipairs({ true, false }) do
+            local priorEssential = EssentialCooldownViewer
+            local currentAura
+            local methods = {
+                GetAuraSpellID = function() return currentAura end,
+                GetSpellID = function() return currentAura or 1323522 end,
+                OnAuraInstanceInfoSet = function() end,
+                OnAuraInstanceInfoCleared = function() end,
+                RefreshData = function() end,
+            }
+            local essential = setmetatable({ cooldownID = 106, wasSetFromAura = false, cooldownDuration = 30 },
+                { __index = methods })
+            EssentialCooldownViewer = newViewer({ essential })
+            local rule = dpRule({ DP_ALT })
+            rule.oneEffect = true
+            setup(rule)
+            selfBuff[DP_ALT] = true
+            deferTimers, now = {}, 500
+            local buff = newIcon(101)
+            loadTooltip({ buff }, nil)
+            local function essentialSet(instance)
+                currentAura, essential.auraInstanceID, essential.wasSetFromAura = DP_ALT, instance, true
+                essential:OnAuraInstanceInfoSet(DP_ALT, instance)
+                essential:RefreshData()
+            end
+            local function essentialCleared(instance, thenSet)
+                currentAura, essential.auraInstanceID = nil, nil
+                essential:OnAuraInstanceInfoCleared(DP_ALT, instance)
+                if thenSet then essentialSet(thenSet) return end
+                essential.wasSetFromAura = false
+                essential:RefreshData()
+            end
+            local function buffSwap(newInstance)
+                buff:TriggerAuraRemovedAlert()
+                buff.isActive, buff.auraInstanceID = false, nil
+                buff:OnActiveStateChanged()
+                if newInstance then buff.auraInstanceID = newInstance; buff:TriggerAuraAppliedAlert() end
+            end
+            essentialSet(77)
+            buff.auraInstanceID = 77
+            buff:TriggerAuraAppliedAlert()
+            now = 510
+            ns._Aura.handleCast("player", "Recast", DP_ALT)
+            if essentialFirst then essentialCleared(77, 78); buffSwap(78) else buffSwap(78); essentialCleared(77, 78) end
+            for _, timer in ipairs(deferTimers) do
+                if timer.delay == ns.AuraRun.REPLACE_WINDOW and not timer.cancelled then timer.callback() end
+            end
+            local label = essentialFirst and "Essential frame first" or "buff icon first"
+            check("recast with a new instance, " .. label .. ": no end at the recast", not list(spoken):find("expire"),
+                list(spoken))
+            now = 540
+            essentialCleared(78)
+            buffSwap(nil)
+            check("recast with a new instance, " .. label .. ": the new seal's natural end once, at once",
+                select(2, list(spoken):gsub("expire:", "")) == 1, list(spoken))
+            EssentialCooldownViewer, deferTimers, now = priorEssential, nil, 0
+        end
     end
     do
         -- Seal rules ("All Seals": oneEffect). MOCKED CDM signals; Blizzard's real timing is not covered.
@@ -2566,6 +2689,21 @@ do
             list(spoken) .. " / " .. list(tts))
         check("seal consumed early: the 90 % node stays silent", countOf(tts, "Ninety") == 0, list(tts))
 
+        -- A readable one-effect seal used up early (Judgement, no trigger cast) also ends once, after the window.
+        rule = dpRule({ DP_ALT })
+        rule.oneEffect = true
+        setup(rule, true)
+        deferTimers, now = {}, 400
+        live[DP_ALT] = { spellId = DP_ALT, expirationTime = 430, duration = 30, auraInstanceID = 31 }
+        ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+        now, live[DP_ALT] = 410, nil
+        ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+        check("readable one-effect seal used up early: nothing within the replacement window",
+            countOf(spoken, "expire:408459@UNIT_AURA") == 0, list(spoken))
+        now = 410 + ns.AuraRun.REPLACE_WINDOW
+        runDeferred()
+        check("readable one-effect seal used up early: one end", countOf(spoken, "expire:408459@UNIT_AURA") == 1, list(spoken))
+
         -- Switching seal A -> B (either signal order) is no end; B keeps running.
         for _, removeFirst in ipairs({ true, false }) do
             rule = dpRule({ DP, DP_ALT })
@@ -2577,12 +2715,30 @@ do
             if removeFirst then ns._Aura.cdmSignal({ DP }, false, { source = srcA }) end
             ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 2, duration = 30, source = srcA })
             if not removeFirst then ns._Aura.cdmSignal({ DP }, false, { source = srcA }) end
-            for _, timer in ipairs(deferTimers) do if timer.delay == 0.6 and not timer.cancelled then timer.callback() end end
+            for _, timer in ipairs(deferTimers) do
+                if timer.delay == ns.AuraRun.REPLACE_WINDOW and not timer.cancelled then timer.callback() end
+            end
             local expires = 0
             for _, entry in ipairs(spoken) do if entry:match("^expire") then expires = expires + 1 end end
             check("seal switch A -> B (" .. (removeFirst and "A ends first" or "B starts first") .. ") announces no end",
                 expires == 0, list(spoken))
             check("seal switch A -> B keeps B running", ns.markerTimers:Get("dp", DP_ALT) ~= nil)
+        end
+        -- Last in the chain: only a cast and a learned duration (aura hidden, no Cooldown Manager frame) give an
+        -- estimated end at cast + duration, and only while estimated warnings are on.
+        for _, allowed in ipairs({ true, false }) do
+            rule = dpRule({ DP_ALT })
+            rule.oneEffect = true
+            setup(rule)
+            selfBuff[DP_ALT] = true
+            WoWraVoxDB.settings = { estimatedAuraWarnings = allowed }
+            WoWraVoxProfilesDB.auraDurations[DP_ALT] = 30
+            deferTimers, now = {}, 600
+            ns._Aura.handleCast("player", "Cast-E", DP_ALT)
+            now = 630
+            for _, timer in ipairs(deferTimers) do if timer.delay == 30 and not timer.cancelled then timer.callback() end end
+            check("cast only + learned duration: the estimated end is " .. (allowed and "announced once" or "off"),
+                countOf(spoken, "expire:408459@ESTIMATE") == (allowed and 1 or 0), list(spoken))
         end
         deferTimers = nil
 
@@ -2622,7 +2778,7 @@ do
             check("end trace: the emitted end records time, source, run and lateness against the exact end",
                 countMatch(trace, "^130050 emit expire 408459/408459 r%d+ AURA_TIMER d=%+50 s=%+0$") == 1, list(trace))
             check("end trace: each suppressed report names its source and reason",
-                countMatch(trace, " suppressed:ended expire ") == 3 and countMatch(trace, "suppressed:ended expire .* CDM_SIGNAL d=%+1600 s=%+1550$") == 1,
+                countMatch(trace, " suppressed:ended expire ") == 3 and countMatch(trace, "suppressed:ended expire .* CDM_SIGNAL d=%+1000 s=%+950$") == 1,
                 list(trace))
 
             -- Two runs in a row: reseal, used up after 1 s, resealed and used up again within 3 s of the first end.
@@ -2859,7 +3015,7 @@ do
         -- replaced or cancelled long before the end: dark, but no end announcement
         now = 115
         spoken = {}
-        ns._Aura.cdmSignal({ DP_ALT }, false)
+        ns._Aura.cdmSignal({ DP_ALT }, false, { instanceID = 8 })
         for _, timer in ipairs(deferTimers) do if not timer.cancelled then timer.callback() end end
         check("CDM time: dark long before the end is no expiry, no end announcement",
             list(spoken) == "", list(spoken))
@@ -2870,7 +3026,7 @@ do
         ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 9, duration = 30 })
         now = 230
         spoken = {}
-        ns._Aura.cdmSignal({ DP_ALT }, false)
+        ns._Aura.cdmSignal({ DP_ALT }, false, { instanceID = 9 })
         for _, timer in ipairs(deferTimers) do if not timer.cancelled and not timer.fired then timer.callback() end end
         check("CDM time: dark at the end of the duration is the expiry", list(spoken) == "expire:408459@CDM_SIGNAL", list(spoken))
         -- no duration from the Cooldown Manager: the learned one is the fallback and stays marked as estimated
@@ -3189,6 +3345,8 @@ do
     ns.updateMarkerTimers(rule, 4242, "active", 120, 20, false)
     check("50 % marker armed 10 s after the start", #timers == 1 and math.abs(timers[1].delay - 10) < 1e-6)
     check("readable duration learned", WoWraVoxProfilesDB.auraDurations[4242] == 20)
+    -- A node is announced only inside a run the end state machine knows (ns.auraRun); the aura path opens it.
+    ns._Aura.runEvent(4242, "AURA", { kind = "start", instanceID = 4242, expiration = 120, event = "UNIT_AURA" })
     for i = #ttsMessages, 1, -1 do ttsMessages[i] = nil end
     C_VoiceChat = { SpeakText = function(_, message) table.insert(ttsMessages, message) end }
     now = 110
@@ -3247,4 +3405,147 @@ do
     local charge = { triggerType = "chargeGained" }
     ns.migrateCooldownTrigger(charge)
     check("charge triggers stay", charge.triggerType == "chargeGained")
+end
+
+-- Seal family rule check in the learning flow (ns.SkillTracking.isSealFamilyRule): it used to call the do-block local
+-- auraTrackerConfig as a global (nil call).
+do
+    local savedDB = WoWraVoxDB
+    WoWraVoxDB = { auras = {}, auraTracker = { families = { seals = { ruleID = "seals" } } } }
+    local ok, result = pcall(ns.SkillTracking.isSealFamilyRule, { id = "seals" })
+    local okOther, other = pcall(ns.SkillTracking.isSealFamilyRule, { id = "other" })
+    check("seal family rule check runs and matches the family's rule", ok and result == true and okOther and other == false,
+        tostring(result) .. " / " .. tostring(other))
+    WoWraVoxDB = savedDB
+end
+
+-- End to end through the real WoWraVox.lua (review R1, E0-E6): the "All Seals" rule with its 90 % node, readable out
+-- of combat, secret in combat, NO Cooldown Manager frame. MOCKED WoW API and fake clock; audible output and Blizzard's
+-- real event timing are in-game only.
+do
+    local T = 0
+    GetTime = function() return T end
+    local queue = {}
+    C_Timer = {
+        After = function(d, cb) table.insert(queue, { at = T + d, cb = cb }) end,
+        NewTimer = function(d, cb)
+            local t = { at = T + d, cb = cb }
+            function t:Cancel() self.cancelled = true end
+            table.insert(queue, t)
+            return t
+        end,
+    }
+    local function advance(to)
+        while true do
+            local best
+            for i, item in ipairs(queue) do
+                if not item.cancelled and item.at <= to and (not best or item.at < queue[best].at) then best = i end
+            end
+            if not best then break end
+            local item = table.remove(queue, best)
+            if item.at > T then T = item.at end
+            item.cb()
+        end
+        T = to
+    end
+    local out = {}
+    C_VoiceChat = { SpeakText = function(_, msg) out[#out + 1] = string.format("%.2f TTS:%s", T, msg) end }
+    PlaySound = function(kit) out[#out + 1] = string.format("%.2f SND:%s", T, tostring(kit)); return true end
+    local combat = false
+    local SECRET = {}
+    issecretvalue = function(v) return v == SECRET end
+    issecrettable = function(v) return v == SECRET end
+    InCombatLockdown = function() return combat end
+    C_Secrets = { ShouldAurasBeSecret = function() return combat end, GetSpellAuraSecrecy = function() return 2 end }
+    local present = {}
+    C_UnitAuras = { GetPlayerAuraBySpellID = function(id)
+        if combat and present[id] then return SECRET end
+        return present[id]
+    end }
+    C_Spell = { IsSelfBuff = function() return true end,
+        GetSpellInfo = function(id) return { name = "Spell " .. id, iconID = 1 } end }
+    UnitGUID = function() return "Player-1" end
+    GetServerTime = function() return math.floor(T) + 1000000 end
+    ns.AuraSoundFallback.Refresh = function() end
+    ns.AuraSoundFallback.LogAura = function() end
+    ns.AuraSoundFallback.Log = function() end
+    local A, B = 20375, 20289
+    local function setup()
+        queue, out, present, combat, T = {}, {}, {}, false, 50
+        ns._Aura.sim = nil
+        ns._Aura.clearActiveState()
+        ns._Aura.resetEventState()
+        WoWraVoxDB = { auras = { {
+            id = "seals", name = "All Seals", oneEffect = true, enabled = true, spellIDs = { 20289, 20305, 20375, 20915 },
+            markers = { { key = "apply", at = 0 }, { key = "m1", at = 90 }, { key = "expire", at = 100 } },
+            m1Enabled = false, m1SoundEnabled = true, m1SoundKitID = 1111, m1SoundChannel = "Master",
+            expireEnabled = true, expireMessage = "Reseal", expireSoundEnabled = true, expireSoundKitID = 2222,
+            expireSoundChannel = "Master", applyEnabled = false, applyMessage = "", alertCategory = "none",
+            voiceID = 8, volume = 100, speechSpeed = 100, screenProfiles = {},
+        } }, settings = { estimatedAuraWarnings = true } }
+        WoWraVoxProfilesDB = { auraDurations = { [A] = 30, [B] = 30 } }
+        ns._Aura.syncAllAuras(true)
+        advance(60)
+        out = {}
+    end
+    local function aura(id, inst, exp) present[id] = { spellId = id, auraInstanceID = inst, expirationTime = exp, duration = 30 } end
+    local function ua(id) ns._Aura.processAura(id, false, "UNIT_AURA") end
+    local function cast(id) ns._Aura.handleCast("player", "G" .. T, id) end
+    local function reseals(at)
+        local count, when = 0, nil
+        for _, line in ipairs(out) do
+            local t = line:match("^([%d%.]+) TTS:Reseal$")
+            if t then count, when = count + 1, tonumber(t) end
+        end
+        return count == 1 and math.abs(when - at) < 0.001, table.concat(out, " | ")
+    end
+
+    setup()
+    T = 100; aura(A, 501, 130); ua(A)
+    advance(130); present[A] = nil; ua(A); advance(131)
+    check("E2E E0 readable natural end out of combat: one Reseal at once", reseals(130))
+
+    setup()
+    T = 100; aura(A, 501, 130); ua(A)
+    advance(105); combat = true
+    advance(130); present[A] = nil; ua(A)
+    advance(160)
+    combat = false; T = 170; ns._Aura.syncAllAuras(false); advance(175)
+    check("E2E E1 seal from before the pull ends in combat (no CDM): one Reseal 0.5 s after its exact end", reseals(130.5))
+
+    setup()
+    T = 100; aura(A, 501, 130); ua(A)
+    advance(105); combat = true
+    advance(110); aura(A, 502, 140); cast(A); ua(A)
+    advance(140); present[A] = nil; ua(A)
+    advance(165)
+    check("E2E E2 same seal recast in combat (no CDM): one Reseal at cast + learned duration", reseals(140))
+
+    setup()
+    combat = true
+    T = 100; aura(A, 601, 130); cast(A); ua(A)
+    advance(130); present[A] = nil; ua(A)
+    advance(135)
+    check("E2E E3 cast only in combat: one Reseal at the estimated end", reseals(130))
+
+    setup()
+    T = 100; aura(A, 501, 130); ua(A)
+    advance(105); combat = true
+    advance(110); present[A] = nil; aura(B, 701, 140); cast(B); ua(A); ua(B)
+    advance(140); present[B] = nil; ua(B)
+    advance(150)
+    check("E2E E4 switch to another seal in combat: no Reseal at the switch, one at its end", reseals(140))
+
+    setup()
+    T = 100; aura(A, 501, 130); ua(A)
+    advance(110); present[A] = nil; ua(A)
+    advance(112)
+    check("E2E E5 Judgement on a readable seal: one Reseal after the replacement window", reseals(110.5))
+
+    setup()
+    T = 100; aura(A, 501, 130); ua(A)
+    advance(110); present[A] = nil; aura(20915, 801, 140); ua(A); ua(20915); cast(20915)
+    advance(140); present[20915] = nil; ua(20915)
+    advance(142)
+    check("E2E E6 readable switch, aura events ahead of the cast, rank twin: one Reseal at its end", reseals(140))
 end

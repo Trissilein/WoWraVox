@@ -23,6 +23,7 @@ AuraPresets.lua
 AuraSoundFallback.lua
 Markers.lua
 MarkerTimers.lua
+AuraRun.lua
 SpellRanks.lua
 RuleOutput.lua
 DebugReport.lua
