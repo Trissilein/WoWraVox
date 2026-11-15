@@ -2586,6 +2586,96 @@ do
         end
         deferTimers = nil
 
+        -- Run ledger: one end (and one of each node) per run, however many sources report it. MOCKED sources and
+        -- order; Blizzard's real event timing and the audible output are only checkable in game.
+        do
+            local function countMatch(values, pattern)
+                local count = 0
+                for _, value in ipairs(values) do if value:match(pattern) then count = count + 1 end end
+                return count
+            end
+            -- One natural end: the aura timer reads it, a node timer reports it, a stale CDM frame of the same aura
+            -- instance lights once more and goes dark (deferred end), and a node timer reports it again 4.5 s later.
+            rule = dpRule({ DP_ALT })
+            rule.oneEffect = true
+            setup(rule, true)
+            deferTimers, now = {}, 100
+            live[DP_ALT] = { spellId = DP_ALT, expirationTime = 130, duration = 30, auraInstanceID = 5 }
+            ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+            now, live[DP_ALT] = 130.05, nil
+            ns._Aura.processAura(DP_ALT, false, "AURA_TIMER")
+            combat, live[DP_ALT] = true, hiddenValue
+            now = 130.2
+            ns.markerTimerApi.emit("dp", DP_ALT, "expire", {})
+            now = 130.4
+            ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 5, duration = 30, source = srcA })
+            now = 131
+            ns._Aura.cdmSignal({ DP_ALT }, false, { source = srcA })
+            now = 131.6
+            runDeferred()
+            now = 134.5
+            ns.markerTimerApi.emit("dp", DP_ALT, "expire", {})
+            check("run ledger: one end from AURA_TIMER, MARKER_TIMER and CDM_SIGNAL is announced once",
+                countMatch(spoken, "^expire") == 1 and countOf(tts, "Divine Purpose ended") == 1,
+                list(spoken) .. " / " .. list(tts))
+            local trace = WoWraVoxProfilesDB.endTrace or {}
+            check("end trace: the emitted end records time, source, run and lateness against the exact end",
+                countMatch(trace, "^130050 emit expire 408459/408459 r%d+ AURA_TIMER d=%+50 s=%+0$") == 1, list(trace))
+            check("end trace: each suppressed report names its source and reason",
+                countMatch(trace, " suppressed:ended expire ") == 3 and countMatch(trace, "suppressed:ended expire .* CDM_SIGNAL d=%+1600 s=%+1550$") == 1,
+                list(trace))
+
+            -- Two runs in a row: reseal, used up after 1 s, resealed and used up again within 3 s of the first end.
+            rule = dpRule({ DP_ALT })
+            rule.oneEffect = true
+            setup(rule)
+            selfBuff[DP_ALT] = true
+            deferTimers, now = {}, 200
+            ns._Aura.handleCast("player", "Cast-A", DP_ALT)
+            ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 11, duration = 30, source = srcA })
+            now = 201
+            ns._Aura.cdmSignal({ DP_ALT }, false, { source = srcA })
+            runDeferred()
+            now = 201.5
+            ns._Aura.handleCast("player", "Cast-B", DP_ALT)
+            ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 12, duration = 30, source = srcA })
+            now = 202.5
+            ns._Aura.cdmSignal({ DP_ALT }, false, { source = srcA })
+            runDeferred()
+            ns.markerTimerApi.emit("dp", DP_ALT, "expire", {})
+            check("run ledger: two runs in a row announce one end each, the second is not swallowed",
+                countMatch(spoken, "^expire") == 2 and countOf(tts, "Divine Purpose ended") == 2,
+                list(spoken) .. " / " .. list(tts))
+
+            -- A node fires once per run (a corrected end time can schedule it again); a refresh opens a new run.
+            rule = dpRule({ DP_ALT })
+            rule.markers = { { key = "apply", at = 0 }, { key = "m1", at = 90 }, { key = "expire", at = 100 } }
+            rule.m1Enabled, rule.m1Message = true, "Ninety"
+            setup(rule)
+            deferTimers, now = {}, 300
+            ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 21, duration = 30, source = srcA })
+            now = 327
+            ns.markerTimerApi.emit("dp", DP_ALT, "m1", {})
+            now = 328.5
+            ns.markerTimerApi.emit("dp", DP_ALT, "m1", {})
+            check("run ledger: a node is announced once per run", countOf(tts, "Ninety") == 1, list(tts))
+            now = 329
+            ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 22, duration = 30, source = srcA })
+            now = 356
+            ns.markerTimerApi.emit("dp", DP_ALT, "m1", {})
+            check("run ledger: the node of the refreshed run is announced again", countOf(tts, "Ninety") == 2, list(tts))
+
+            -- The trace is a ring of 60 short entries.
+            WoWraVoxProfilesDB.endTrace = nil
+            for _ = 1, 70 do ns.markerTimerApi.emit("dp", DP_ALT, "m1", {}) end
+            trace = WoWraVoxProfilesDB.endTrace
+            local longest = 0
+            for _, entry in ipairs(trace) do longest = math.max(longest, #entry) end
+            check("end trace: ring buffer keeps 60 entries", #trace == 60 and trace.n == 10 and longest < 100,
+                tostring(#trace) .. "/" .. tostring(trace.n) .. "/" .. tostring(longest))
+            deferTimers = nil
+        end
+
         -- Fractional saved aura timing survives a reload.
         setup(dpRule({ DP_ALT }), true)
         now = 300.25

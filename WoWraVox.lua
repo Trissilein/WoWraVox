@@ -2512,22 +2512,93 @@ function ns._Aura.otherTriggerActive(rule, spellID, eventKind)
     return eventKind == "apply" and lastApply ~= nil and GetTime() - lastApply < 3
 end
 
-ns._Aura.acceptExpiryEvent = function(rule, spellID, sourceEvent)
+-- Run ledger (ns._Aura.recentExpiryEvents, "<rule.id>|<TrackID>" -> run): a cast, a refresh, a new aura state or a new
+-- aura instance opens a new run (fresh id). Its end and each timeline node are announced at most once per run,
+-- whichever source (aura timer, CDM, marker timer) reports them and however late.
+ns._Aura.runFor = function(rule, trackID)
+    local runs = ns._Aura.recentExpiryEvents
+    if not runs then runs = {}; ns._Aura.recentExpiryEvents = runs end
+    local key = tostring(rule.id) .. "|" .. tostring(trackID)
+    if not runs[key] then
+        ns._Aura.runCounter = (ns._Aura.runCounter or 0) + 1
+        runs[key] = { id = ns._Aura.runCounter, fired = {} }
+    end
+    return runs[key]
+end
+
+-- fn(rule, run, trackID) for every rule (with an id) that tracks spellID.
+ns._Aura.eachRun = function(spellID, onlyRule, fn)
+    for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+        if rule.id and (not onlyRule or onlyRule == rule) then
+            for _, configuredID in ipairs(rule.spellIDs or {}) do
+                if ns.RuleSpellMatches(rule, configuredID, spellID) then
+                    local trackID = ns.TrackID(rule, spellID)
+                    fn(rule, ns._Aura.runFor(rule, trackID), trackID)
+                    break
+                end
+            end
+        end
+    end
+end
+
+-- The same aura instance reported again is the same run (a stale CDM frame lit once more right after the end); a cast
+-- or refresh (force), an unknown or other instance, or the same instance 3 s after its end (IDs reused) is a new one.
+ns._Aura.runStart = function(spellID, reason, instanceID, force, onlyRule)
+    local now = GetTime()
+    ns._Aura.eachRun(spellID, onlyRule, function(_, run)
+        if force or instanceID == nil or run.instance ~= instanceID or run.ended and now - run.endedAt >= 3 then
+            ns._Aura.runCounter = ns._Aura.runCounter + 1
+            run.id, run.fired, run.ended, run.endAt, run.expectedEnd = ns._Aura.runCounter, {}, nil, nil, nil
+            run.instance, run.why = instanceID, reason
+        end
+    end)
+end
+
+-- First end signal of the run and the end it was expected at (exact aura time, else the node timer's window).
+ns._Aura.noteRunEnd = function(spellID, state)
+    local now = GetTime()
+    ns._Aura.eachRun(spellID, nil, function(rule, run, trackID)
+        run.endAt = run.endAt or now
+        if state and (state.expirationTime or 0) > 0 then
+            run.expectedEnd, run.estimatedEnd = state.expirationTime, nil
+        elseif not run.expectedEnd and ns.markerTimers then
+            local timer = ns.markerTimers:Get(rule.id, trackID)
+            run.expectedEnd = timer and (timer.expiration or timer.duration and timer.start + timer.duration)
+            run.estimatedEnd = timer and not timer.expiration
+        end
+    end)
+end
+
+-- Always-on ring buffer (60) of end/node decisions in WoWraVoxProfilesDB.endTrace; endTrace.n = newest slot.
+-- "<ms> <decision> <event> <spell>/<track> r<run> <source> d=<ms after expected end, ~ = estimated> s=<ms after first end signal>"
+ns._Aura.traceEnd = function(rule, spellID, eventKind, sourceEvent, decision, run)
+    if type(WoWraVoxProfilesDB) ~= "table" then return end
+    local trace = WoWraVoxProfilesDB.endTrace
+    if type(trace) ~= "table" then trace = { n = 0 }; WoWraVoxProfilesDB.endTrace = trace end
+    local now, trackID = GetTime(), ns.TrackID(rule, spellID)
+    local expected, estimated = run and run.expectedEnd, run and run.estimatedEnd
+    local timer = not expected and ns.markerTimers and rule.id and ns.markerTimers:Get(rule.id, trackID)
+    if timer then expected, estimated = timer.expiration or timer.duration and timer.start + timer.duration, not timer.expiration end
+    local function ms(from) return from and string.format("%+d", math.floor((now - from) * 1000 + 0.5)) or "-" end
+    trace.n = (tonumber(trace.n) or 0) % 60 + 1
+    trace[trace.n] = string.format("%d %s %s %s/%s r%s %s d%s%s s=%s", math.floor(now * 1000 + 0.5), decision,
+        tostring(eventKind), tostring(spellID), tostring(trackID), tostring(run and run.id or "-"), tostring(sourceEvent),
+        estimated and "~" or "=", ms(expected), ms(run and run.endAt))
+end
+
+-- End ("expire") and intermediate nodes: at most once per run. Nodes of an ended run stay silent.
+ns._Aura.acceptExpiryEvent = function(rule, spellID, sourceEvent, eventKind)
+    eventKind = eventKind or "expire"
     if not (rule and rule.id) then return true end
-    local recent = ns._Aura.recentExpiryEvents
-    if not recent then recent = {}; ns._Aura.recentExpiryEvents = recent end
-    local now = GetTime and GetTime() or 0
-    local key = tostring(rule.id) .. "|" .. tostring(ns.TrackID(rule, spellID))
-    local last = recent[key]
-    -- Combat can delay the second report of one expiry through a different aura source.
-    if last and now - last < 3 then
-        ns._Aura.logDedupe(rule, spellID, sourceEvent, "duplicate-expiry")
+    local run = ns._Aura.runFor(rule, ns.TrackID(rule, spellID))
+    local seen = run.ended and "ended" or run.fired[eventKind] and "run"
+    if seen then
+        ns._Aura.logDedupe(rule, spellID, sourceEvent, eventKind == "expire" and "duplicate-expiry" or "duplicate-marker")
+        ns._Aura.traceEnd(rule, spellID, eventKind, sourceEvent, "suppressed:" .. seen, run)
         return false
     end
-    recent[key] = now
-    for oldKey, timestamp in pairs(recent) do
-        if now - timestamp >= 3 then recent[oldKey] = nil end
-    end
+    if eventKind == "expire" then run.ended, run.endedAt = true, GetTime() else run.fired[eventKind] = true end
+    ns._Aura.traceEnd(rule, spellID, eventKind, sourceEvent, "emit", run)
     return true
 end
 
@@ -2590,16 +2661,20 @@ end
 local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
     for _, rule in ipairs(WoWraVoxDB.auras) do
         if (not targetRule or targetRule == rule) and rule.enabled
-            and ns.Profiles.RuleMatchesCurrentSpecialization(rule)
-            and not ns._Aura.otherTriggerActive(rule, spellID, eventKind) then
+            and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
             local matches = false
             for _, configuredID in ipairs(rule.spellIDs) do
                 if ns.RuleSpellMatches(rule, configuredID, spellID) then matches = true; break end
             end
-            if matches and (eventKind ~= "expire" or ns._Aura.acceptExpiryEvent(rule, spellID, sourceEvent)) then
-                if eventKind == "apply" and ns._Aura.recentExpiryEvents then
-                    ns._Aura.recentExpiryEvents[tostring(rule.id) .. "|" .. tostring(ns.TrackID(rule, spellID))] = nil
+            if matches and ns._Aura.otherTriggerActive(rule, spellID, eventKind) then
+                matches = false
+                if eventKind ~= "apply" and rule.id then
+                    ns._Aura.traceEnd(rule, spellID, eventKind, sourceEvent, "suppressed:other",
+                        ns._Aura.runFor(rule, ns.TrackID(rule, spellID)))
                 end
+            end
+            -- New runs are opened where states start (ns._Aura.runStart), never by an announced apply.
+            if matches and (eventKind == "apply" or ns._Aura.acceptExpiryEvent(rule, spellID, sourceEvent, eventKind)) then
                 -- Cast/refresh handlers own timer restarts. Output must preserve the exact end already supplied by CDM.
                 -- Any timeline marker key: apply, expire, beforeExpire, m1, m2, ...
                 local enabled, message = rule[eventKind .. "Enabled"], rule[eventKind .. "Message"]
@@ -3343,6 +3418,7 @@ function ns._Aura.handleCast(unit, castGUID, castSpellID)
                         if not (last and last.id == trackID and ((castGUID and last.guid == castGUID)
                             or (not castGUID and now - last.at < 0.1))) then
                             ns._Aura.lastTimelineCasts[rule] = { id = trackID, guid = castGUID, at = now }
+                            ns._Aura.runStart(auraID, "cast", nil, true, rule)
                             -- A successful self-buff cast replaces the previous timing, even if the aura is secret.
                             for seenID, state in pairs(activeAuras) do
                                 local matched
@@ -3472,6 +3548,7 @@ processAura = function(spellID, isBaseline, sourceEvent)
         if not state then
             state = { expirationTime = expirationTime, auraInstanceID = auraInstanceID, timingEstimated = false }
             activeAuras[spellID] = state
+            ns._Aura.runStart(spellID, "aura", auraInstanceID)
             if auraInstanceID then auraByInstanceID[auraInstanceID] = spellID end
             if not isBaseline and auraBaselineComplete and not lateReadable then
                 sayAura(spellID, "apply", sourceEvent)
@@ -3483,6 +3560,7 @@ processAura = function(spellID, isBaseline, sourceEvent)
             state.fromCDM = state.fromCDM and expirationTime <= 0
             if state.auraInstanceID and state.auraInstanceID ~= auraInstanceID then
                 auraByInstanceID[state.auraInstanceID] = nil
+                ns._Aura.runStart(spellID, "instance", auraInstanceID, true)
             end
             state.auraInstanceID = auraInstanceID
             state.expirationTime = expirationTime
@@ -3519,6 +3597,7 @@ processAura = function(spellID, isBaseline, sourceEvent)
         activeAuras[spellID] = nil
         if state.auraInstanceID then auraByInstanceID[state.auraInstanceID] = nil end
         if atExpiry then
+            ns._Aura.noteRunEnd(spellID, state)
             sayAura(spellID, "expire", sourceEvent)
         end
     end
@@ -3660,6 +3739,7 @@ function ns._Aura.cdmSignal(spellIDs, active, info)
                 baselineUnknown = (info.baseline == true or not auraBaselineComplete) and not expiration,
             }
             activeAuras[spellID] = state
+            ns._Aura.runStart(spellID, "cdm", info.instanceID)
         elseif info.source then
             state.cdmSources = state.cdmSources or setmetatable({}, { __mode = "k" })
             state.cdmSources[info.source] = info.instanceID or true
@@ -3673,6 +3753,7 @@ function ns._Aura.cdmSignal(spellIDs, active, info)
             state.fromCDM = true
             state.timingEstimated = duration ~= nil
             state.baselineUnknown = false
+            ns._Aura.runStart(spellID, "refresh", info.instanceID, true)
             ns._Aura.cdmRestart(spellID)
             ns._Aura.cancelDeferredExpire(spellID)
             if ns.AuraSoundFallback then ns.AuraSoundFallback.Log("AURA-REFRESH", string.format(
@@ -3709,6 +3790,7 @@ function ns._Aura.cdmSignal(spellIDs, active, info)
         auraTracker.updateState(spellID, "inactive", nil, nil, "CDM_SIGNAL", false)
         return
     end
+    ns._Aura.noteRunEnd(spellID, state)
     if info.source and state.cdmSources then
         state.cdmSources[info.source] = nil
         for _ in pairs(state.cdmSources) do return end -- another CDM frame still reports this aura active

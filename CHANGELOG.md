@@ -10,6 +10,7 @@
 - Cooldown Manager: removing a seal no longer briefly reports another seal of the shared entry as active.
 - Saved aura timings and learned cooldowns keep fractional seconds (e.g. 1.5 s) instead of discarding them.
 - A cast of one rank tracks that exact rank when a rule lists several ranks of the same spell; an ambiguous rank signal uses the first configured trigger.
+- Aura ends and timeline nodes are announced at most once per run (cast, refresh or new aura instance), whichever source reports them and however late; the next run's end is no longer swallowed. The last 60 end/node decisions are kept in `WoWraVoxProfilesDB.endTrace` (time, source, run, lateness against the expected end).
 
 ## 0.15.0
 
