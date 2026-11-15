@@ -54,6 +54,9 @@ function ns._Aura.clearActiveState()
     for _, state in pairs(activeAuras) do ns._Aura.cancelExpiry(state) end
     wipe(activeAuras)
     wipe(auraByInstanceID)
+    if ns.markerTimers then ns.markerTimers:Reset() end
+    ns._Aura.markerSources = setmetatable({}, { __mode = "k" })
+    ns._Aura.lastTimelineCasts = setmetatable({}, { __mode = "k" })
 end
 local optionsFrame
 local listScroll
@@ -137,8 +140,9 @@ ns.Layout.PAD = 22          -- left padding of headings/labels inside panels
 ns.Layout.RIGHT = -22       -- right padding as SetPoint x offset
 ns.Layout.FIELD_X = 225     -- EditBox frame x of the field column (TTS/screen text, fallback, trigger input)
 ns.Layout.EDITBOX_INSET = 5 -- InputBoxTemplate border starts 5 px left of the frame (Blizzard InputBoxVisualTemplate)
-ns.Layout.DD_INSET_L = 15   -- [Annahme] transparent art inside a UIDropDownMenuTemplate frame, left (Ace3 AceGUI-Dropdown uses -15)
-ns.Layout.DD_INSET_R = 17   -- same, right (Ace3 AceGUI-Dropdown uses +17)
+ns.Layout.DD_INSET_L = 19   -- transparent art inside a UIDropDownMenuTemplate frame, left (measured on a screenshot 2026-11-13: 15 left the
+                            -- dropdowns 3-5 px right of the text boxes and labels)
+ns.Layout.DD_INSET_R = 18   -- same, right (17 left them 1-2 px short of the text boxes)
 ns.Layout.DD_CHROME = 50    -- UIDropDownMenu_SetWidth(frame, w) sets frame width w + 2 * 25 (UIDROPDOWNMENU_DEFAULT_WIDTH_PADDING)
 ns.Layout.COL1 = ns.Layout.FIELD_X - ns.Layout.EDITBOX_INSET -- 220: visible left edge of text boxes AND dropdown column 1
 ns.Layout.DROPDOWN_X = ns.Layout.COL1 - ns.Layout.DD_INSET_L -- 205: dropdown FRAME x for column 1 (single point to retune the inset)
@@ -175,6 +179,23 @@ ns.Layout.getColumns = function(width)
         sizeWidth = c.SIZE_W,
         styleWidth = textRight - col3,
         swatch = c.COL1 - c.COL_GAP - c.SWATCH_W,
+    }
+end
+
+-- TTS controls share the available width so the speed slider stays usable on narrow screens.
+ns.Layout.getVoiceColumns = function(width)
+    local c = ns.Layout
+    local left, gap = c.PAD, 16
+    local right = width + c.RIGHT
+    local available = math.max(480, right - left - 2 * gap)
+    local voiceWidth = math.floor(available * 0.40)
+    local volumeWidth = math.floor(available * 0.27)
+    local volume = left + voiceWidth + gap
+    local speed = volume + volumeWidth + gap
+    return {
+        voice = left, voiceWidth = voiceWidth,
+        volume = volume, volumeWidth = volumeWidth,
+        speed = speed, speedWidth = math.max(1, right - speed),
     }
 end
 
@@ -1214,6 +1235,7 @@ local function initializeDatabase()
     WoWraVoxDB.settings = type(WoWraVoxDB.settings) == "table" and WoWraVoxDB.settings or {}
     local settings = WoWraVoxDB.settings
     settings.tooltipIDs = settings.tooltipIDs ~= false
+    settings.estimatedAuraWarnings = settings.estimatedAuraWarnings ~= false
     local validFont = false
     for _, choice in ipairs(SCREEN_FONT_CHOICES) do
         if settings.screenFont == choice.key then validFont = true; break end
@@ -2375,6 +2397,9 @@ end
 function ns._Aura.resetEventState()
     ns._Aura.eventStates = {}
     ns._Aura.unreadableBaselines = {}
+    ns._Aura.recentExpiryEvents = {}
+    ns._Aura.markerSources = setmetatable({}, { __mode = "k" })
+    ns._Aura.lastTimelineCasts = setmetatable({}, { __mode = "k" })
     if ns._Aura.oneEffectApplyAt then wipe(ns._Aura.oneEffectApplyAt) end
 end
 
@@ -2477,6 +2502,25 @@ function ns._Aura.otherTriggerActive(rule, spellID, eventKind)
     return eventKind == "apply" and lastApply ~= nil and GetTime() - lastApply < 3
 end
 
+ns._Aura.acceptExpiryEvent = function(rule, spellID, sourceEvent)
+    if not (rule and rule.id) then return true end
+    local recent = ns._Aura.recentExpiryEvents
+    if not recent then recent = {}; ns._Aura.recentExpiryEvents = recent end
+    local now = GetTime and GetTime() or 0
+    local key = tostring(rule.id) .. "|" .. tostring(ns.TrackID(rule, spellID))
+    local last = recent[key]
+    -- Combat can delay the second report of one expiry through a different aura source.
+    if last and now - last < 3 then
+        ns._Aura.logDedupe(rule, spellID, sourceEvent, "duplicate-expiry")
+        return false
+    end
+    recent[key] = now
+    for oldKey, timestamp in pairs(recent) do
+        if now - timestamp >= 3 then recent[oldKey] = nil end
+    end
+    return true
+end
+
 -- A configured ID matches a spell ID directly, or as another rank of the same spell when the rule tracks all ranks.
 function ns.TriggerTracksRanks(rule, configuredID)
     local flag = rule and type(rule.rankIDs) == "table" and rule.rankIDs[configuredID]
@@ -2542,7 +2586,10 @@ local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
             for _, configuredID in ipairs(rule.spellIDs) do
                 if ns.RuleSpellMatches(rule, configuredID, spellID) then matches = true; break end
             end
-            if matches then
+            if matches and (eventKind ~= "expire" or ns._Aura.acceptExpiryEvent(rule, spellID, sourceEvent)) then
+                if eventKind == "apply" and ns._Aura.recentExpiryEvents then
+                    ns._Aura.recentExpiryEvents[tostring(rule.id) .. "|" .. tostring(ns.TrackID(rule, spellID))] = nil
+                end
                 -- Applied again (refresh, or recast while the old window still runs): nodes count from now.
                 if eventKind == "apply" and ns.markerTimers and rule.id then
                     ns.markerTimers:Restart(rule.id, ns.TrackID(rule, spellID), GetTime())
@@ -2581,9 +2628,13 @@ ns.markerTimerApi = {
     cancel = function(timer)
         if timer and type(timer.Cancel) == "function" then pcall(timer.Cancel, timer) end
     end,
-    emit = function(ruleID, spellID, markerKey)
+    emit = function(ruleID, spellID, markerKey, info)
         for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
             if rule.id == ruleID then
+                if ns.AuraSoundFallback then ns.AuraSoundFallback.Log("MARKER-FIRE", string.format(
+                    "rule=%s spell=%s marker=%s estimated=%s start=%s duration=%s",
+                    tostring(ruleID), tostring(spellID), tostring(markerKey), tostring(info and info.estimated),
+                    tostring(info and info.start), tostring(info and info.duration))) end
                 sayAura(spellID, markerKey, "MARKER_TIMER", nil, rule)
                 return
             end
@@ -2599,6 +2650,71 @@ local function learnedDurations()
     return WoWraVoxProfilesDB.auraDurations
 end
 ns.learnedDurations = learnedDurations
+
+ns._Aura.auraTimingKey = function(spellID)
+    local guid = UnitGUID and UnitGUID("player")
+    if type(guid) ~= "string" or guid == "" or not isPublicNumber(spellID) then return nil end
+    local canonical
+    for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+        for _, configuredID in ipairs(rule.spellIDs or {}) do
+            if configuredID == spellID then return guid .. ":" .. tostring(configuredID) end
+            if ns.RuleSpellMatches(rule, configuredID, spellID) then
+                if canonical and canonical ~= configuredID then return nil end
+                canonical = configuredID
+            end
+        end
+    end
+    return guid .. ":" .. tostring(canonical or spellID)
+end
+
+ns._Aura.auraTimingStore = function()
+    if type(WoWraVoxProfilesDB) ~= "table" then return nil end
+    WoWraVoxProfilesDB.auraTimings = type(WoWraVoxProfilesDB.auraTimings) == "table"
+        and WoWraVoxProfilesDB.auraTimings or {}
+    return WoWraVoxProfilesDB.auraTimings
+end
+
+ns._Aura.rememberAuraTiming = function(spellID, expiration, duration)
+    local key = ns._Aura.auraTimingKey(spellID)
+    local store = key and ns._Aura.auraTimingStore()
+    if not store then return false end
+    if not (isPublicNumber(expiration) and expiration > GetTime()
+        and isPublicNumber(duration) and duration > 0) then
+        store[key] = nil
+        return false
+    end
+    local wallNow = type(GetServerTime) == "function" and GetServerTime()
+        or type(time) == "function" and time() or nil
+    if not isPublicNumber(wallNow) then return false end
+    store[key] = { expiresAt = wallNow + expiration - GetTime(), duration = duration }
+    return true
+end
+
+ns._Aura.restoreAuraTiming = function(spellID)
+    local key = ns._Aura.auraTimingKey(spellID)
+    local store = key and ns._Aura.auraTimingStore()
+    local saved = store and store[key]
+    if type(saved) ~= "table" then return nil end
+    local wallNow = type(GetServerTime) == "function" and GetServerTime()
+        or type(time) == "function" and time() or nil
+    if not (isPublicNumber(wallNow) and isPublicNumber(saved.expiresAt)
+        and isPublicNumber(saved.duration) and saved.duration > 0) then
+        store[key] = nil
+        return nil
+    end
+    local remaining = saved.expiresAt - wallNow
+    if remaining <= 0 or remaining > saved.duration + 10 then
+        store[key] = nil
+        return nil
+    end
+    return GetTime() + remaining, saved.duration
+end
+
+ns._Aura.clearAuraTiming = function(spellID)
+    local key = ns._Aura.auraTimingKey(spellID)
+    local store = key and ns._Aura.auraTimingStore()
+    if store then store[key] = nil end
+end
 
 function ns.markerSignature(rule, markers)
     local parts = {}
@@ -2618,10 +2734,13 @@ function ns.ruleWithoutDuration(rule)
     return true
 end
 
-function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDuration, isBaseline, permanent)
+function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDuration, isBaseline, permanent, estimatedTiming, timingSource)
     if not (markerTimers and rule and rule.id) or presence == "unknown" then return end
     local seenID = spellID
     spellID = ns.TrackID(rule, seenID)
+    ns._Aura.markerSources = ns._Aura.markerSources or setmetatable({}, { __mode = "k" })
+    local sources = ns._Aura.markerSources[rule]
+    if not sources then sources = {}; ns._Aura.markerSources[rule] = sources end
     -- Seen without a duration: remembered as 0 (never overwrites a real duration learned for this ID).
     if permanent and presence == "active" then
         local store = learnedDurations()
@@ -2630,8 +2749,19 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
         end
     end
     if presence ~= "active" then
-        markerTimers:Update(rule.id, spellID, { active = false })
+        if sources[spellID] == seenID then
+            sources[spellID] = nil
+            markerTimers:Update(rule.id, spellID, { active = false })
+            if ns.AuraSoundFallback then ns.AuraSoundFallback.Log("MARKER-STOP", string.format(
+                "rule=%s spell=%s source=%s", tostring(rule.id), tostring(spellID), tostring(seenID))) end
+        end
         return
+    end
+    local replaced = sources[spellID] and sources[spellID] ~= seenID
+    sources[spellID] = seenID
+    if rule.oneEffect then
+        for otherID in pairs(sources) do if otherID ~= spellID then sources[otherID] = nil end end
+        markerTimers:StopOthers(rule.id, spellID)
     end
     local store = learnedDurations()
     if isPublicNumber(readableDuration) and readableDuration > 0 then
@@ -2639,23 +2769,39 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
         ns.MarkerTimers.Learn(store, spellID, readableDuration)
     end
     local duration, estimated = ns.MarkerTimers.DurationFor(rule, spellID, readableDuration, store)
+    estimated = estimated or estimatedTiming == true
+    local estimatesDisabled = estimated
+        and not (WoWraVoxDB.settings and WoWraVoxDB.settings.estimatedAuraWarnings ~= false)
     local start
-    if isPublicNumber(expiration) and expiration > 0 and isPublicNumber(readableDuration) and readableDuration > 0 then
-        start = expiration - readableDuration
+    if isPublicNumber(expiration) and expiration > 0 and duration then
+        start = expiration - duration
     else
         local current = markerTimers:Get(rule.id, spellID)
-        start = current and current.start or GetTime()
+        start = current and not replaced and current.start or GetTime()
     end
-    -- One effect per rule (e.g. Paladin seals): a newly started trigger voids the nodes still pending for the others.
-    if rule.oneEffect and not markerTimers:Get(rule.id, spellID) then
-        markerTimers:StopOthers(rule.id, spellID)
-    end
+    -- Snapshot scans can report group members in any order. Explicit casts handle oneEffect replacement below.
     -- Each spell of a group rule runs its own copy of the nodes (per-spell overrides applied).
     local markers = ns.Markers.ForSpell(rule, spellID)
-    markerTimers:Update(rule.id, spellID, {
-        active = true, start = start, duration = duration, estimated = estimated,
-        markers = markers, baseline = isBaseline == true, signature = ns.markerSignature(rule, markers),
+    if estimatesDisabled then
+        local exactEndMarkers = {}
+        if isPublicNumber(expiration) and expiration > 0 then
+            for _, marker in ipairs(markers) do
+                if marker.anchor == "end" and marker.offset then exactEndMarkers[#exactEndMarkers + 1] = marker end
+            end
+        end
+        markers = exactEndMarkers
+    end
+    local signature = ns.markerSignature(rule, markers)
+    if estimatesDisabled then signature = signature .. "|estimated-disabled" end
+    local previous = markerTimers:Get(rule.id, spellID)
+    local run = markerTimers:Update(rule.id, spellID, {
+        active = true, start = start, duration = duration, expiration = expiration, estimated = estimated,
+        markers = markers, baseline = isBaseline == true, signature = signature,
     })
+    if run ~= previous and ns.AuraSoundFallback then ns.AuraSoundFallback.Log("MARKER-PLAN", string.format(
+        "rule=%s spell=%s source=%s timingSource=%s start=%.2f duration=%s estimated=%s baseline=%s",
+        tostring(rule.id), tostring(spellID), tostring(seenID), tostring(timingSource), start, tostring(duration),
+        tostring(estimated), tostring(isBaseline == true))) end
 end
 end
 
@@ -2669,13 +2815,35 @@ local function updateAuraTrackerState(spellID, presence, aura, state, sourceEven
             end
         end
         if matches then
-            local duration, permanent
+            local duration, permanent, expiration
             if aura then
                 local value, durationOK = safeAuraField(aura, "duration")
                 if durationOK and isPublicNumber(value) and value > 0 then duration = value end
                 permanent = durationOK and isPublicNumber(value) and value == 0
+                local auraExpiration, expirationOK = safeAuraField(aura, "expirationTime")
+                if expirationOK and isPublicNumber(auraExpiration) and auraExpiration > 0 then expiration = auraExpiration end
             end
-            ns.updateMarkerTimers(rule, spellID, presence, state and state.expirationTime or nil, duration, isBaseline, permanent)
+            if not duration and state and isPublicNumber(state.auraDuration) and state.auraDuration > 0 then
+                duration = state.auraDuration
+            end
+            if state and isPublicNumber(state.expirationTime) and state.expirationTime > 0 then
+                expiration = state.expirationTime
+            end
+            if state and duration then state.auraDuration = duration end
+            -- CDM-only timing can be an estimate from a cast; persist only an aura time we could read.
+            if presence == "active" and expiration and duration and sourceEvent ~= "CDM_SIGNAL"
+                and not (state and state.timingEstimated) then
+                ns._Aura.rememberAuraTiming(spellID, expiration, duration)
+            elseif presence == "active" and permanent then
+                ns._Aura.clearAuraTiming(spellID)
+            elseif presence == "inactive" then
+                ns._Aura.clearAuraTiming(spellID)
+            end
+            local estimatedTiming = state and state.timingEstimated == true
+                or duration ~= nil and not expiration
+                or sourceEvent == "CDM_SIGNAL" and not expiration
+            ns.updateMarkerTimers(rule, spellID, presence, expiration, duration, isBaseline, permanent,
+                estimatedTiming, sourceEvent)
         end
     end
 end
@@ -2688,24 +2856,32 @@ end
 
 local function resolveAuraTrackerSignalSpellID(spellIDs)
     for _, candidateID in ipairs(spellIDs) do
-        if isPublicNumber(candidateID) and auraWatchBySpellID[candidateID] then return candidateID end
-    end
-    local resolved
-    for _, candidateID in ipairs(spellIDs) do
         if isPublicNumber(candidateID) then
             for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
                 if rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
                     for _, auraID in ipairs(rule.spellIDs or {}) do
-                        if auraWatchBySpellID[auraID] and ns._Aura.castIDFor(rule, auraID) == candidateID then
+                        if candidateID == auraID and auraWatchBySpellID[auraID] then return auraID end
+                    end
+                end
+            end
+            local resolved
+            for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
+                if rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
+                    for _, auraID in ipairs(rule.spellIDs or {}) do
+                        if auraWatchBySpellID[auraID]
+                            and (ns.RuleSpellMatches(rule, auraID, candidateID)
+                                or ns._Aura.castIDFor(rule, auraID) == candidateID) then
                             if resolved and resolved ~= auraID then return nil end
                             resolved = auraID
                         end
                     end
                 end
             end
+            if resolved then return resolved end
+            if auraWatchBySpellID[candidateID] then return candidateID end
         end
     end
-    return resolved
+    return nil
 end
 
 local function syncAuraTrackerSealRule()
@@ -2737,6 +2913,7 @@ local function syncAuraTrackerSealRule()
     rule.name = L("All Seals")
     rule.spellIDs = auraIDs
     rule.castByAuraID = castsByAura
+    rule.oneEffect = true -- A character can have only one Seal active at a time.
     ns._Aura.normalizeCastMap(rule)
 
     tracker.families = families
@@ -3133,7 +3310,7 @@ end
 
 function ns._Aura.handleCast(unit, castGUID, castSpellID)
     if unit ~= "player" or not isPublicNumber(castSpellID) then return end
-    if not ns._Aura.aurasAreSecret() then return end
+    local hidden = ns._Aura.aurasAreSecret()
     castGUID = ns._Aura.readableString(castGUID)
     local selfBuffStatus = ns._Aura.getSelfBuffStatus(castSpellID)
     local identityMatches = {}
@@ -3144,16 +3321,69 @@ function ns._Aura.handleCast(unit, castGUID, castSpellID)
                 local auraID = ns._Aura.validIntegerID(rawAuraID)
                 if auraID and ns.RuleSpellMatches(rule, ns._Aura.castIDFor(rule, auraID), castSpellID) and not announced then
                     announced = true
-                    -- Own recast = refresh: the timeline nodes count from now even when the aura itself is unreadable.
-                    if ns.markerTimers and rule.id then
-                        local trackID = ns.TrackID(rule, auraID)
-                        -- One effect per rule: the cast replaces the others, their pending nodes are void.
-                        if rule.oneEffect then ns.markerTimers:StopOthers(rule.id, trackID) end
-                        ns.markerTimers:Restart(rule.id, trackID, GetTime())
-                    end
                     table.insert(identityMatches, tostring(rule.id or "?") .. ":" .. tostring(auraID))
-                    if ns._Aura.addonCanSpeak(auraID, rule) then
-                        sayAura(auraID, "apply", "UNIT_SPELLCAST_SUCCEEDED", castGUID, rule)
+                    if selfBuffStatus ~= "false" then
+                        local trackID, now = ns.TrackID(rule, auraID), GetTime()
+                        ns._Aura.lastTimelineCasts = ns._Aura.lastTimelineCasts or setmetatable({}, { __mode = "k" })
+                        local last = ns._Aura.lastTimelineCasts[rule]
+                        if not (last and last.id == trackID and ((castGUID and last.guid == castGUID)
+                            or (not castGUID and now - last.at < 0.1))) then
+                            ns._Aura.lastTimelineCasts[rule] = { id = trackID, guid = castGUID, at = now }
+                            -- A successful self-buff cast replaces the previous timing, even if the aura is secret.
+                            for seenID, state in pairs(activeAuras) do
+                                local matched
+                                for _, configuredID in ipairs(rule.spellIDs or {}) do
+                                    if ns.RuleSpellMatches(rule, configuredID, seenID) then
+                                        matched = ns.TrackID(rule, seenID)
+                                        break
+                                    end
+                                end
+                                if matched == trackID then
+                                    ns._Aura.cancelExpiry(state)
+                                    local store = type(WoWraVoxProfilesDB) == "table" and WoWraVoxProfilesDB.auraDurations
+                                    local duration = state.auraDuration or tonumber(rule.durationOverride)
+                                    if not (duration and duration > 0) and type(store) == "table" then
+                                        duration = tonumber(store[trackID])
+                                        if not (duration and duration > 0) then duration = tonumber(store[seenID]) end
+                                    end
+                                    if duration and duration <= 0 then duration = nil end
+                                    -- A successful cast confirms a new start, but its duration may be learned.
+                                    -- Keep the estimate separate from a measured expiration.
+                                    state.expirationTime = 0
+                                    state.timingEstimated = duration ~= nil
+                                    state.baselineUnknown = false
+                                    state.queryFailures = 0
+                                    ns._Aura.clearAuraTiming(seenID)
+                                elseif matched and rule.oneEffect then
+                                    ns._Aura.cancelExpiry(state)
+                                    activeAuras[seenID] = nil
+                                    if state.auraInstanceID then auraByInstanceID[state.auraInstanceID] = nil end
+                                    ns._Aura.clearEventState(seenID)
+                                    ns._Aura.clearAuraTiming(seenID)
+                                end
+                            end
+                            if ns._Aura.deferredExpire then
+                                for seenID in pairs(ns._Aura.deferredExpire) do
+                                    for _, configuredID in ipairs(rule.spellIDs or {}) do
+                                        if ns.RuleSpellMatches(rule, configuredID, seenID)
+                                            and (rule.oneEffect or ns.TrackID(rule, seenID) == trackID) then
+                                            ns._Aura.cancelDeferredExpire(seenID)
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                            if ns.markerTimers and rule.id then
+                                if rule.oneEffect then ns.markerTimers:StopOthers(rule.id, trackID) end
+                                ns.markerTimers:Restart(rule.id, trackID, now, true)
+                                ns.updateMarkerTimers(rule, auraID, "active", nil, nil, false, false, true, "SELF_CAST")
+                            end
+                            if ns.AuraSoundFallback then ns.AuraSoundFallback.Log("AURA-REFRESH", string.format(
+                                "rule=%s spell=%s cast=%s", tostring(rule.id), tostring(trackID), tostring(castSpellID))) end
+                            if hidden and ns._Aura.addonCanSpeak(auraID, rule) then
+                                sayAura(auraID, "apply", "UNIT_SPELLCAST_SUCCEEDED", castGUID, rule)
+                            end
+                        end
                     end
                 end
             end
@@ -3224,7 +3454,7 @@ processAura = function(spellID, isBaseline, sourceEvent)
         ns._Aura.unreadableBaselines[spellID] = nil
         if state then ns._Aura.consumeRead(spellID, sourceEvent) end
         if not state then
-            state = { expirationTime = expirationTime, auraInstanceID = auraInstanceID }
+            state = { expirationTime = expirationTime, auraInstanceID = auraInstanceID, timingEstimated = false }
             activeAuras[spellID] = state
             if auraInstanceID then auraByInstanceID[auraInstanceID] = spellID end
             if not isBaseline and auraBaselineComplete and not lateReadable then
@@ -3232,6 +3462,7 @@ processAura = function(spellID, isBaseline, sourceEvent)
             end
         else
             state.queryFailures = 0
+            state.baselineUnknown = false
             -- Once a real expiry is readable, a CDM removal must respect it; durationless CDM states keep their signal.
             state.fromCDM = state.fromCDM and expirationTime <= 0
             if state.auraInstanceID and state.auraInstanceID ~= auraInstanceID then
@@ -3239,6 +3470,7 @@ processAura = function(spellID, isBaseline, sourceEvent)
             end
             state.auraInstanceID = auraInstanceID
             state.expirationTime = expirationTime
+            state.timingEstimated = false
             if auraInstanceID then auraByInstanceID[auraInstanceID] = spellID end
         end
 
@@ -3251,13 +3483,12 @@ processAura = function(spellID, isBaseline, sourceEvent)
         return
     end
 
-    -- aura == nil.  While auras are secret, "absent" is only trusted at the aura's
-    -- known expiry moment; otherwise it is unknown and no state is touched.  Auras Blizzard
-    -- marks as never secret stay readable in combat, so nil is a reliable "absent" for them.
+    -- An empty secret query does not prove expiry, even at a previously known end time:
+    -- the effect may have been refreshed while its new timing was hidden.
     local now = GetTime()
     local atExpiry = state and state.expirationTime > 0
         and now >= state.expirationTime - 0.5 and now <= state.expirationTime + 3
-    if not atExpiry and ns._Aura.aurasAreSecret() and ns._Aura.auraSecrecy(spellID) ~= "never" then
+    if ns._Aura.aurasAreSecret() and ns._Aura.auraSecrecy(spellID) ~= "never" then
         -- Unknown, not absent: if the aura turns readable later (combat ended while it runs) it was applied
         -- while hidden and must not be announced as new then.
         ns._Aura.unreadableBaselines[spellID] = true
@@ -3288,7 +3519,10 @@ ns._Aura.processAura = processAura
 -- A Cooldown Manager icon that goes dark and lights up again within a moment is a refresh (recast while the old
 -- one still ran): the end is spoken only when it stays dark.
 ns._Aura.deferredExpire = {}
+ns._Aura.deferredExpireGeneration = {}
 function ns._Aura.cancelDeferredExpire(spellID)
+    local generations = ns._Aura.deferredExpireGeneration
+    generations[spellID] = (generations[spellID] or 0) + 1
     local timer = ns._Aura.deferredExpire[spellID]
     if not timer then return false end
     ns._Aura.deferredExpire[spellID] = nil
@@ -3297,10 +3531,12 @@ function ns._Aura.cancelDeferredExpire(spellID)
 end
 function ns._Aura.deferExpire(spellID)
     ns._Aura.cancelDeferredExpire(spellID)
+    local generation = ns._Aura.deferredExpireGeneration[spellID]
     local ok, timer, fired = false, nil, false
     if C_Timer and C_Timer.NewTimer then
         ok, timer = pcall(C_Timer.NewTimer, 0.6, function()
             fired = true
+            if ns._Aura.deferredExpireGeneration[spellID] ~= generation then return end
             ns._Aura.deferredExpire[spellID] = nil
             if not activeAuras[spellID] then
                 ns._Aura.expireReplaced = true
@@ -3334,8 +3570,7 @@ function ns._Aura.cdmRestart(spellID)
     end
 end
 
--- True when the Cooldown Manager's own duration says the effect is dark long before its end: replaced or cancelled,
--- not run out. Only a read duration counts (an estimated one could be wrong).
+-- A CDM removal well before its tracked end is a refresh/replacement, not an expiry.
 function ns._Aura.cdmEndedEarly(spellID)
     if not ns.markerTimers then return false end
     for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
@@ -3343,8 +3578,9 @@ function ns._Aura.cdmEndedEarly(spellID)
             for _, configuredID in ipairs(rule.spellIDs or {}) do
                 if ns.RuleSpellMatches(rule, configuredID, spellID) then
                     local run = ns.markerTimers:Get(rule.id, ns.TrackID(rule, spellID))
-                    if run and not run.estimated and run.duration then
-                        return run.start + run.duration - GetTime() > 1.5
+                    local expectedEnd = run and (run.expiration or run.duration and run.start + run.duration)
+                    if expectedEnd then
+                        return expectedEnd - GetTime() > 1.5
                     end
                     break
                 end
@@ -3374,7 +3610,8 @@ function ns._Aura.cdmSignal(spellIDs, active, info)
     end
     if not hidden then
         if aura then
-            auraTracker.updateState(spellID, "active", aura, activeAuras[spellID], "CDM_SIGNAL", false)
+            auraTracker.updateState(spellID, "active", aura, activeAuras[spellID], "CDM_SIGNAL",
+                info.baseline == true)
         else
             auraTracker.updateState(spellID, "inactive", nil, nil, "CDM_SIGNAL", false)
         end
@@ -3383,28 +3620,78 @@ function ns._Aura.cdmSignal(spellIDs, active, info)
 
     local state = activeAuras[spellID]
     if active then
-        if state and info.instanceID and state.cdmInstance and state.cdmInstance ~= info.instanceID then
-            state.cdmInstance = info.instanceID
+        local wasActive = state ~= nil
+        local duration = isPublicNumber(info.duration) and info.duration > 0 and info.duration or nil
+        local remaining = isPublicNumber(info.remaining) and info.remaining >= 0 and info.remaining or nil
+        if not duration and state and isPublicNumber(state.auraDuration) and state.auraDuration > 0 then
+            duration = state.auraDuration
+        end
+        if not state then
+            local expiration, savedDuration
+            if WoWraVoxDB.settings and WoWraVoxDB.settings.estimatedAuraWarnings ~= false then
+                expiration, savedDuration = ns._Aura.restoreAuraTiming(spellID)
+            end
+            duration = duration or savedDuration
+            if remaining then expiration = GetTime() + remaining end
+            local sources = info.source and setmetatable({ [info.source] = info.instanceID or true }, { __mode = "k" }) or nil
+            state = {
+                expirationTime = expiration or 0, auraDuration = duration, fromCDM = true,
+                timingEstimated = expiration ~= nil and remaining == nil or (duration ~= nil and remaining == nil),
+                cdmInstance = info.instanceID, cdmSources = sources,
+                baselineUnknown = (info.baseline == true or not auraBaselineComplete) and not expiration,
+            }
+            activeAuras[spellID] = state
+        elseif info.source then
+            state.cdmSources = state.cdmSources or setmetatable({}, { __mode = "k" })
+            state.cdmSources[info.source] = info.instanceID or true
+        end
+        local refreshed = wasActive and (info.refresh == true
+            or (info.instanceID and state.cdmInstance and state.cdmInstance ~= info.instanceID))
+        if refreshed then
+            ns._Aura.cancelExpiry(state)
+            state.cdmInstance = info.instanceID or state.cdmInstance
+            state.expirationTime = 0
+            state.timingEstimated = duration ~= nil
+            state.baselineUnknown = false
             ns._Aura.cdmRestart(spellID)
+            ns._Aura.cancelDeferredExpire(spellID)
+            if ns.AuraSoundFallback then ns.AuraSoundFallback.Log("AURA-REFRESH", string.format(
+                "spell=%s source=CDM instance=%s", tostring(spellID), tostring(info.instanceID))) end
         end
-        auraTracker.updateState(spellID, "active", timing, nil, "CDM_SIGNAL", false)
-        if state then
-            state.cdmInstance = state.cdmInstance or info.instanceID
-            return
+        if remaining then
+            state.expirationTime = GetTime() + remaining
+            state.timingEstimated = false
+            state.baselineUnknown = false
         end
+        if duration then state.auraDuration = duration end
+        state.cdmInstance = state.cdmInstance or info.instanceID
+        if state.baselineUnknown then
+            auraTracker.updateState(spellID, "unknown", nil, state, "CDM_SIGNAL", true)
+        else
+            local currentTiming = timing or (state.auraDuration and { duration = state.auraDuration })
+            if currentTiming and state.expirationTime > 0 then
+                currentTiming.expirationTime = state.expirationTime
+            end
+            auraTracker.updateState(spellID, "active", currentTiming, state, "CDM_SIGNAL",
+                info.baseline == true or not auraBaselineComplete)
+        end
+        if wasActive then return end
         -- Lit again right after going dark: a refresh, not a new application (the pending end is dropped).
         local refreshed = ns._Aura.cancelDeferredExpire(spellID)
-        activeAuras[spellID] = { expirationTime = 0, fromCDM = true, cdmInstance = info.instanceID }
         if refreshed then return end
         -- the icon is proof of a new application: a hidden read of the same moment must not suppress it
         ns._Aura.unreadableBaselines[spellID] = nil
         if ns.AuraSoundFallback then ns.AuraSoundFallback.LogAura(spellID, "cdm-icon-active", "CDM_SIGNAL") end
-        if auraBaselineComplete then sayAura(spellID, "apply", "CDM_SIGNAL") end
+        if auraBaselineComplete and not info.baseline then sayAura(spellID, "apply", "CDM_SIGNAL") end
         return
     end
     if not state then
         auraTracker.updateState(spellID, "inactive", nil, nil, "CDM_SIGNAL", false)
         return
+    end
+    if info.source and state.cdmSources then
+        state.cdmSources[info.source] = nil
+        for _ in pairs(state.cdmSources) do return end -- another CDM frame still reports this aura active
     end
     -- An end counts as an expiry like in processAura: inside the readable expiry window, or for an aura whose
     -- application this signal announced (no expiry time known).
@@ -3429,6 +3716,11 @@ local function syncAllAuras(isBaseline)
     if profiling then ns.Prof.add("syncAllAuras", ns.Prof.clock() - started) end
 end
 ns._Aura.syncAllAuras = syncAllAuras
+ns._Aura.refreshMarkerSchedules = function()
+    for spellID, state in pairs(activeAuras) do
+        auraTracker.updateState(spellID, "active", nil, state, "TIMING_SETTING", false)
+    end
+end
 
 local auraSyncPending = false
 local function queueAuraSync()
@@ -4352,6 +4644,9 @@ local function makeVolumeSlider(parent, point, relativeTo, x, y, onChange, minVa
     end)
     ns.Skin.Register(slider, "sliderTrack")
     ns.Skin.Register(slider, "sliderThumb")
+    -- Low/High captions: the template hangs them 3 px up into the track; leave air below it.
+    if slider.Low then slider.Low:ClearAllPoints(); slider.Low:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", 0, -6) end
+    if slider.High then slider.High:ClearAllPoints(); slider.High:SetPoint("TOPRIGHT", slider, "BOTTOMRIGHT", 0, -6) end
     return slider
 end
 
@@ -4513,6 +4808,58 @@ function ns.AddLearnedAuraRule(spellID, name)
     if optionsFrame then optionsFrame:Show() end
     setStatus(L("Learned aura rule created."))
 end
+
+-- What the session recorder (Recorder.lua) may do with the rules: list them, add recorded spell IDs to a group,
+-- or start a new group from them.
+ns.RecorderHost = {
+    Rules = function() return WoWraVoxDB and WoWraVoxDB.auras or {} end,
+    AddToRule = function(rule, spellIDs)
+        if not (type(rule) == "table" and type(rule.spellIDs) == "table" and type(spellIDs) == "table") or rule.builtin then
+            return 0
+        end
+        local known, added = {}, 0
+        for _, id in ipairs(rule.spellIDs) do known[id] = true end
+        for _, id in ipairs(spellIDs) do
+            id = tonumber(id)
+            if id and id > 0 and id == math.floor(id) and not known[id] then
+                known[id] = true
+                table.insert(rule.spellIDs, id)
+                added = added + 1
+            end
+        end
+        if added > 0 then
+            rebuildAuraWatches()
+            syncAllAuras(true)
+            refreshList()
+            updateDetails()
+        end
+        return added
+    end,
+    NewRule = function(name, spellIDs)
+        if not (WoWraVoxDB and type(WoWraVoxDB.auras) == "table" and type(spellIDs) == "table") then return nil end
+        local ids, seen = {}, {}
+        for _, id in ipairs(spellIDs) do
+            id = tonumber(id)
+            if id and id > 0 and id == math.floor(id) and not seen[id] then
+                seen[id] = true
+                table.insert(ids, id)
+            end
+        end
+        if #ids == 0 then return nil end
+        local rule = newAuraRule()
+        rule.name = type(name) == "string" and name ~= "" and name or ("Spell " .. tostring(ids[1]))
+        rule.spellIDs = ids
+        ns.registerNewRule(rule, "auras")
+        table.insert(WoWraVoxDB.auras, rule)
+        selectedCategory, selectedAuraRule = "auras", rule
+        addRuleMode = false
+        rebuildAuraWatches()
+        syncAllAuras(true)
+        refreshList()
+        updateDetails()
+        return rule
+    end,
+}
 
 function ns.ApplyLearnedTrigger(rule, triggerType)
     if not (rule and triggerType) then return end
@@ -5610,8 +5957,11 @@ local function layoutSharedEditor(isAura)
     ruleEnabledCheck:SetSize(30, 30)
     auraEditor.enabledLabel:ClearAllPoints()
     auraEditor.enabledLabel:SetPoint("LEFT", ruleEnabledCheck, "RIGHT", 4, 0)
+    -- Export sits top right in the heading row, level with "AURA RULE" (it used to cover the Specs label).
+    auraEditor.exportButton:ClearAllPoints()
+    auraEditor.exportButton:SetPoint("TOPRIGHT", auraEditor.rulePanel, "TOPRIGHT", ns.Layout.RIGHT, -10)
     auraEditor.specFilter:ClearAllPoints()
-    auraEditor.specFilter:SetPoint("TOPRIGHT", auraEditor.rulePanel, "TOPRIGHT", ns.Layout.RIGHT, -57)
+    auraEditor.specFilter:SetPoint("TOPRIGHT", auraEditor.rulePanel, "TOPRIGHT", ns.Layout.RIGHT + ns.Layout.DD_INSET_R, -57)
     auraEditor.specFilterLabel:ClearAllPoints()
     auraEditor.specFilterLabel:SetPoint("RIGHT", auraEditor.specFilter, "LEFT", -6, 0)
 
@@ -5672,7 +6022,8 @@ local function layoutSharedEditor(isAura)
     local messageY = triggerHeadingY - triggerPanelHeight - 6
     local voiceY
     local voiceExpanded = ns.Layout.isPanelExpanded(auraEditor.voice)
-    local voiceHeight = voiceExpanded and 118 or 34
+    local narrowVoice = editorWidth < 860
+    local voiceHeight = voiceExpanded and (narrowVoice and 146 or 100) or 34
     local panels = ns.notificationPanels
     local allPanels = { panels.apply, panels.expire, panels.beforeExpire, panels.ready, panels.used }
     -- Panels under the timeline join its box (no top edge); standing alone they get their edge back.
@@ -5760,23 +6111,38 @@ local function layoutSharedEditor(isAura)
     auraEditor.voicePanel:SetPoint("TOPLEFT", auraEditor, "TOPLEFT", 0, voiceY)
     auraEditor.voicePanel:SetPoint("TOPRIGHT", auraEditor, "TOPRIGHT", 0, voiceY)
     auraEditor.voicePanel:SetHeight(voiceHeight)
-    -- TTS panel on the same visible columns as the panels above: Voice = col1, Volume = col2, Speed = col3.
+    -- Fluid TTS columns keep all three controls usable at the minimum window width.
+    local voiceCols = ns.Layout.getVoiceColumns(math.max(1, auraEditor:GetWidth()))
+    if narrowVoice then
+        local left, right, gap = ns.Layout.PAD, editorWidth + ns.Layout.RIGHT, 16
+        local available = math.max(1, right - left)
+        voiceCols.voice, voiceCols.voiceWidth = left, available
+        voiceCols.volume, voiceCols.volumeWidth = left, math.floor((available - gap) / 2)
+        voiceCols.speed = left + voiceCols.volumeWidth + gap
+        voiceCols.speedWidth = available - voiceCols.volumeWidth - gap
+    end
+    local voiceLabelY = narrowVoice and -80 or -31
+    local voiceControlY = narrowVoice and -92 or -43
     auraEditor.voiceHeading:ClearAllPoints()
     auraEditor.voiceHeading:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", ns.Layout.PAD + 22, -10) -- 22 = room for the chevron
     for _, control in ipairs(auraEditor.voice.controls or {}) do control:SetShown(voiceExpanded) end
     auraEditor.voiceLabel:ClearAllPoints()
-    auraEditor.voiceLabel:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", cols.col1, -31)
+    auraEditor.voiceLabel:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", voiceCols.voice, -31)
     auraEditor.volumeLabel:ClearAllPoints()
-    auraEditor.volumeLabel:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", cols.col2, -31)
+    auraEditor.volumeLabel:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", voiceCols.volume, voiceLabelY)
     auraEditor.speedLabel:ClearAllPoints()
-    auraEditor.speedLabel:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", cols.col3, -31)
-    ns.Layout.placeDropdown(voiceDropdown, auraEditor.voicePanel, cols.col1, -43, cols.col1Width)
+    auraEditor.speedLabel:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", voiceCols.speed, voiceLabelY)
+    ns.Layout.placeDropdown(voiceDropdown, auraEditor.voicePanel, voiceCols.voice, -43, voiceCols.voiceWidth)
     volumeSlider:ClearAllPoints()
-    volumeSlider:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", cols.col2, -43)
-    volumeSlider:SetWidth(cols.col3 - cols.col2 - ns.Layout.COL_GAP - ns.Layout.VALUE_W)
+    volumeSlider:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", voiceCols.volume, voiceControlY)
+    volumeSlider:SetWidth(math.max(48, voiceCols.volumeWidth - ns.Layout.VALUE_W - 8))
+    volumeValue:ClearAllPoints()
+    volumeValue:SetPoint("LEFT", volumeSlider, "RIGHT", 8, 0)
     auraEditor.speedSlider:ClearAllPoints()
-    auraEditor.speedSlider:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", cols.col3, -43)
-    auraEditor.speedSlider:SetWidth(cols.right - cols.col3 - ns.Layout.VALUE_W)
+    auraEditor.speedSlider:SetPoint("TOPLEFT", auraEditor.voicePanel, "TOPLEFT", voiceCols.speed, voiceControlY)
+    auraEditor.speedSlider:SetWidth(math.max(48, voiceCols.speedWidth - ns.Layout.VALUE_W - 8))
+    auraEditor.speedValue:ClearAllPoints()
+    auraEditor.speedValue:SetPoint("LEFT", auraEditor.speedSlider, "RIGHT", 8, 0)
     local viewportHeight = editorScroll and math.max(1, editorScroll:GetHeight()) or 620
     local contentHeight = -voiceY + auraEditor.voicePanel:GetHeight() + 16
     auraEditor.minimumContentHeight = math.max(620, contentHeight)
@@ -6997,6 +7363,21 @@ function updateDetails()
     updatePreviewButtons()
 end
 
+local function showCreationOptions()
+    if not creationView then return end
+    creationView.auraButton:Show()
+    creationView.itemButton:Show()
+    creationView.skillButton:Show()
+    creationView.importButton:Show()
+    if creationView.classPresetPanel then
+        local className, playerClass = UnitClass("player")
+        local hasClassPreset = playerClass == "PALADIN"
+        creationView.classPresetPanel:SetShown(hasClassPreset)
+        creationView.classDivider:SetShown(hasClassPreset)
+        creationView.classPresetPanel.heading:SetText(string.format(L("Class Detected: %s"), className or L("Paladin")))
+    end
+end
+
 local function resetSkillCreationSearch()
     skillSearchGeneration = skillSearchGeneration + 1
     if skillSearchPopup then skillSearchPopup:Hide() end
@@ -7006,12 +7387,7 @@ local function resetSkillCreationSearch()
         skillSearchBox:Hide()
     end
     if skillSearchStatus then skillSearchStatus:Hide() end
-    if creationView then
-        creationView.auraButton:Show()
-        creationView.itemButton:Show()
-        creationView.skillButton:Show()
-        creationView.importButton:Show()
-    end
+    showCreationOptions()
 end
 
 local function selectSkillSearchResult(result)
@@ -7091,6 +7467,8 @@ ns.AuraPresetUI.beginCreation = function()
     creationView.itemButton:Hide()
     creationView.skillButton:Hide()
     creationView.importButton:Hide()
+    creationView.classPresetPanel:Hide()
+    creationView.classDivider:Hide()
     skillSearchBox:Hide()
     skillSearchStatus:Hide()
     creationView.manualPanel:ClearAllPoints()
@@ -7168,10 +7546,7 @@ ns.AuraPresetUI.finishCreation = function(restoreSelection)
     creationView.backButton:Hide()
     creationView.createAuraButton:Hide()
     creationView.heading:SetText(L("ADD RULE"))
-    creationView.auraButton:Show()
-    creationView.itemButton:Show()
-    creationView.skillButton:Show()
-    creationView.importButton:Show()
+    showCreationOptions()
     local previous = ui.previousSelection
     ui.previousSelection = nil
     if restoreSelection and previous then
@@ -8789,9 +9164,10 @@ creationView:SetPoint("BOTTOMRIGHT", detailPanel, "BOTTOMRIGHT", -ns.Layout.MARG
     creationView.auraButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
     creationView.itemButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
     creationView.skillButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
-local function styleCreationOption(button, iconPath, title, description, y)
+local function styleCreationOption(button, iconPath, title, description, y, parent)
+    parent = parent or creationView
     button:SetSize(360, 76)
-    button:SetPoint("TOP", creationView, "TOP", 0, y)
+    button:SetPoint("TOP", parent, "TOP", 0, y)
     button:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     button:SetBackdropColor(0.14, 0.155, 0.18, 1)
     button:SetBackdropBorderColor(0.42, 0.37, 0.25, 1)
@@ -8811,15 +9187,25 @@ local function styleCreationOption(button, iconPath, title, description, y)
     button:SetScript("OnLeave", function(self) self:SetBackdropColor(0.14, 0.155, 0.18, 1) end)
     end
     styleCreationOption(creationView.auraButton, "Interface\\Icons\\Spell_Nature_Rejuvenation", "Aura", "Track buff, debuff, or item-effect auras.", -64)
-    styleCreationOption(creationView.itemButton, "Interface\\Icons\\INV_Misc_Bag_10", "Equipped item", "Announce when this item's cooldown is ready.", -150)
-    styleCreationOption(creationView.skillButton, "Interface\\Icons\\Spell_Holy_MindVision", "Spell cooldown", "Announce when this spell's cooldown is ready.", -236)
-    creationView.importButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
-    styleCreationOption(creationView.importButton, "Interface\\Icons\\INV_Misc_Note_01", "Import", "Paste a group someone shared with you.", -322)
+    styleCreationOption(creationView.itemButton, "Interface\\Icons\\INV_Misc_Bag_10", "Equipped item", "Announce when this item's cooldown is ready.", -64)
+    styleCreationOption(creationView.skillButton, "Interface\\Icons\\Spell_Holy_MindVision", "Spell cooldown", "Announce when this spell's cooldown is ready.", -154)
+    creationView.importButton = CreateFrame("Button", nil, creationView, "UIPanelButtonTemplate")
+    creationView.importButton:SetSize(96, 26)
+    creationView.importButton:SetPoint("BOTTOMLEFT", creationView, "BOTTOMLEFT", 18, 10)
+    creationView.importButton:SetText(L("Import"))
     creationView.importButton:SetScript("OnClick", function() ns.ShareUI.openImport() end)
-    -- Paladins: one rule with every learned Seal (the Codex seal family).
-    creationView.sealsButton = CreateFrame("Button", nil, creationView, "BackdropTemplate")
-    styleCreationOption(creationView.sealsButton, "Interface\\Icons\\Spell_Holy_RighteousnessAura", "All Seals",
-        "Paladin: one aura rule with every Seal you know.", -408)
+    ns.Skin.Register(creationView.importButton, "button")
+    creationView.classDivider = creationView:CreateTexture(nil, "ARTWORK")
+    creationView.classDivider:SetColorTexture(0.57, 0.45, 0.22, 1)
+    creationView.classDivider:SetHeight(1)
+    -- Class presets live in a separate section beneath the generic rule types.
+    creationView.classPresetPanel = CreateFrame("Frame", nil, creationView, "BackdropTemplate")
+    creationView.classPresetPanel:SetSize(396, 128)
+    stylePanel(creationView.classPresetPanel, 0.07, 0.075, 0.085)
+    creationView.classPresetPanel.heading = makeSectionLabel(creationView.classPresetPanel, "Class Detected: Paladin", 14, -10)
+    creationView.sealsButton = CreateFrame("Button", nil, creationView.classPresetPanel, "BackdropTemplate")
+    styleCreationOption(creationView.sealsButton, "Interface\\Icons\\Spell_Holy_RighteousnessAura",
+        L("All Seals"), L("Create one aura rule with every Seal you know."), -42, creationView.classPresetPanel)
     creationView.sealsButton:SetScript("OnClick", function()
         local added, status, familyRuleID = ns.syncAuraTrackerSeals(nil, true)
         for _, candidate in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
@@ -8835,8 +9221,39 @@ local function styleCreationOption(button, iconPath, title, description, y)
                 or "Seals could not be added.", true)
         end
     end)
-    local _, classFile = UnitClass("player")
-    creationView.sealsButton:SetShown(classFile == "PALADIN")
+    creationView.classPresetPanel:Hide()
+    creationView.classDivider:Hide()
+
+    creationView.layoutOptions = function(self)
+        local width = self:GetWidth()
+        if not width or width <= 0 then return end
+        local inset, gap = 18, 14
+        local cardWidth = math.max(1, (width - inset * 2 - gap) / 2)
+        self.auraButton:ClearAllPoints()
+        self.auraButton:SetSize(cardWidth, 76)
+        self.auraButton:SetPoint("TOPLEFT", self, "TOPLEFT", inset, -64)
+        self.itemButton:ClearAllPoints()
+        self.itemButton:SetSize(cardWidth, 76)
+        self.itemButton:SetPoint("TOPRIGHT", self, "TOPRIGHT", -inset, -64)
+        self.skillButton:ClearAllPoints()
+        self.skillButton:SetSize(cardWidth, 76)
+        self.skillButton:SetPoint("TOPLEFT", self, "TOPLEFT", inset, -154)
+        self.classDivider:ClearAllPoints()
+        self.classDivider:SetPoint("TOPLEFT", self, "TOPLEFT", inset, -244)
+        self.classDivider:SetPoint("TOPRIGHT", self, "TOPRIGHT", -inset, -244)
+        self.classPresetPanel:ClearAllPoints()
+        self.classPresetPanel:SetPoint("TOPLEFT", self, "TOPLEFT", inset, -260)
+        self.classPresetPanel:SetPoint("TOPRIGHT", self, "TOPRIGHT", -inset, -260)
+        self.classPresetPanel:SetHeight(128)
+        self.sealsButton:ClearAllPoints()
+        self.sealsButton:SetSize(math.max(1, width - inset * 2 - 28), 76)
+        self.sealsButton:SetPoint("TOPLEFT", self.classPresetPanel, "TOPLEFT", 14, -42)
+        self.importButton:ClearAllPoints()
+        self.importButton:SetPoint("BOTTOMLEFT", self, "BOTTOMLEFT", inset, 10)
+    end
+    creationView:HookScript("OnSizeChanged", creationView.layoutOptions)
+    creationView:HookScript("OnShow", creationView.layoutOptions)
+    creationView:layoutOptions()
 
     skillSearchBox = createEditBox(creationView, 330, 24)
     skillSearchBox:SetPoint("TOP", creationView, "TOP", 0, -60)
@@ -8897,6 +9314,8 @@ local function styleCreationOption(button, iconPath, title, description, y)
         creationView.itemButton:Hide()
         creationView.skillButton:Hide()
         creationView.importButton:Hide()
+        creationView.classPresetPanel:Hide()
+        creationView.classDivider:Hide()
         skillSearchBox:Show()
         skillSearchStatus:Show()
         skillSearchBox:SetFocus()
@@ -9509,6 +9928,7 @@ addHelpTooltip(auraEditor.speedSlider, "Speech speed", "Set the speech speed fro
 addHelpTooltip(creationView.auraButton, "Aura", "Track buff, debuff, or item-effect auras.")
 addHelpTooltip(creationView.itemButton, "Equipped item", "Choose an equipped item and announce when its cooldown is ready.")
 addHelpTooltip(creationView.skillButton, "Spell cooldown", "Choose a spell from your spellbook and announce when its cooldown is ready.")
+    addHelpTooltip(creationView.importButton, "Import", "Paste a group someone shared with you.")
 addHelpTooltip(creationView.cancelButton, "Cancel", "Return to the selected rule without creating a new one.")
 updatePreviewButtons()
 -- Checkboxes last: their OnClick scripts were set above and must not run after the skin's HookScript hooks.
@@ -9839,6 +10259,7 @@ function ns.createSettingsPanel()
     ns.skinDivider(titleRule)
     local definitions = {
         { key = "tooltipIDs", text = "IDs in game tooltips", help = "Shows spell IDs for auras and spells, plus item and available effect IDs for items." },
+        { key = "estimatedAuraWarnings", text = "Estimated aura warnings", help = "Track auras in Blizzard's Cooldown Manager (Essential Cooldowns) to expose Blizzard timing data. Learned durations are estimates and serve as fallback." },
     }
     local displayChecks = {}
     for index, definition in ipairs(definitions) do
@@ -9852,6 +10273,10 @@ function ns.createSettingsPanel()
             local checked = self:GetChecked()
             local enabled = checked == true or checked == 1
             WoWraVoxDB.settings[definition.key] = enabled
+            if definition.key == "estimatedAuraWarnings" then
+                syncAllAuras(false)
+                if ns._Aura.refreshMarkerSchedules then ns._Aura.refreshMarkerSchedules() end
+            end
         end)
         addHelpTooltip(check, definition.text, definition.help)
         settingsPanel[definition.key] = check
@@ -10365,6 +10790,38 @@ function ns.createOptions()
     addHelpTooltip(optionsFrame.settingsButton, "Display options", "Configure tooltip IDs.")
     ns.Skin.Register(optionsFrame.settingsButton, "button")
     if ns.Skin.Data() then optionsFrame.settingsButton:SetBackdrop(nil) end -- the button art replaces the backdrop
+
+    -- Session recorder (Recorder.lua): starts/stops a recording; the result window opens after the stop.
+    optionsFrame.recordButton = CreateFrame("Button", nil, header, "BackdropTemplate")
+    optionsFrame.recordButton:SetSize(36, 36)
+    optionsFrame.recordButton:SetPoint("RIGHT", optionsFrame.settingsButton, "LEFT", -6, 0)
+    optionsFrame.recordButton:SetBackdrop({
+        bgFile = "Interface\\Buttons\\UI-Panel-Button-Up",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        edgeSize = 10,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    optionsFrame.recordButton:SetBackdropColor(0.42, 0.34, 0.18, 1)
+    optionsFrame.recordButton:SetBackdropBorderColor(0.82, 0.62, 0.24, 1)
+    optionsFrame.recordButton.mark = optionsFrame.recordButton:CreateTexture(nil, "ARTWORK")
+    optionsFrame.recordButton.mark:SetColorTexture(0.95, 0.08, 0.04, 1)
+    optionsFrame.recordButton.mark:SetPoint("CENTER")
+    optionsFrame.recordButton.mark:SetSize(14, 14)
+    optionsFrame.recordButton:SetScript("OnEnter", function(self)
+        self:SetBackdropColor(0.58, 0.46, 0.2, 1)
+        self:SetBackdropBorderColor(1, 0.82, 0.3, 1)
+    end)
+    optionsFrame.recordButton:SetScript("OnLeave", function(self)
+        self:SetBackdropColor(0.42, 0.34, 0.18, 1)
+        self:SetBackdropBorderColor(0.82, 0.62, 0.24, 1)
+    end)
+    optionsFrame.recordButton:SetScript("OnClick", function()
+        if ns.Recorder and ns.Recorder.Toggle then ns.Recorder.Toggle() end
+    end)
+    addHelpTooltip(optionsFrame.recordButton, "Record session",
+        "Record your casts, new auras and cooldowns while you play. Stop it (same button or /wvrec) to build a group from what was recorded.")
+    ns.Skin.Register(optionsFrame.recordButton, "button")
+    if ns.Skin.Data() then optionsFrame.recordButton:SetBackdrop(nil) end
 
 
     listPanel = CreateFrame("Frame", nil, optionsFrame, "BackdropTemplate")

@@ -18,6 +18,7 @@ Profiles.lua
 SkinData.lua
 Skin.lua
 SkillTracking.lua
+Recorder.lua
 AuraPresets.lua
 AuraSoundFallback.lua
 Markers.lua

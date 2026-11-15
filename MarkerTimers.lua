@@ -4,8 +4,9 @@ local _, ns = ...
 -- 0 % is the start event itself and 100 % the real end event (aura removed / ready again).
 --
 -- api = { now(), schedule(delay, fn) -> handle, cancel(handle), emit(ruleID, spellID, markerKey, info) }
--- Update(ruleID, spellID, info): info = { active, start, duration, estimated, markers, baseline }
+-- Update(ruleID, spellID, info): info = { active, start, duration, expiration, estimated, markers, baseline }
 --   start: time the effect began (GetTime scale); duration: seconds (readable, overridden or learned);
+--   expiration: exact end time when Blizzard exposes one;
 --   estimated: true when the duration is a learned/overridden guess, passed through to emit;
 --   baseline: true for a state found at login/reload; markers already in the past are skipped, never replayed.
 local MarkerTimers = {}
@@ -45,36 +46,51 @@ function MarkerTimers.Create(api)
         local start, duration = info.start, info.duration
         if not finite(start) then return run end
         if not (finite(duration) and duration > 0) then duration = nil end
+        local expiration = finite(info.expiration) and info.expiration > 0 and info.expiration or nil
         -- Same window (same start and duration within a frame): nothing to do.
-        if run and math.abs(run.start - start) < 0.05 and (run.duration or -1) == (duration or -1)
-            and run.signature == info.signature then
-            -- A guess confirmed by a real reading (or the other way round): same timers, new label.
-            run.estimated, run.info = info.estimated == true, info
-            return run
+        local sameWindow = run and math.abs(run.start - start) < 0.05
+            and (run.duration or -1) == (duration or -1) and run.signature == info.signature
+        if sameWindow then
+            -- If this update cannot read end time, keep last exact value for this same run.
+            if not expiration then expiration = run.expiration end
+            local sameExpiration = (not expiration and not run.expiration)
+                or (expiration and run.expiration and math.abs(expiration - run.expiration) < 0.05)
+            if sameExpiration then
+                -- A guess confirmed by a real reading (or the other way round): same timers, new label.
+                run.estimated, run.info = info.estimated == true, info
+                return run
+            end
         end
         stop(run)
         generation = generation + 1
-        run = { start = start, duration = duration, timers = {}, generation = generation, signature = info.signature,
+        run = { start = start, duration = duration, expiration = expiration, timers = {}, generation = generation, signature = info.signature,
             estimated = info.estimated == true, info = info }
         runs[id] = run
         local now = api.now()
         local Markers = ns.Markers
         for _, marker in ipairs(info.markers or {}) do
             if not Markers.IsEndpoint(marker.key) then
-                -- "s after start" needs no duration; percent and "s before end" do.
-                local offset = Markers.Seconds(marker, duration)
-                local fireAt = offset and start + offset
+                -- Use Blizzard's exact end directly for seconds-before-end nodes, even without a duration.
+                local exactEndNode = marker.anchor == "end" and marker.offset and expiration
+                local offset = exactEndNode and marker.offset or Markers.Seconds(marker, duration)
+                local fireAt = exactEndNode and expiration - offset or offset and start + offset
                 -- Nothing at or after the end: the real end event owns 100 %. Without a known duration a
                 -- start-anchored node simply fires; if the effect is gone by then, the run was stopped already.
-                if fireAt and (not duration or offset < duration) then
+                local beforeEnd = expiration and fireAt and fireAt < expiration
+                    or not expiration and (not duration or offset < duration)
+                if fireAt and beforeEnd then
                     local delay = fireAt - now
                     if delay >= 0 or (delay > -0.25 and not info.baseline) then
                         local captured, key = run.generation, marker.key
+                        local markerIsExact = exactEndNode and true or false
                         run.timers[key] = api.schedule(math.max(0, delay), function()
                             local current = runs[id]
                             if current ~= run or run.generation ~= captured then return end
                             run.timers[key] = nil
-                            api.emit(ruleID, spellID, key, { estimated = run.estimated, start = run.start, duration = run.duration })
+                            api.emit(ruleID, spellID, key, {
+                                estimated = run.estimated and not markerIsExact,
+                                start = run.start, duration = run.duration,
+                            })
                         end)
                     end
                 end
@@ -85,12 +101,13 @@ function MarkerTimers.Create(api)
 
     -- The effect was applied (or refreshed) again just now: its nodes count from `start`, the old timers are void.
     -- Without a running window yet, nothing is scheduled; the next Update starts one.
-    function manager:Restart(ruleID, spellID, start)
+    function manager:Restart(ruleID, spellID, start, estimated)
         local run = runs[tostring(ruleID) .. "|" .. tostring(spellID)]
         if not (run and run.info and finite(start)) then return false end
         local info = {}
         for key, value in pairs(run.info) do info[key] = value end
-        info.start, info.baseline = start, false
+        info.start, info.expiration, info.baseline = start, nil, false
+        if estimated ~= nil then info.estimated = estimated == true end
         self:Update(ruleID, spellID, info)
         return true
     end

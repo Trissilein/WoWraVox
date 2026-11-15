@@ -269,7 +269,10 @@ local function buildDesired(rules)
                 end
             end
             local applyMediaSound = rule.applySoundEnabled and selectedMediaSound(rule, "apply")
-            local expireMediaSound = rule.expireSoundEnabled and selectedMediaSound(rule, "expire")
+            -- A group (several triggers, e.g. the seals) ends with the last of them, not with each aura's removal: WoW
+            -- would play the end tone on every replacement/recast too. The end of a group is announced by the addon.
+            local groupEnd = rule.oneEffect or (type(rule.spellIDs) == "table" and #rule.spellIDs > 1)
+            local expireMediaSound = not groupEnd and rule.expireSoundEnabled and selectedMediaSound(rule, "expire")
             for _, spellID in ipairs(type(rule.spellIDs) == "table" and rule.spellIDs or {}) do
                 if type(spellID) == "number" and spellID > 0 and spellID == math.floor(spellID) then
                     -- Never-secret auras stay readable in combat, so the addon speaks them itself (TTS on).

@@ -397,20 +397,38 @@ local function cdmFrameInfo(frame)
             if duration then break end
         end
     end
-    return { instanceID = instanceID, duration = duration }
+    local remaining
+    if instanceID and C_UnitAuras and type(C_UnitAuras.GetAuraDuration) == "function" then
+        local ok, seconds = pcall(function()
+            local value = C_UnitAuras.GetAuraDuration("player", instanceID)
+            return value and value:GetRemainingDuration()
+        end)
+        if ok then remaining = publicNumber(seconds) end
+    end
+    return { instanceID = instanceID, duration = duration, remaining = remaining }
 end
 
 -- The icon of a buff lights up and goes dark even while the aura behind it is hidden in combat: hand that to the aura
 -- rules (ns._Aura.cdmSignal decides whether it is needed). active = the icon's own alert, nil = read the icon.
-local function signalCDMFrame(frame, active, source)
+local function signalCDMFrame(frame, active, source, refreshed)
     if active == nil then active = cdmFrameActive(frame) end
+    -- Essential/Utility aura frames can have a different cooldown isActive state.
+    if source ~= "aura-state" and source ~= "aura-baseline" then
+        local current = cdmFrameActive(frame)
+        if current ~= nil then active = current end -- ignore a delayed alert that disagrees with the frame's current state
+    end
     local ids = cdmSpellIDs(frame)
     if ids and ns.SkillTracking and ns.SkillTracking.ObserveLearningCDM then
         pcall(ns.SkillTracking.ObserveLearningCDM, ids, active, source or "Cooldown Manager")
     end
     if active == nil then return end
     if ids and ns._Aura and ns._Aura.cdmSignal then
-        pcall(ns._Aura.cdmSignal, ids, active, active and cdmFrameInfo(frame) or nil)
+        local info = active and cdmFrameInfo(frame) or {}
+        info.source = frame
+        info.refresh = refreshed == true
+        info.auraSignal = source == "aura-state" or source == "aura-baseline"
+        info.baseline = source == "aura-baseline"
+        pcall(ns._Aura.cdmSignal, ids, active, info)
     end
 end
 
@@ -476,26 +494,39 @@ local function auraFrameReading(frame)
     local ok, instanceID, setFromAura = pcall(function() return frame.auraInstanceID, frame.wasSetFromAura end)
     if not ok then return nil end
     instanceID = publicNumber(instanceID)
-    if instanceID then return true, instanceID end
+    local start
+    if instanceID then
+        local cooldown = frame.Cooldown or frame.cooldown
+        if cooldown and type(cooldown.GetCooldownTimes) == "function" then
+            local timeOK, value = pcall(cooldown.GetCooldownTimes, cooldown)
+            if timeOK then start = publicNumber(value) end
+        end
+        return true, instanceID, start
+    end
     if type(setFromAura) == "boolean" and not (issecretvalue and issecretvalue(setFromAura)) then return setFromAura end
     return nil
 end
 
 local function auraFrameChanged(frame)
-    local active, instanceID = auraFrameReading(frame)
+    local active, instanceID, start = auraFrameReading(frame)
     if active == nil then return end
     local last = auraFrameLast[frame]
     if not active and not (last and last.active) then return end
-    if last and last.active == active and last.instanceID == instanceID then return end
-    auraFrameLast[frame] = { active = active, instanceID = instanceID }
-    pcall(signalCDMFrame, frame, active, "aura-state")
+    if last and last.active == active and last.instanceID == instanceID and last.start == start then return end
+    local refreshed = last and last.active and active and last.instanceID == instanceID
+        and last.start and start and last.start ~= start
+    auraFrameLast[frame] = { active = active, instanceID = instanceID, start = start }
+    pcall(signalCDMFrame, frame, active, "aura-state", refreshed)
 end
 
 local function hookAuraFrame(frame)
     if not frame or hookedAuraFrames[frame] or not hooksecurefunc then return end
     hookedAuraFrames[frame] = true
-    local active, instanceID = auraFrameReading(frame)
-    if active then auraFrameLast[frame] = { active = true, instanceID = instanceID } end -- primed, not announced
+    local active, instanceID, start = auraFrameReading(frame)
+    if active then
+        auraFrameLast[frame] = { active = true, instanceID = instanceID, start = start }
+        pcall(signalCDMFrame, frame, true, "aura-baseline")
+    end
     local count = 0
     for key, value in pairs(frame) do
         if count < 10 and type(key) == "string" and type(value) == "function"

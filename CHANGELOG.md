@@ -1,5 +1,12 @@
 # WoWraVox
 
+## Unreleased
+
+- Aura warning timers now use readable Cooldown Manager remaining time or player-aura expiry values. Seconds-before-end warnings schedule from exact expiry even when total duration is unavailable. Refreshes cancel and replace the prior schedule; learned durations remain optional estimates.
+- Paladins get a detected-class section for the All Seals preset. The add-rule picker uses a two-column layout and a compact import action; voice controls resize for narrow windows.
+- Added session recording with `/wvrec`, including creating aura groups from recorded casts and aura changes.
+- Group aura rules suppress per-trigger expiry sounds so one-effect groups announce their final end once.
+
 ## 0.15.0
 
 - WoW Forever support (beta): the package now ships `WoWraVox_Camelot.toc` (interface 16001) next to the Retail TOC. Text-to-speech, on-screen text, aura search, trinket and cooldown rules work as on Retail.
