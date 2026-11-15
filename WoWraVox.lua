@@ -1422,6 +1422,16 @@ local function isPublicNumber(value)
     return value > 0 and value == math.floor(value)
 end
 
+-- Timestamps and durations are not IDs: fractional seconds are valid and must not be discarded.
+function ns._Aura.isPublicTime(value)
+    if type(value) ~= "number" then return false end
+    if issecretvalue then
+        local ok, secret = pcall(issecretvalue, value)
+        if not ok or secret then return false end
+    end
+    return value == value and value >= 0 and value < math.huge
+end
+
 -- Buffs the player receives are remembered across sessions (at most 2000 IDs). One name can belong to several
 -- spell IDs, one per spec, so a name search finds every variant the player has actually met.
 function ns.ObserveSpell(spellID, origin)
@@ -2590,10 +2600,7 @@ local function sayAura(spellID, eventKind, sourceEvent, castGUID, targetRule)
                 if eventKind == "apply" and ns._Aura.recentExpiryEvents then
                     ns._Aura.recentExpiryEvents[tostring(rule.id) .. "|" .. tostring(ns.TrackID(rule, spellID))] = nil
                 end
-                -- Applied again (refresh, or recast while the old window still runs): nodes count from now.
-                if eventKind == "apply" and ns.markerTimers and rule.id then
-                    ns.markerTimers:Restart(rule.id, ns.TrackID(rule, spellID), GetTime())
-                end
+                -- Cast/refresh handlers own timer restarts. Output must preserve the exact end already supplied by CDM.
                 -- Any timeline marker key: apply, expire, beforeExpire, m1, m2, ...
                 local enabled, message = rule[eventKind .. "Enabled"], rule[eventKind .. "Message"]
                 local profile = ns.getRuleScreenProfile(rule, eventKind)
@@ -2678,8 +2685,8 @@ ns._Aura.rememberAuraTiming = function(spellID, expiration, duration)
     local key = ns._Aura.auraTimingKey(spellID)
     local store = key and ns._Aura.auraTimingStore()
     if not store then return false end
-    if not (isPublicNumber(expiration) and expiration > GetTime()
-        and isPublicNumber(duration) and duration > 0) then
+    if not (ns._Aura.isPublicTime(expiration) and expiration > GetTime()
+        and ns._Aura.isPublicTime(duration) and duration > 0) then
         store[key] = nil
         return false
     end
@@ -2697,8 +2704,8 @@ ns._Aura.restoreAuraTiming = function(spellID)
     if type(saved) ~= "table" then return nil end
     local wallNow = type(GetServerTime) == "function" and GetServerTime()
         or type(time) == "function" and time() or nil
-    if not (isPublicNumber(wallNow) and isPublicNumber(saved.expiresAt)
-        and isPublicNumber(saved.duration) and saved.duration > 0) then
+    if not (isPublicNumber(wallNow) and ns._Aura.isPublicTime(saved.expiresAt)
+        and ns._Aura.isPublicTime(saved.duration) and saved.duration > 0) then
         store[key] = nil
         return nil
     end
@@ -2764,7 +2771,7 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
         markerTimers:StopOthers(rule.id, spellID)
     end
     local store = learnedDurations()
-    if isPublicNumber(readableDuration) and readableDuration > 0 then
+    if ns._Aura.isPublicTime(readableDuration) and readableDuration > 0 then
         ns.MarkerTimers.Learn(store, seenID, readableDuration)
         ns.MarkerTimers.Learn(store, spellID, readableDuration)
     end
@@ -2773,7 +2780,7 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
     local estimatesDisabled = estimated
         and not (WoWraVoxDB.settings and WoWraVoxDB.settings.estimatedAuraWarnings ~= false)
     local start
-    if isPublicNumber(expiration) and expiration > 0 and duration then
+    if ns._Aura.isPublicTime(expiration) and expiration > 0 and duration then
         start = expiration - duration
     else
         local current = markerTimers:Get(rule.id, spellID)
@@ -2784,7 +2791,7 @@ function ns.updateMarkerTimers(rule, spellID, presence, expiration, readableDura
     local markers = ns.Markers.ForSpell(rule, spellID)
     if estimatesDisabled then
         local exactEndMarkers = {}
-        if isPublicNumber(expiration) and expiration > 0 then
+        if ns._Aura.isPublicTime(expiration) and expiration > 0 then
             for _, marker in ipairs(markers) do
                 if marker.anchor == "end" and marker.offset then exactEndMarkers[#exactEndMarkers + 1] = marker end
             end
@@ -2818,15 +2825,15 @@ local function updateAuraTrackerState(spellID, presence, aura, state, sourceEven
             local duration, permanent, expiration
             if aura then
                 local value, durationOK = safeAuraField(aura, "duration")
-                if durationOK and isPublicNumber(value) and value > 0 then duration = value end
-                permanent = durationOK and isPublicNumber(value) and value == 0
+                if durationOK and ns._Aura.isPublicTime(value) and value > 0 then duration = value end
+                permanent = durationOK and ns._Aura.isPublicTime(value) and value == 0
                 local auraExpiration, expirationOK = safeAuraField(aura, "expirationTime")
-                if expirationOK and isPublicNumber(auraExpiration) and auraExpiration > 0 then expiration = auraExpiration end
+                if expirationOK and ns._Aura.isPublicTime(auraExpiration) and auraExpiration > 0 then expiration = auraExpiration end
             end
-            if not duration and state and isPublicNumber(state.auraDuration) and state.auraDuration > 0 then
+            if not duration and state and ns._Aura.isPublicTime(state.auraDuration) and state.auraDuration > 0 then
                 duration = state.auraDuration
             end
-            if state and isPublicNumber(state.expirationTime) and state.expirationTime > 0 then
+            if state and ns._Aura.isPublicTime(state.expirationTime) and state.expirationTime > 0 then
                 expiration = state.expirationTime
             end
             if state and duration then state.auraDuration = duration end
@@ -2871,8 +2878,8 @@ local function resolveAuraTrackerSignalSpellID(spellIDs)
                         if auraWatchBySpellID[auraID]
                             and (ns.RuleSpellMatches(rule, auraID, candidateID)
                                 or ns._Aura.castIDFor(rule, auraID) == candidateID) then
-                            if resolved and resolved ~= auraID then return nil end
-                            resolved = auraID
+                            -- Several ranks match: the first configured one (an exact ID already returned above).
+                            resolved = resolved or auraID
                         end
                     end
                 end
@@ -3317,9 +3324,16 @@ function ns._Aura.handleCast(unit, castGUID, castSpellID)
     for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
         if rule.enabled and ns.Profiles.RuleMatchesCurrentSpecialization(rule) then
             local announced = false
+            -- An exact cast ID wins over another rank of the same family (20375/20915 are both Seal of Command).
+            local exactID
             for _, rawAuraID in ipairs(rule.spellIDs or {}) do
                 local auraID = ns._Aura.validIntegerID(rawAuraID)
-                if auraID and ns.RuleSpellMatches(rule, ns._Aura.castIDFor(rule, auraID), castSpellID) and not announced then
+                if auraID and ns._Aura.castIDFor(rule, auraID) == castSpellID then exactID = auraID; break end
+            end
+            for _, rawAuraID in ipairs(rule.spellIDs or {}) do
+                local auraID = ns._Aura.validIntegerID(rawAuraID)
+                if auraID and (auraID == exactID or not exactID
+                    and ns.RuleSpellMatches(rule, ns._Aura.castIDFor(rule, auraID), castSpellID)) and not announced then
                     announced = true
                     table.insert(identityMatches, tostring(rule.id or "?") .. ":" .. tostring(auraID))
                     if selfBuffStatus ~= "false" then
@@ -3350,6 +3364,8 @@ function ns._Aura.handleCast(unit, castGUID, castSpellID)
                                     -- A successful cast confirms a new start, but its duration may be learned.
                                     -- Keep the estimate separate from a measured expiration.
                                     state.expirationTime = 0
+                                    -- Its end now comes from the CDM signal (a readable recast sets it again).
+                                    state.fromCDM = true
                                     state.timingEstimated = duration ~= nil
                                     state.baselineUnknown = false
                                     state.queryFailures = 0
@@ -3570,13 +3586,16 @@ function ns._Aura.cdmRestart(spellID)
     end
 end
 
--- A CDM removal well before its tracked end is a refresh/replacement, not an expiry.
+-- A CDM removal well before its tracked end is a refresh/replacement, not an expiry. Not for oneEffect rules: their
+-- effect can be used up early (Judgement consumes a seal); a switch to another trigger of the rule is caught by the
+-- deferred end (otherTriggerActive / the new cast cancels it).
 function ns._Aura.cdmEndedEarly(spellID)
     if not ns.markerTimers then return false end
     for _, rule in ipairs(WoWraVoxDB and WoWraVoxDB.auras or {}) do
         if rule.id and rule.enabled then
             for _, configuredID in ipairs(rule.spellIDs or {}) do
                 if ns.RuleSpellMatches(rule, configuredID, spellID) then
+                    if rule.oneEffect then return false end
                     local run = ns.markerTimers:Get(rule.id, ns.TrackID(rule, spellID))
                     local expectedEnd = run and (run.expiration or run.duration and run.start + run.duration)
                     if expectedEnd then
@@ -3621,9 +3640,9 @@ function ns._Aura.cdmSignal(spellIDs, active, info)
     local state = activeAuras[spellID]
     if active then
         local wasActive = state ~= nil
-        local duration = isPublicNumber(info.duration) and info.duration > 0 and info.duration or nil
-        local remaining = isPublicNumber(info.remaining) and info.remaining >= 0 and info.remaining or nil
-        if not duration and state and isPublicNumber(state.auraDuration) and state.auraDuration > 0 then
+        local duration = ns._Aura.isPublicTime(info.duration) and info.duration > 0 and info.duration or nil
+        local remaining = ns._Aura.isPublicTime(info.remaining) and info.remaining >= 0 and info.remaining or nil
+        if not duration and state and ns._Aura.isPublicTime(state.auraDuration) and state.auraDuration > 0 then
             duration = state.auraDuration
         end
         if not state then
@@ -3651,6 +3670,7 @@ function ns._Aura.cdmSignal(spellIDs, active, info)
             ns._Aura.cancelExpiry(state)
             state.cdmInstance = info.instanceID or state.cdmInstance
             state.expirationTime = 0
+            state.fromCDM = true
             state.timingEstimated = duration ~= nil
             state.baselineUnknown = false
             ns._Aura.cdmRestart(spellID)
@@ -3986,7 +4006,7 @@ function ns.cooldownCycle(rule, key, start, duration)
         return
     end
     rulesByID[tostring(rule.id)] = rule
-    if isPublicNumber(duration) and duration > 0 then
+    if ns._Aura.isPublicTime(duration) and duration > 0 then
         ns.MarkerTimers.Learn(ns.learnedCooldowns(), ns.cooldownKey(rule, key), duration)
     end
     local length, estimated = ns.MarkerTimers.DurationFor(rule, ns.cooldownKey(rule, key), duration, ns.learnedCooldowns())

@@ -182,7 +182,20 @@ local function cdmSpellIDs(frame)
     if type(cdID) ~= "number" or (issecretvalue and issecretvalue(cdID)) then return nil end
     local ok, info = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, cdID)
     if not ok then return nil end
-    return cdmInfoSpellIDs(info)
+    local ids, seen = {}, {}
+    local function add(id)
+        id = publicID(id)
+        if id and not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+    end
+    -- A shared seal entry lists every possible seal. The frame knows which aura is actually running.
+    for _, method in ipairs({ "GetAuraSpellID", "GetSpellID" }) do
+        if type(frame[method]) == "function" then
+            local readOK, id = pcall(frame[method], frame)
+            if readOK then add(id) end
+        end
+    end
+    for _, id in ipairs(cdmInfoSpellIDs(info) or {}) do add(id) end
+    return #ids > 0 and ids or nil
 end
 
 local function scanCDMViewer(name, targets, found)
@@ -410,6 +423,7 @@ end
 
 -- The icon of a buff lights up and goes dark even while the aura behind it is hidden in combat: hand that to the aura
 -- rules (ns._Aura.cdmSignal decides whether it is needed). active = the icon's own alert, nil = read the icon.
+local lastCDMSignalIDs = setmetatable({}, { __mode = "k" })
 local function signalCDMFrame(frame, active, source, refreshed)
     if active == nil then active = cdmFrameActive(frame) end
     -- Essential/Utility aura frames can have a different cooldown isActive state.
@@ -423,6 +437,12 @@ local function signalCDMFrame(frame, active, source, refreshed)
     end
     if active == nil then return end
     if ids and ns._Aura and ns._Aura.cdmSignal then
+        local previous = lastCDMSignalIDs[frame]
+        if not active and previous then ids = previous end -- Blizzard clears the aura ID before its removal hook.
+        if active and previous and previous[1] ~= ids[1] then
+            pcall(ns._Aura.cdmSignal, previous, false, { source = frame })
+        end
+        lastCDMSignalIDs[frame] = active and ids or nil
         local info = active and cdmFrameInfo(frame) or {}
         info.source = frame
         info.refresh = refreshed == true
@@ -511,6 +531,9 @@ local function auraFrameChanged(frame)
     local active, instanceID, start = auraFrameReading(frame)
     if active == nil then return end
     local last = auraFrameLast[frame]
+    -- Blizzard clears the aura instance (OnAuraInstanceInfoCleared) before RefreshData resets wasSetFromAura: lit
+    -- without an instance right after one was attached means the aura is gone, not that another seal took over.
+    if active and not instanceID and last and last.instanceID then active = false end
     if not active and not (last and last.active) then return end
     if last and last.active == active and last.instanceID == instanceID and last.start == start then return end
     local refreshed = last and last.active and active and last.instanceID == instanceID
@@ -527,11 +550,9 @@ local function hookAuraFrame(frame)
         auraFrameLast[frame] = { active = true, instanceID = instanceID, start = start }
         pcall(signalCDMFrame, frame, true, "aura-baseline")
     end
-    local count = 0
-    for key, value in pairs(frame) do
-        if count < 10 and type(key) == "string" and type(value) == "function"
-            and (key:find("Aura") or key:find("ActiveState") or key == "RefreshData") then
-            count = count + 1
+    -- Explicit hooks also cover inherited mixin methods; pairs(frame) with an arbitrary cap can miss removals.
+    for _, key in ipairs({ "OnAuraInstanceInfoSet", "OnAuraInstanceInfoCleared", "RefreshData", "OnActiveStateChanged" }) do
+        if type(frame[key]) == "function" then
             pcall(hooksecurefunc, frame, key, auraFrameChanged)
         end
     end

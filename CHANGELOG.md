@@ -6,6 +6,10 @@
 - Paladins get a detected-class section for the All Seals preset. The add-rule picker uses a two-column layout and a compact import action; voice controls resize for narrow windows.
 - Added session recording with `/wvrec`, including creating aura groups from recorded casts and aura changes.
 - Group aura rules suppress per-trigger expiry sounds so one-effect groups announce their final end once.
+- Seals: a seal applied out of combat and recast in combat announces its end again. A seal used up early (Judgement) now counts as ended for one-effect rules, and its pending warnings stop; switching seals still announces no end.
+- Cooldown Manager: removing a seal no longer briefly reports another seal of the shared entry as active.
+- Saved aura timings and learned cooldowns keep fractional seconds (e.g. 1.5 s) instead of discarding them.
+- A cast of one rank tracks that exact rank when a rule lists several ranks of the same spell; an ambiguous rank signal uses the first configured trigger.
 
 ## 0.15.0
 

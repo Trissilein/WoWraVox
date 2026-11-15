@@ -2279,6 +2279,7 @@ do
         cooldownViewer = C_CooldownViewer, icons = BuffIconCooldownViewer, bars = BuffBarCooldownViewer,
         notify = ns.DebugReport.NoteNotify, queue = ns._Aura.queueTTS, timer = C_Timer, db = WoWraVoxDB,
         secrets = C_Secrets, spell = C_Spell, auras = C_UnitAuras, combat = InCombatLockdown,
+        profilesDB = WoWraVoxProfilesDB,
     }
     local combat, secrecyLevel, live, selfBuff, infos = true, 2, {}, {}, {}
     local spoken, tts = {}, {}
@@ -2292,10 +2293,10 @@ do
         GetSpellInfo = function(spellID) return { name = "Spell " .. spellID, iconID = 1 } end }
     C_UnitAuras = { GetPlayerAuraBySpellID = function(spellID) return live[spellID] end }
     C_Timer = { After = function(_, callback) table.insert(timerCallbacks, callback) end,
-        NewTimer = function(_, callback)
+        NewTimer = function(delay, callback)
             -- Default: the grace delay of a deferred end passes at once; a test sets deferTimers to hold them back.
             if deferTimers then
-                local timer = { callback = callback }
+                local timer = { callback = callback, delay = delay }
                 function timer:Cancel() self.cancelled = true end
                 table.insert(deferTimers, timer)
                 return timer
@@ -2330,11 +2331,18 @@ do
 
     local function newIcon(cooldownID)
         local icon = { cooldownID = cooldownID, isActive = false }
-        function icon:TriggerAuraAppliedAlert() end
+        function icon:TriggerAuraAppliedAlert() if self.isActive ~= hiddenValue then self.isActive = true end end
+        -- Blizzard's removed alert leaves isActive alone (CooldownViewer.lua TriggerAuraRemovedAlert)...
         function icon:TriggerAuraRemovedAlert() end
         function icon:OnActiveStateChanged() end
         function icon:HookScript() end
         return icon
+    end
+    -- ...the frame goes dark only in the RefreshData that follows (SetIsActive(false) -> OnActiveStateChanged).
+    local function removeAura(icon)
+        icon:TriggerAuraRemovedAlert()
+        if icon.isActive ~= hiddenValue then icon.isActive = false end
+        icon:OnActiveStateChanged()
     end
     local function newViewer(icons)
         local pool = { icons = icons, acquired = 0 }
@@ -2373,6 +2381,7 @@ do
         combat, secrecyLevel, live, selfBuff = not outOfCombat, 2, {}, {}
         ns._Aura.secrecyCache = {}
         ns._Aura.clearActiveState()
+        WoWraVoxProfilesDB = { auraDurations = {} }
         WoWraVoxDB = { auras = { rule } }
         ns._Aura.syncAllAuras(true)
         spoken, tts = {}, {}
@@ -2398,9 +2407,10 @@ do
     -- (a) a signal for 408459 activates the rule and announces exactly once, through the normal rule output.
     setup(dpRule())
     local icon = withIcon(101)
-    icon:TriggerAuraAppliedAlert()
+    local firstSignalErrors = swallowedErrors(function() icon:TriggerAuraAppliedAlert() end)
     check("CDM (a): a lit icon announces the rule once, spell ID from the icon",
-        list(spoken) == "apply:408459@CDM_SIGNAL" and list(tts) == "Divine Purpose", list(spoken) .. " / " .. list(tts))
+        list(spoken) == "apply:408459@CDM_SIGNAL" and list(tts) == "Divine Purpose",
+        list(spoken) .. " / " .. list(tts) .. " / " .. list(firstSignalErrors))
     setup(dpRule())
     icon = withIcon(102) -- overrideSpellID wins over spellID
     icon:TriggerAuraAppliedAlert()
@@ -2415,6 +2425,211 @@ do
     icon:TriggerAuraAppliedAlert()
     check("CDM (a): verified cast mapping resolves the configured aura ID",
         list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+    do
+        -- Forever's shared seal entry lists every seal, while the frame identifies the one actually running.
+        local rule = dpRule()
+        rule.oneEffect = true
+        setup(rule)
+        infos[106] = { spellID = 1323522, linkedSpellIDs = { DP, DP_ALT } }
+        local seal = newIcon(106)
+        local currentAura = DP_ALT
+        function seal:GetAuraSpellID() return currentAura end
+        function seal:GetSpellID() return currentAura or 1323522 end
+        loadTooltip({ seal })
+        seal.isActive = true
+        seal:OnActiveStateChanged()
+        check("CDM shared seals: current frame aura wins over the first configured alias",
+            list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+        currentAura, seal.isActive = nil, false
+        seal:OnActiveStateChanged()
+        check("CDM shared seals: removal keeps the identity after Blizzard clears the frame",
+            list(spoken) == "apply:408459@CDM_SIGNAL|expire:408459@CDM_SIGNAL", list(spoken))
+    end
+    do
+        local rule = dpRule({ DP_ALT })
+        rule.markers = { { key = "beforeExpire", anchor = "end", offset = 4, at = 90 } }
+        rule.beforeExpireEnabled, rule.beforeExpireMessage = true, "Four seconds"
+        rule.beforeExpireSoundEnabled, rule.beforeExpireSoundKitID = true, 1234
+        rule.expireSoundEnabled, rule.expireSoundKitID = true, 1235
+        local previousSound, soundCount = PlaySound, 0
+        PlaySound = function() soundCount = soundCount + 1; return true, 1 end
+        setup(rule)
+        WoWraVoxDB.settings = { estimatedAuraWarnings = false }
+        deferTimers, now = {}, 100.25
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 17, duration = 30.25, remaining = 10.5 })
+        local run = ns.markerTimers:Get("dp", DP_ALT)
+        check("CDM fractional times retain the exact end with estimates disabled",
+            run and run.expiration == 110.75 and run.duration == 30.25 and not run.estimated,
+            run and (tostring(run.expiration) .. "/" .. tostring(run.duration) .. "/" .. tostring(run.estimated)))
+        check("CDM exact end arms the four-second warning", #deferTimers == 1 and deferTimers[1].delay == 6.5)
+        now = 106.75
+        deferTimers[1].callback()
+        check("CDM four-second warning reaches TTS in combat", tts[#tts] == "Four seconds", list(tts))
+        check("CDM four-second warning reaches sound in combat", soundCount == 1)
+        now = 110.75
+        ns._Aura.cdmSignal({ DP_ALT }, false)
+        for _, timer in ipairs(deferTimers) do if timer.delay == 0.6 and not timer.cancelled then timer.callback() end end
+        check("CDM fractional expiry reaches end TTS in combat", tts[#tts] == "Divine Purpose ended", list(tts))
+        check("CDM fractional expiry reaches end sound in combat", soundCount == 2)
+        PlaySound = previousSound
+        deferTimers, now = nil, 0
+    end
+    do
+        -- Mixin methods need not be own keys, and removing the aura clears its ID before the callback.
+        local priorEssential = EssentialCooldownViewer
+        local currentAura
+        local methods = {
+            GetAuraSpellID = function() return currentAura end,
+            GetSpellID = function() return currentAura or 1323522 end,
+            OnAuraInstanceInfoSet = function() end,
+            OnAuraInstanceInfoCleared = function() end,
+            RefreshData = function() end,
+        }
+        local frame = setmetatable({ cooldownID = 106, wasSetFromAura = false, cooldownDuration = 30 }, { __index = methods })
+        EssentialCooldownViewer = newViewer({ frame })
+        local rule = dpRule()
+        rule.oneEffect = true
+        setup(rule)
+        deferTimers, now = {}, 500
+        loadTooltip(nil, nil)
+        currentAura, frame.auraInstanceID, frame.wasSetFromAura = DP_ALT, 77, true
+        frame:OnAuraInstanceInfoSet()
+        frame:RefreshData()
+        check("CDM inherited aura hook observes the active seal", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
+        now = 530
+        -- Blizzard order (OnUnitAuraRemovedEvent): ClearAuraInstanceInfo fires the Cleared hook while wasSetFromAura is
+        -- still true; only the RefreshData after it resets wasSetFromAura.
+        currentAura, frame.auraInstanceID = nil, nil
+        frame:OnAuraInstanceInfoCleared()
+        check("CDM Cleared hook starts no timer for another seal of the shared entry",
+            ns.markerTimers:Get("dp", DP) == nil, list(spoken))
+        frame.wasSetFromAura = false
+        frame:RefreshData()
+        for _, timer in ipairs(deferTimers) do if timer.delay == 0.6 and not timer.cancelled then timer.callback() end end
+        check("CDM inherited removal hook ends the original seal once, no phantom seal",
+            list(spoken) == "apply:408459@CDM_SIGNAL|expire:408459@CDM_SIGNAL", list(spoken))
+        EssentialCooldownViewer, deferTimers, now = priorEssential, nil, 0
+    end
+    do
+        -- Seal rules ("All Seals": oneEffect). MOCKED CDM signals; Blizzard's real timing is not covered.
+        local priorGUID, priorServerTime = UnitGUID, GetServerTime
+        UnitGUID = function() return "Player-1" end
+        GetServerTime = function() return 1000 + math.floor(now) end
+        local srcA = {}
+        local function runDeferred()
+            for _, timer in ipairs(deferTimers) do if not timer.cancelled and not timer.ran then timer.ran = true; timer.callback() end end
+        end
+        local function countOf(values, wanted)
+            local count = 0
+            for _, value in ipairs(values) do if value == wanted then count = count + 1 end end
+            return count
+        end
+
+        -- Applied out of combat (exact end readable), recast in combat, runs out: the end is still announced.
+        local rule = dpRule({ DP_ALT })
+        rule.oneEffect = true
+        setup(rule, true)
+        selfBuff[DP_ALT] = true
+        now = 100
+        live[DP_ALT] = { spellId = DP_ALT, expirationTime = 130, duration = 30, auraInstanceID = 5 }
+        ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
+        spoken, tts = {}, {}
+        combat = true
+        live[DP_ALT] = hiddenValue
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 5, duration = 30, source = srcA })
+        now = 110
+        ns._Aura.handleCast("player", "Cast-1", DP_ALT)
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 6, duration = 30, source = srcA })
+        now = 140
+        ns._Aura.cdmSignal({ DP_ALT }, false, { source = srcA })
+        check("seal readable, recast in combat: the natural end is announced once",
+            countOf(spoken, "expire:408459@CDM_SIGNAL") == 1, list(spoken))
+
+        -- Applied in combat, used up after 10 of 30 s (Judgement): one end, and the 90 % node does not fire later.
+        rule = dpRule({ DP_ALT })
+        rule.oneEffect = true
+        rule.markers = { { key = "apply", at = 0 }, { key = "m1", at = 90 }, { key = "expire", at = 100 } }
+        rule.m1Enabled, rule.m1Message = true, "Ninety"
+        setup(rule)
+        WoWraVoxDB.settings = { estimatedAuraWarnings = true }
+        deferTimers, now = {}, 200
+        ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 9, duration = 30, source = srcA })
+        local armed = false
+        for _, timer in ipairs(deferTimers) do if timer.delay == 27 then armed = true end end
+        check("seal consumed early: the 90 % node was armed", armed)
+        now = 210
+        ns._Aura.cdmSignal({ DP_ALT }, false, { source = srcA })
+        now = 230
+        runDeferred()
+        check("seal consumed early: the end is announced exactly once",
+            countOf(spoken, "expire:408459@CDM_SIGNAL") == 1 and countOf(tts, "Divine Purpose ended") == 1,
+            list(spoken) .. " / " .. list(tts))
+        check("seal consumed early: the 90 % node stays silent", countOf(tts, "Ninety") == 0, list(tts))
+
+        -- Switching seal A -> B (either signal order) is no end; B keeps running.
+        for _, removeFirst in ipairs({ true, false }) do
+            rule = dpRule({ DP, DP_ALT })
+            rule.oneEffect = true
+            setup(rule)
+            deferTimers, now = {}, 300
+            ns._Aura.cdmSignal({ DP }, true, { instanceID = 1, duration = 30, source = srcA })
+            now = 310
+            if removeFirst then ns._Aura.cdmSignal({ DP }, false, { source = srcA }) end
+            ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 2, duration = 30, source = srcA })
+            if not removeFirst then ns._Aura.cdmSignal({ DP }, false, { source = srcA }) end
+            for _, timer in ipairs(deferTimers) do if timer.delay == 0.6 and not timer.cancelled then timer.callback() end end
+            local expires = 0
+            for _, entry in ipairs(spoken) do if entry:match("^expire") then expires = expires + 1 end end
+            check("seal switch A -> B (" .. (removeFirst and "A ends first" or "B starts first") .. ") announces no end",
+                expires == 0, list(spoken))
+            check("seal switch A -> B keeps B running", ns.markerTimers:Get("dp", DP_ALT) ~= nil)
+        end
+        deferTimers = nil
+
+        -- Fractional saved aura timing survives a reload.
+        setup(dpRule({ DP_ALT }), true)
+        now = 300.25
+        local remembered = ns._Aura.rememberAuraTiming(DP_ALT, 330.5, 30)
+        local restoredEnd, restoredDuration = ns._Aura.restoreAuraTiming(DP_ALT)
+        check("fractional saved aura timing is restored", remembered and restoredEnd == 330.5 and restoredDuration == 30,
+            tostring(restoredEnd) .. "/" .. tostring(restoredDuration))
+
+        -- Ranks of one family (20375/20915 are both Seal of Command): the exact ID wins, else the first configured one.
+        local priorSame = ns.SpellRanks.SameFamily
+        ns.SpellRanks.SameFamily = function(a, b) return a >= 20375 and a <= 20916 and b >= 20375 and b <= 20916 end
+        rule = dpRule({ 20375, 20915 })
+        rule.rankIDs = { [20375] = true, [20915] = true }
+        rule.oneEffect = true
+        setup(rule)
+        selfBuff[20915] = true
+        now = 400
+        ns._Aura.handleCast("player", "Cast-2", 20915)
+        check("rank family: a cast of the second rank tracks that rank, not the first family member",
+            ns.markerTimers:Get("dp", 20915) ~= nil and ns.markerTimers:Get("dp", 20375) == nil)
+        setup(rule)
+        ns._Aura.cdmSignal({ 20916 }, true, { instanceID = 3, duration = 30, source = srcA })
+        check("rank family: an ambiguous CDM rank resolves to the first configured trigger",
+            list(spoken) == "apply:20375@CDM_SIGNAL", list(spoken))
+        ns.SpellRanks.SameFamily = priorSame
+
+        -- A throwing issecretvalue must not break the time check.
+        local priorSecret = issecretvalue
+        issecretvalue = function() error("secret check failed") end
+        local timeOK, isTime = pcall(ns._Aura.isPublicTime, 5)
+        issecretvalue = priorSecret
+        check("isPublicTime survives a throwing issecretvalue", timeOK and isTime == false, tostring(isTime))
+
+        -- A fractional cooldown (1.5 s) is learned.
+        local cooldownRule = { id = "cd", spellID = 12345, markers = { { key = "used", at = 0 }, { key = "m1", at = 50 },
+            { key = "ready", at = 100 } } }
+        WoWraVoxProfilesDB = {}
+        ns.cooldownCycle(cooldownRule, 12345, now, 1.5)
+        check("a fractional cooldown duration is learned", ns.learnedCooldowns()[12345] == 1.5,
+            tostring(ns.learnedCooldowns()[12345]))
+        ns.cooldownStopRule(cooldownRule)
+
+        UnitGUID, GetServerTime, now = priorGUID, priorServerTime, 0
+    end
     Enum.CooldownViewerCategory = { HiddenPassive = 10, TrackedBuff = 11, TrackedBar = 12 }
     local cooldownSets = { [10] = { 105 }, [11] = {}, [12] = {} }
     infos[105] = { spellID = DP_ALT, hasAura = true, selfAura = true, isKnown = true }
@@ -2497,15 +2712,15 @@ do
     icon:OnActiveStateChanged()
     check("CDM (b): the same change again announces nothing more", #spoken == 1 and #tts == 1, list(spoken))
     icon.isActive = false
-    icon:TriggerAuraRemovedAlert()
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
+    removeAura(icon)
     icon:OnActiveStateChanged()
     check("CDM (b): the end announces once", list(spoken) == "apply:408459@CDM_SIGNAL|expire:408459@CDM_SIGNAL"
         and tts[2] == "Divine Purpose ended", list(spoken))
     icon:TriggerAuraAppliedAlert()
     check("CDM (b): a new application after the end announces again", #spoken == 3, list(spoken))
-    icon:TriggerAuraRemovedAlert()
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
+    removeAura(icon)
     check("CDM (b): a repeated end announces nothing more", #spoken == 4, list(spoken))
 
     -- a refresh: the icon goes dark and lights up again within the grace delay -> neither end nor new start
@@ -2513,12 +2728,12 @@ do
     icon = withIcon(101)
     icon:TriggerAuraAppliedAlert()
     deferTimers = {}
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     check("CDM (b): the end waits for the grace delay", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
     icon:TriggerAuraAppliedAlert()
     for _, timer in ipairs(deferTimers) do if not timer.cancelled then timer.callback() end end
     check("CDM (b): a refresh announces neither an end nor a new start", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     for _, timer in ipairs(deferTimers) do if not timer.cancelled then timer.callback() end end
     check("CDM (b): an end that stays dark is announced after the delay", #spoken == 2 and spoken[2] == "expire:408459@CDM_SIGNAL", list(spoken))
     deferTimers = nil
@@ -2529,8 +2744,8 @@ do
     loadTooltip({ iconA }, { iconB })
     iconA:TriggerAuraAppliedAlert()
     iconB:TriggerAuraAppliedAlert()
-    iconA:TriggerAuraRemovedAlert()
-    iconB:TriggerAuraRemovedAlert()
+    removeAura(iconA)
+    removeAura(iconB)
     check("CDM (b): the buff in two viewers announces each transition once", #spoken == 2, list(spoken))
 
     -- (b2) times come from the Cooldown Manager first: its instance and duration drive the nodes, no estimate.
@@ -2542,8 +2757,8 @@ do
         now = 100
         ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 7, duration = 30 })
         local run = ns.markerTimers:Get("dp", DP_ALT)
-        check("CDM time: the duration read from the Cooldown Manager is used, not estimated",
-            run and run.duration == 30 and run.estimated == false and run.start == 100,
+        check("CDM time: duration without a readable end starts an estimated timeline",
+            run and run.duration == 30 and run.estimated == true and run.start == 100,
             run and (tostring(run.duration) .. "/" .. tostring(run.estimated) .. "/" .. tostring(run.start)))
         now = 110
         ns._Aura.cdmSignal({ DP_ALT }, true, { instanceID = 7, duration = 30 })
@@ -2582,23 +2797,25 @@ do
         now = 400
         local bar = newIcon(101)
         bar.auraInstanceID, bar.isActive = 55, true
-        local essential = { cooldownID = 101, auraInstanceID = 55, cooldownDuration = 30, wasSetFromAura = true }
+        local essential = { cooldownID = 101, cooldownDuration = 30, wasSetFromAura = false }
         function essential:RefreshData() end
         local plain = { cooldownID = 103, cooldownDuration = 1.5 }
         function plain:RefreshData() end
         EssentialCooldownViewer = newViewer({ essential, plain })
         loadTooltip(nil, { bar })
+        essential.auraInstanceID, essential.wasSetFromAura = 55, true
+        essential:RefreshData()
         bar:TriggerAuraAppliedAlert()
         local barRun = ns.markerTimers:Get("dp", DP_ALT)
         check("CDM time: a buff bar takes the duration from the Essential frame of the same aura instance",
-            barRun and barRun.duration == 30 and barRun.estimated == false, barRun and tostring(barRun.duration))
+            barRun and barRun.duration == 30 and barRun.estimated == true, barRun and tostring(barRun.duration))
         setup(rule)
         deferTimers = {}
         essential.auraInstanceID = 56
         essential:RefreshData()
         local frameRun = ns.markerTimers:Get("dp", DP_ALT)
         check("CDM time: an Essential frame lit by an aura signals with its own duration",
-            frameRun and frameRun.duration == 30 and frameRun.estimated == false, frameRun and tostring(frameRun.duration))
+            frameRun and frameRun.duration == 30 and frameRun.estimated == true, frameRun and tostring(frameRun.duration))
         setup(rule)
         deferTimers = {}
         ns.markerTimers:Reset()
@@ -2613,7 +2830,7 @@ do
     setup(dpRule({ 123 }))
     icon = withIcon(101)
     icon:TriggerAuraAppliedAlert()
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     check("CDM (c): no rule with that ID, nothing happens", #spoken == 0 and #tts == 0, list(spoken))
     local disabled = dpRule()
     disabled.enabled = false
@@ -2642,7 +2859,7 @@ do
     icon.wasSetFromAura = false
     icon:OnActiveStateChanged()
     check("CDM (d): a hidden state read does not end a lit icon", list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     check("CDM (d): the real end still announces", #spoken == 2, list(spoken))
     setup(dpRule())
     icon = withIcon(101)
@@ -2676,7 +2893,7 @@ do
             icon:TriggerAuraAppliedAlert()
             icon.isActive = true
             icon:OnActiveStateChanged()
-            icon:TriggerAuraRemovedAlert()
+            removeAura(icon)
         end)
         check("CDM (e): " .. label, #spoken == 0 and #problems == 0, list(spoken) .. " / " .. list(problems))
     end
@@ -2696,7 +2913,7 @@ do
             icon:TriggerAuraAppliedAlert()
             icon.isActive = true
             icon:OnActiveStateChanged()
-            icon:TriggerAuraRemovedAlert()
+            removeAura(icon)
         end) and #spoken == 0, list(spoken))
     C_CooldownViewer = { GetCooldownViewerCooldownInfo = function(cooldownID) return infos[cooldownID] end }
     check("CDM (e): no viewer at all loads without errors", loadTooltip(nil, nil))
@@ -2751,7 +2968,7 @@ do
     icon:OnActiveStateChanged()
     check("CDM dedupe: the normal path announces once, the icon adds nothing",
         list(spoken) == "apply:408459@UNIT_AURA", list(spoken))
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     check("CDM dedupe: a readable aura's end is left to the normal path", #spoken == 1, list(spoken))
     -- readability is decided by the same rules as processAura: never-secret stays with it, hidden fields do not
     setup(dpRule())
@@ -2775,7 +2992,7 @@ do
     icon:TriggerAuraAppliedAlert()
     check("CDM dedupe: own cast first, the icon adds no second application",
         list(spoken) == "apply:408459@UNIT_SPELLCAST_SUCCEEDED", list(spoken))
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     check("CDM dedupe: the icon still announces the end", #spoken == 2 and spoken[2] == "expire:408459@CDM_SIGNAL", list(spoken))
     setup(dpRule())
     icon = withIcon(101)
@@ -2792,7 +3009,7 @@ do
     live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = 5, expirationTime = 20 }
     ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
     combat, live[DP_ALT], now = true, nil, 12
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     check("CDM expiry: an early end of a readable aura stays silent", list(spoken) == "apply:408459@UNIT_AURA", list(spoken))
     icon:TriggerAuraAppliedAlert()
     check("CDM expiry: the state was cleared, a new application announces", #spoken == 2, list(spoken))
@@ -2802,8 +3019,8 @@ do
     live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = 5, expirationTime = 20 }
     ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
     combat, live[DP_ALT], now = true, nil, 20
-    icon:TriggerAuraRemovedAlert()
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
+    removeAura(icon)
     check("CDM expiry: the natural end of a readable aura announces once",
         list(spoken) == "apply:408459@UNIT_AURA|expire:408459@CDM_SIGNAL", list(spoken))
 
@@ -2815,7 +3032,7 @@ do
     live[DP_ALT] = { spellId = DP_ALT, auraInstanceID = 5, expirationTime = 100 }
     ns._Aura.processAura(DP_ALT, false, "UNIT_AURA")
     live[DP_ALT], now = nil, 12
-    icon:TriggerAuraRemovedAlert()
+    removeAura(icon)
     check("CDM expiry: early removal after a readable refresh is not mistaken for natural expiry",
         list(spoken) == "apply:408459@CDM_SIGNAL", list(spoken))
 
@@ -2824,6 +3041,7 @@ do
     C_CooldownViewer, BuffIconCooldownViewer, BuffBarCooldownViewer = saved.cooldownViewer, saved.icons, saved.bars
     ns.DebugReport.NoteNotify, ns._Aura.queueTTS, C_Timer, WoWraVoxDB = saved.notify, saved.queue, saved.timer, saved.db
     C_Secrets, C_Spell, C_UnitAuras, InCombatLockdown = saved.secrets, saved.spell, saved.auras, saved.combat
+    WoWraVoxProfilesDB = saved.profilesDB
     ns._Aura.secrecyCache = {}
     ns._Aura.clearActiveState()
 end
@@ -2874,6 +3092,8 @@ do
     rule[key .. "Message"] = "Halfway"
     WoWraVoxDB = WoWraVoxDB or {}
     local savedAuras = WoWraVoxDB.auras
+    local savedSettings = WoWraVoxDB.settings
+    WoWraVoxDB.settings = { estimatedAuraWarnings = true }
     WoWraVoxDB.auras = { rule }
     now = 100
     ns.updateMarkerTimers(rule, 4242, "active", 120, 20, false)
@@ -2895,6 +3115,7 @@ do
     ns.updateMarkerTimers(rule, 4242, "inactive", nil, nil, false)
     check("aura gone cancels the marker", timers[1].cancelled == true)
     WoWraVoxDB.auras = savedAuras
+    WoWraVoxDB.settings = savedSettings
 end
 
 -- Spell ranks: a rule that tracks all ranks matches another rank of its spell; without the flag only the ID itself

@@ -273,6 +273,11 @@ check("the expiration word wins over an expiration media tone",
     registered(109, REMOVED) ~= nil and registered(109, REMOVED).file == fallback.categorySoundFiles.offensive)
 refresh({ rule({ expireCategory = "none", expireSoundEnabled = true, expireSoundMediaName = "Foo", spellIDs = { 110 } }) })
 check("no expiration word: the media tone stays", registered(110, REMOVED) ~= nil and registered(110, REMOVED).file == mediaPaths.Foo)
+refresh({ rule({ expireCategory = "none", expireSoundEnabled = true, expireSoundMediaName = "Foo", spellIDs = { 111, 112 } }) })
+check("a group's end tone is not registered per aura (replacing a seal would play it)",
+    registered(111, REMOVED) == nil and registered(112, REMOVED) == nil)
+refresh({ rule({ expireCategory = "none", expireSoundEnabled = true, expireSoundMediaName = "Foo", oneEffect = true, spellIDs = { 113 } }) })
+check("a one-effect rule's end tone is not registered natively", registered(113, REMOVED) == nil)
 
 neverSecret = {}
 refresh({ rule({ applyEnabled = true, expireEnabled = true }) })
