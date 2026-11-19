@@ -4,7 +4,7 @@ WoWraVox is a World of Warcraft addon (Retail and WoW Forever beta) for buffs an
 
 ## Version
 
-Current stable version: **0.15.0**.
+Current stable version: **0.16.0**.
 
 Retail compatibility: **12.1.5** (interface **120105**).
 

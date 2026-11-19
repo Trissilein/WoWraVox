@@ -1,6 +1,9 @@
 # WoWraVox
 
-## Unreleased
+## 0.16.0
+
+- Added a timeline editor for aura and cooldown rules. Set start, end and intermediate announcements by percentage or seconds, with per-spell timing overrides for groups.
+- Track all spell ranks on Forever or select the ranks to track per trigger. Added a single Cooldown trigger with Start and Ready outputs for spell and item rules.
 
 - Aura warning timers now use readable Cooldown Manager remaining time or player-aura expiry values. Seconds-before-end warnings schedule from exact expiry even when total duration is unavailable. Refreshes cancel and replace the prior schedule; learned durations remain optional estimates.
 - Paladins get a detected-class section for the All Seals preset. The add-rule picker uses a two-column layout and a compact import action; voice controls resize for narrow windows.

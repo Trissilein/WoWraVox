@@ -10,6 +10,8 @@ It started as a small announcer for big raid buffs and defensive cooldowns. It g
 
 - **Auras:** announces buffs and debuffs on you when they start and when they end: a buff that comes in, a buff that runs out. Works for any aura you pick, such as procs, defensives, potions or raid buffs.
 - **Cooldowns and items:** tells you when a trinket or other equipped item, a spell or a returning charge is ready again. Trinket rules can follow the slot, so swapping trinkets needs no new rule.
+- **Timeline:** set announcements at the start, end or intermediate points of an aura or cooldown. Choose percentages or seconds and fine-tune individual spells in a group.
+- **Session recorder:** record casts, aura changes and cooldown starts with the record button or /wvrec. Use recorded effects to build aura groups.
 - **Voice:** speaks with the built-in WoW Text-to-Speech. Voice, speed and volume are set per rule.
 - **On-screen text:** show your own message with your own font, size, colour and position.
 - **Sounds:** play a short sound or a spoken category word, also for effects the game hides from addons in combat.
